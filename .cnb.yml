@@ -9,3 +9,19 @@ $:
         - name: verify CXLMemSim source checkout
           script: |
             bash scripts/verify_source_checkout.sh 4910c7cf2c813698952857f20988ac66dae7fe9d
+
+  api_trigger_component_build_publish:
+    - git:
+        submodules: false
+        lfs: false
+      services:
+        - docker
+      runner:
+        cpus: 4
+      docker:
+        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:a9a4f5d978cdaaf2617733de4fd85fd813a2b344631827701de2a34d18397181
+      stages:
+        - name: build test and publish CXLMemSim component
+          script: |
+            bash scripts/build_component.sh
+            bash scripts/publish_component.sh .work/component/payload

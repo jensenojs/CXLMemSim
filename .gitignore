@@ -21,3 +21,4 @@ README_*
 *.ko
 real_*
 *.so*
+.work/

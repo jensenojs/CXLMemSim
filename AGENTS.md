@@ -3,7 +3,7 @@
 CXLMemSim 是 CMake 驱动的 C++20/C 混合项目，核心代码在 `src/` 和 `include/`。
 主路径是 CXL 内存模拟服务器：QEMU 或测试客户端把 CXL.mem 请求送到 `cxlmemsim_server`，服务器维护容量、延迟、拓扑、DCD/GFAM 和一致性状态。
 Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver API shim，通过 BAR2 MMIO 协议和修改后的 QEMU CXL Type 2 设备通信。
-本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。位于QEMU Camp工作区内时，项目目标、正确性层级、本地/CNB分工和当前工程入口继续由工作区根`AGENTS.md`定义；独立checkout则从CNB `gevico.online/jensen/cxl-lab`仓的有效控制ref `refs/heads/fixed-1p5b-control`读取跨仓spec和exact source lock。Type-2 QEMU的权威remote和exact commit由该控制ref确定，不在本文件复制。
+本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。本机活跃开发checkout位于`/home/jensen/Projects/cxl-cloud/cxlmemsim/`；项目目标、正确性层级、本地/CNB分工和当前工程入口由`/home/jensen/Projects/cxl-memsim/AGENTS.md`定义。CNB独立checkout则从`gevico.online/jensen/cxl-lab`仓的有效控制ref `refs/heads/fixed-1p5b-control`读取跨仓spec和exact source lock。Type-2 QEMU的权威remote和exact commit由该控制ref确定，不在本文件复制。
 
 ## Cloud Source Authority
 
@@ -11,17 +11,19 @@ Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver 
 
 本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
+组件构建、三文件payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`。该制品只携带CXLMemSim拥有的server与guest shim；运行时系统动态库由消费该制品的固定镜像提供。
+
 ## Role in the Project
 
-本仓在教程链路中负责CXLMemSim server、backing store、guest CUDA shim和guest侧BAR2协议定义。进入本仓工作前，先从当前checkout适用的项目权威确定证据层和工程入口，再说明改动作用于server、guest shim、共享协议还是测试。工作区中的`../CXLAgent/`只提供guest侧CXL sysfs/trace/snapshot观测和driver参考，不是当前Type-2 kernel主线。
+本仓在教程链路中负责CXLMemSim server、backing store、guest CUDA shim和guest侧BAR2协议定义。进入本仓工作前，先从当前checkout适用的项目权威确定证据层和工程入口，再说明改动作用于server、guest shim、共享协议还是测试。本机`/home/jensen/Projects/cxl-memsim/CXLAgent/`只提供guest侧CXL sysfs/trace/snapshot观测和driver参考，不是当前Type-2 kernel主线；CNB checkout不假设该目录存在。
 
 Type-2 smoke 的观察点：启动参数含 `-device cxl-type2`，QEMU 日志出现 Type-2 realized，guest 能看到 `/dev/cxl/cache0`、`/dev/cxl/mem0`、`/dev/cxl_gpu0`。
-`../CXLAgent/` 可以在 guest rootfs 准备好后作为观测工具：先用 topology/snapshot 类命令确认 cache/mem/sysfs/iomem，再考虑 memory snapshot 和 tracepoint；当前诊断 initramfs 不适合直接跑完整 `cxlagent`。
+本机`/home/jensen/Projects/cxl-memsim/CXLAgent/`可以在guest rootfs准备好后作为观测工具：先用topology/snapshot类命令确认cache/mem/sysfs/iomem，再考虑memory snapshot和tracepoint；当前诊断initramfs不适合直接跑完整`cxlagent`。
 
 ## Notes
 
-项目根目录的 `../Note/` 连接到 Obsidian 子目录，后续学习笔记、实验记录、复盘和技术报告材料优先写在那里，并遵照 `/home/jensen/obsidian/AGENTS.md`。
-写笔记前先判断笔记回答的问题：理论、概念边界、机制模型写到 `../Note/计算机体系结构/` 或 `../Note/计算机系统模拟/`；操作流程、环境复现、benchmark 日志、踩坑复盘写到 `../Note/实践笔记/`。
+本机实验笔记位于`/home/jensen/Projects/cxl-memsim/Note/`，并遵照`/home/jensen/obsidian/AGENTS.md`。CNB checkout只产出原始任务日志和机器证据，不假设Obsidian目录存在。
+写笔记前先判断笔记回答的问题：理论、概念边界、机制模型写到本机`Note/计算机体系结构/`或`Note/计算机系统模拟/`；操作流程、环境复现、benchmark日志、踩坑复盘写到本机`Note/实践笔记/`。
 粗糙捕获可以先保留日期或“草稿”标记，但不能把 AI 对话直接粘贴成成稿；成稿要有自己的 thesis，首次出现的 GPU/QEMU/CXL/Concordia 概念要给最小解释，关键外部链接要摘出能支撑判断的内容。
 Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路径。
 
@@ -64,7 +66,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - `include/distributed_server.h` / `src/distributed_server.cpp` — distributed memory server, SHM/TCP/RDMA transports, remote read/write forwarding, and calibration paths.
 - `include/dcd_gfam.h` / `src/dcd_gfam.cpp` — Dynamic Capacity Device and GFAM allocation/access-control model; `tests/test_dcd_gfam.cpp` is the smallest executable test.
 - `qemu_integration/launch_qemu_vcs_dcd_gfam.sh` — maintained QEMU launcher for Zettai VCS, Type 3 DCD/GFAM, and optional Type 2 endpoint.
-- `../CXLAgent/` — CXL Type-2 guest observability/reference repo: Python `cxlagent` discovers `/sys/bus/cxl/devices/cache*` and `mem*`, can trigger `init_wbinvd`, read CXL windows through `/dev/mem`, and parse CXL tracepoints.
+- `/home/jensen/Projects/cxl-memsim/CXLAgent/` — 本机CXL Type-2 guest observability/reference repo；不属于本组件CNB checkout输入。
 - `qemu_integration/smoke_type2_endpoint.sh` — bounded host-side Type 2 QEMU realization smoke test.
 - `qemu_integration/guest_libcuda/libcuda.c` and `qemu_integration/guest_libcuda/cxl_gpu_cmd.h` — guest CUDA Driver API shim and BAR2 command/register contract.
 - `script/build_qemu.sh` — builds the CXL-capable QEMU submodule using the vendored Meson wheel.
