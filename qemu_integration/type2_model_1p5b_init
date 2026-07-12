@@ -1,0 +1,61 @@
+#!/usr/bin/bash
+set -x
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev || mount -t tmpfs tmpfs /dev
+sleep 3
+
+echo '=== kernel ==='
+uname -a
+echo '=== dmesg cxl/type2 ==='
+dmesg | grep -Ei 'cxl|type.?2|8086|0d92|cache device|memory device' || true
+
+mkdir -p /mnt/payload
+PAYLOAD_DEV=''
+for dev in /dev/vda /dev/vdb /dev/sda /dev/sdb; do
+  if [ -b "$dev" ] && mount -t ext4 -o ro "$dev" /mnt/payload; then
+    PAYLOAD_DEV="$dev"
+    break
+  fi
+done
+
+echo "=== PAYLOAD_DEV=$PAYLOAD_DEV ==="
+if [ -z "$PAYLOAD_DEV" ]; then
+  echo '=== TYPE2_MODEL_GUEST_PAYLOAD_MOUNT_FAIL ==='
+  poweroff -f || true
+  while true; do sleep 60; done
+fi
+
+export LD_LIBRARY_PATH=/mnt/payload/lib:/usr/lib64:/lib64
+export CXL_CUDA_DEBUG=1
+
+MODEL=/mnt/payload/model/sweep-next-edit-1.5b.q8_0.v2.gguf
+RUNNER=/mnt/payload/bin/llama-completion
+PROMPT='Say that you have started in one short sentence.'
+MODEL_STDOUT=/tmp/type2-model.stdout
+MODEL_STDERR=/tmp/type2-model.stderr
+
+echo '=== TYPE2_MODEL_RUN_BEGIN ==='
+"$RUNNER" -m "$MODEL" -p "$PROMPT" -n 4 -c 128 -t 2 -ngl 1 --temp 0.0 >"$MODEL_STDOUT" 2>"$MODEL_STDERR"
+RUN_RC=$?
+set +x
+echo '=== TYPE2_MODEL_STDOUT_BEGIN ==='
+cat "$MODEL_STDOUT"
+echo '=== TYPE2_MODEL_STDOUT_END ==='
+echo '=== TYPE2_MODEL_STDERR_BEGIN ==='
+cat "$MODEL_STDERR"
+echo '=== TYPE2_MODEL_STDERR_END ==='
+set -x
+echo "=== TYPE2_MODEL_RUN_RC=$RUN_RC ==="
+if grep -q 'ggml_cuda_init: found 1 CUDA devices' "$MODEL_STDERR" &&
+   grep -q 'offloaded 1/29 layers to GPU' "$MODEL_STDERR" &&
+   ! grep -Eq 'ggml_cuda_init: failed|no usable GPU' "$MODEL_STDERR" &&
+   [ "$RUN_RC" -eq 0 ]; then
+    echo '=== TYPE2_MODEL_1P5B_SMOKE_PASS ==='
+else
+    echo '=== TYPE2_MODEL_1P5B_SMOKE_FAIL ==='
+fi
+sleep 2
+poweroff -f || true
+while true; do sleep 60; done

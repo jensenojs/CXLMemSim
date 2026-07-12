@@ -11,7 +11,7 @@ ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 SHIM_DIR=${SHIM_DIR:-"$ROOT/CXLMemSim/qemu_integration/guest_libcuda"}
 SHIM_LIB=${SHIM_LIB:-"$SHIM_DIR/libcuda.so.1"}
 SHIM_CFLAGS=${SHIM_CFLAGS:-'-O2 -Wall -Wextra'}
-RUNNER=${RUNNER:-"$ROOT/CXLMemSim/build/run-scripts/run_type2_model_smoke.sh"}
+RUNNER=${RUNNER:-"$ROOT/CXLMemSim/qemu_integration/run_type2_local_stack.sh"}
 
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)-guest-probe}
 PORT=${PORT:-10255}
