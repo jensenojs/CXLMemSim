@@ -7,11 +7,38 @@ Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver 
 
 ## Cloud Source Authority
 
-本仓的CNB副本在权威切换前只是candidate，GitHub `jensenojs/CXLMemSim`仍是primary。只有当`cxl-lab`有效控制ref的远端tip成为cutover commit，并且该commit把`manifests/sources.lock.json#sources.cxlmemsim`指向CNB migration commit时，CNB `gevico.online/jensen/cxlmemsim`才成为primary，GitHub转为同SHA公开镜像。
+CNB `gevico.online/jensen/cxlmemsim`已经由`cxl-lab@f063e234779f5af7ecfc97d954925cd931132e73`切换为primary，GitHub `jensenojs/CXLMemSim`保存同SHA公开镜像。新提交先进入CNB primary，再把同一SHA推送GitHub；`cxl-lab`有效控制ref `refs/heads/fixed-1p5b-control`只在需要消费新提交时更新exact source lock。
 
 本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
 组件构建、三文件payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`。该制品只携带CXLMemSim拥有的server与guest shim；运行时系统动态库由消费该制品的固定镜像提供。
+
+## Cloud Build and Artifact
+
+云端组件输入按消费关系组织：
+
+```text
+manifests/build-profile.json
+  定义本组件编译器、CMake开关、测试并行度和预期文件图
+
+manifests/artifact-contract.json
+  定义CNB源码/registry位置、固定toolchain digest、ORAS身份和OCI media type
+
+.cnb.yml
+  选择固定toolchain image并调用仓内build/publish/fresh-pull脚本
+
+scripts/build_component.sh
+  只构建和测试CXLMemSim，生成三文件payload
+
+scripts/component_artifact.py + publish_component.sh + pull_component.sh
+  生成文件事实、确定性归档、按digest发布与安全恢复
+```
+
+工具环境缺少系统header、编译器或归档CLI时，在`cxl-lab/.ide/Dockerfile`从当前固定digest派生最小增量层。新镜像通过CNB任务后，先在`cxl-lab`原子更新`manifests/sources.lock.json#toolchain_image`、active `.cnb.yml`镜像和README，再更新本仓`manifests/artifact-contract.json#toolchain_image`与组件pipeline镜像。不得在组件源码中添加fallback来掩盖工具镜像缺口，也不得用tag替代digest。
+
+本组件的CMake开关、目标或payload shape变化只修改`manifests/build-profile.json`和本组件spec。toolchain升级与profile变化是两条不同的输入轴，任务日志必须同时记录exact source commit和toolchain digest。
+
+CNB任务接管时至少核对repo、branch、exact SHA、event、runner CPU/内存、toolchain digest、当前stage和首个失败日志。build成功标记、CTest、payload文件事实、OCI digest与fresh pull各自只证明对应层级；缺少后续marker时不得传播为Type-2、固定1.5B或Kimi成功。
 
 ## Role in the Project
 
@@ -86,9 +113,9 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 
 ## Definition of Done
 
-- Run `CC=clang CXX=clang++ cmake -S . -B build-clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW` after build-system or dependency changes on this Fedora workstation.
+- 云端组件build、四个CTest、shim构建、OCI发布与fresh pull必须由本仓CNB任务在exact SHA和固定toolchain digest上执行；Fedora只运行shell/Python/JSON/YAML检查与小型归档测试。
+- 若任务明确要求本地验证C++源码，先确认内存预算，再用不超过`--parallel 2`的隔离build目录；本地结果不替代CNB artifact证据。
 - Use `CC=gcc-13 CXX=g++-13 ...` only when `gcc-13`/`g++-13` are installed and the goal is to reproduce GitHub Actions exactly.
-- Run `cmake --build build-clang --parallel 4` before handing off C/C++ changes on this workstation.
 - Run `ctest --test-dir build-clang --output-on-failure` for simulator/server changes; at minimum run the CTest target nearest to the touched code.
 - Run `clang-format --dry-run --Werror $(git ls-files '*.[ch]' '*.cc' '*.cpp' '*.hpp')` before committing formatted languages.
 - Run `make -C qemu_integration/guest_libcuda` after guest CUDA shim or `cxl_gpu_cmd.h` changes.

@@ -23,5 +23,23 @@ $:
       stages:
         - name: build test and publish CXLMemSim component
           script: |
-            bash scripts/build_component.sh
-            bash scripts/publish_component.sh .work/component/payload
+           bash scripts/build_component.sh
+           bash scripts/publish_component.sh .work/component/payload
+
+  api_trigger_component_fresh_pull:
+    - git:
+        submodules: false
+        lfs: false
+      services:
+        - docker
+      runner:
+        cpus: 2
+      docker:
+        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      stages:
+        - name: verify artifact contract and fresh pull CXLMemSim component
+          script: |
+            python3 -m unittest discover -s tests -p 'test_component_artifact.py'
+            bash scripts/pull_component.sh \
+              manifests/artifacts/cxlmemsim.candidate.json \
+              .work/restored/cxlmemsim
