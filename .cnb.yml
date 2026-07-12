@@ -1,10 +1,9 @@
 $:
-  git:
-    submodules: false
-    lfs: false
-
   api_trigger_source_probe:
-    - runner:
+    - git:
+        submodules: false
+        lfs: false
+      runner:
         cpus: 2
       stages:
         - name: verify CXLMemSim source checkout

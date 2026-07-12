@@ -70,6 +70,8 @@ CNB candidate checkout
 
 probe不得补取历史、初始化submodule、构建代码、清理现场、写源码树或修改Git状态。完整ref map由fresh mirror验证承担，probe只证明CNB任务实际checkout的提交与clean状态。
 
+CNB的`git`配置属于Pipeline字段，必须放在`api_trigger_source_probe`对应的pipeline对象内。把它放在`$`分支层不会覆盖默认值；失败任务`cnb-kf8-1jtamf1ni`因此仍执行了递归submodule初始化并被主动停止。有效配置必须在pipeline内明确写出`submodules: false`与`lfs: false`。参考[CNB语法手册的Pipeline Git配置](https://docs.cnb.cool/zh/build/grammar.html#pipeline-git)。
+
 ## 候选build profile
 
 `manifests/build-profile.json`必须与迁移前`cxl-lab/manifests/sources.lock.json#build_profiles.cxlmemsim-release`对象规范化后完全一致。此次只迁移声明所有权，不改变编译器、CMake开关、目标或输出图。首次真实组件build通过前，它不是已验证构建身份。
