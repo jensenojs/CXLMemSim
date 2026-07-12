@@ -3,11 +3,17 @@
 CXLMemSim 是 CMake 驱动的 C++20/C 混合项目，核心代码在 `src/` 和 `include/`。
 主路径是 CXL 内存模拟服务器：QEMU 或测试客户端把 CXL.mem 请求送到 `cxlmemsim_server`，服务器维护容量、延迟、拓扑、DCD/GFAM 和一致性状态。
 Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver API shim，通过 BAR2 MMIO 协议和修改后的 QEMU CXL Type 2 设备通信。
-项目目标、正确性层级、本地/CNB分工和当前工程入口以`../AGENTS.md`为唯一权威。本文件只定义CXLMemSim源码仓的构建、代码约束和Type-2局部边界。Type-2 QEMU主线是`/home/jensen/Projects/qemu-cxl-type2/`；其权威remote和exact commit由根项目文档及当前source lock确定，不在本文件复制。
+本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。位于QEMU Camp工作区内时，项目目标、正确性层级、本地/CNB分工和当前工程入口继续由工作区根`AGENTS.md`定义；独立checkout则从CNB `gevico.online/jensen/cxl-lab`仓的有效控制ref `refs/heads/fixed-1p5b-control`读取跨仓spec和exact source lock。Type-2 QEMU的权威remote和exact commit由该控制ref确定，不在本文件复制。
+
+## Cloud Source Authority
+
+本仓的CNB副本在权威切换前只是candidate，GitHub `jensenojs/CXLMemSim`仍是primary。只有当`cxl-lab`有效控制ref的远端tip成为cutover commit，并且该commit把`manifests/sources.lock.json#sources.cxlmemsim`指向CNB migration commit时，CNB `gevico.online/jensen/cxlmemsim`才成为primary，GitHub转为同SHA公开镜像。
+
+本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
 ## Role in the Project
 
-本仓在教程链路中负责CXLMemSim server、backing store、guest CUDA shim和guest侧BAR2协议定义。进入本仓工作前，先从根`AGENTS.md`确定当前证据层和工程入口，再说明改动作用于server、guest shim、共享协议还是测试。`../CXLAgent/`只提供guest侧CXL sysfs/trace/snapshot观测和driver参考，不是当前Type-2 kernel主线。
+本仓在教程链路中负责CXLMemSim server、backing store、guest CUDA shim和guest侧BAR2协议定义。进入本仓工作前，先从当前checkout适用的项目权威确定证据层和工程入口，再说明改动作用于server、guest shim、共享协议还是测试。工作区中的`../CXLAgent/`只提供guest侧CXL sysfs/trace/snapshot观测和driver参考，不是当前Type-2 kernel主线。
 
 Type-2 smoke 的观察点：启动参数含 `-device cxl-type2`，QEMU 日志出现 Type-2 realized，guest 能看到 `/dev/cxl/cache0`、`/dev/cxl/mem0`、`/dev/cxl_gpu0`。
 `../CXLAgent/` 可以在 guest rootfs 准备好后作为观测工具：先用 topology/snapshot 类命令确认 cache/mem/sysfs/iomem，再考虑 memory snapshot 和 tracepoint；当前诊断 initramfs 不适合直接跑完整 `cxlagent`。

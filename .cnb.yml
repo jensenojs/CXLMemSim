@@ -1,0 +1,12 @@
+$:
+  git:
+    submodules: false
+    lfs: false
+
+  api_trigger_source_probe:
+    - runner:
+        cpus: 2
+      stages:
+        - name: verify CXLMemSim source checkout
+          script: |
+            bash scripts/verify_source_checkout.sh 4910c7cf2c813698952857f20988ac66dae7fe9d

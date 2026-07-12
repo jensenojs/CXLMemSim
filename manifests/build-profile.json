@@ -1,0 +1,51 @@
+{
+  "source": "cxlmemsim",
+  "target_arch": "amd64",
+  "compiler": {
+    "cc": "clang",
+    "cxx": "clang++"
+  },
+  "cmake": {
+    "build_type": "Release",
+    "policy_default_cmp0091": "NEW",
+    "definitions": {
+      "CXLMEMSIM_BUILD_MICROBENCHMARKS": "OFF",
+      "CXLMEMSIM_ENABLE_RDMA": "OFF",
+      "CXLMEMSIM_ENABLE_SLUGALLOCATOR": "OFF"
+    },
+    "targets": [
+      "cxlmemsim_server"
+    ],
+    "parallel": 4
+  },
+  "guest_shim": {
+    "make_targets": [
+      "libcuda.so.1",
+      "libcuda.so"
+    ],
+    "cc": "clang",
+    "cflags": [
+      "-O2",
+      "-Wall",
+      "-Wextra"
+    ]
+  },
+  "outputs": [
+    {
+      "path": "bin/cxlmemsim_server",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/libcuda.so.1",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/libcuda.so",
+      "type": "symlink",
+      "mode": "0777",
+      "link_target": "libcuda.so.1"
+    }
+  ]
+}
