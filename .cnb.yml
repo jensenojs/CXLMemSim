@@ -19,7 +19,7 @@ $:
       runner:
         cpus: 4
       docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:a9a4f5d978cdaaf2617733de4fd85fd813a2b344631827701de2a34d18397181
+        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
       stages:
         - name: build test and publish CXLMemSim component
           script: |
