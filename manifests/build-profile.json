@@ -16,7 +16,7 @@
     "targets": [
       "cxlmemsim_server"
     ],
-    "parallel": 2
+    "parallel": 4
   },
   "guest_shim": {
     "make_targets": [

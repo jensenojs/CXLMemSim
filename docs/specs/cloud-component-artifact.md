@@ -81,7 +81,7 @@ CNB exact source checkout
 - `CC=clang`、`CXX=clang++`；
 - Release与`CMP0091=NEW`；
 - microbenchmarks、RDMA、SlugAllocator全部关闭；
-- 首次真实build并行度为2，避免本地13GB调试机与未知CNB runner内存边界在候选profile阶段引入OOM扰动；
+- 并行度为4，保持迁移时冻结的候选profile；该值只由CNB固定构建任务验证，本地Fedora完整构建不参与冻结云端资源边界；
 - guest shim只构建`libcuda.so.1`和`libcuda.so`；
 - `outputs`完整定义预期文件路径、类型、mode和symlink target。
 
