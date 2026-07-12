@@ -11,7 +11,7 @@ CNB `gevico.online/jensen/cxlmemsim`已经由`cxl-lab@f063e234779f5af7ecfc97d954
 
 本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
-组件构建、三文件payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`。该制品只携带CXLMemSim拥有的server与guest shim；运行时系统动态库由消费该制品的固定镜像提供。
+组件构建、三文件payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`，首次真实构建与失败链见`docs/evidence/cloud-component-artifact.md`。该制品只携带CXLMemSim拥有的server与guest shim；运行时系统动态库由消费该制品的固定镜像提供。
 
 ## Cloud Build and Artifact
 
