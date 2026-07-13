@@ -3,11 +3,11 @@
 CXLMemSim 是 CMake 驱动的 C++20/C 混合项目，核心代码在 `src/` 和 `include/`。
 主路径是 CXL 内存模拟服务器：QEMU 或测试客户端把 CXL.mem 请求送到 `cxlmemsim_server`，服务器维护容量、延迟、拓扑、DCD/GFAM 和一致性状态。
 Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver API shim，通过 BAR2 MMIO 协议和修改后的 QEMU CXL Type 2 设备通信。
-本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。本机活跃开发checkout位于`/home/jensen/Projects/cxl-cloud/cxlmemsim/`；项目目标、正确性层级、本地/CNB分工和当前工程入口由`/home/jensen/Projects/cxl-memsim/AGENTS.md`定义。CNB独立checkout则从`gevico.online/jensen/cxl-lab`仓的有效控制ref `refs/heads/fixed-1p5b-control`读取跨仓spec和exact source lock。Type-2 QEMU的权威remote和exact commit由该控制ref确定，不在本文件复制。
+本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。本机活跃开发checkout位于`/home/jensen/Projects/cxl-cloud/cxlmemsim/`；项目目标、正确性层级和本地/CNB分工由`/home/jensen/Projects/cxl-memsim/AGENTS.md`定义。跨仓exact source组合从`cxl-lab/manifests/sources.lock.json`读取，不在本文件复制。
 
 ## Cloud Source Authority
 
-CNB `gevico.online/jensen/cxlmemsim`已经由`cxl-lab@f063e234779f5af7ecfc97d954925cd931132e73`切换为primary，GitHub `jensenojs/CXLMemSim`保存同SHA公开镜像。新提交先进入CNB primary，再把同一SHA推送GitHub；`cxl-lab`有效控制ref `refs/heads/fixed-1p5b-control`只在需要消费新提交时更新exact source lock。
+CNB `gevico.online/jensen/cxlmemsim`是项目primary，GitHub `jensenojs/CXLMemSim`保存同SHA公开镜像。新提交先进入CNB primary，再把同一SHA推送GitHub；运行任务只消费`cxl-lab` source lock声明的exact source。
 
 本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
