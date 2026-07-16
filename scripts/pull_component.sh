@@ -70,6 +70,11 @@ ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
 ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
 ldd "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-ldd.txt"
 ldd "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-ldd.txt"
+readelf -d "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-readelf-dynamic.txt"
+for library in liblz4.so.1 libzstd.so.1; do
+    grep -F "Shared library: [$library]" "$WORK/shim-readelf-dynamic.txt" >/dev/null
+    grep -F "$library =>" "$WORK/shim-ldd.txt" >/dev/null
+done
 nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' >"$WORK/tiny-library-symbol.txt"
 "$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
 [[ -L $OUTPUT/guest/libcuda.so ]]

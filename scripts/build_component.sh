@@ -105,6 +105,10 @@ ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
 ldd "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-ldd.txt"
 ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
 ldd "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-ldd.txt"
+for library in liblz4.so.1 libzstd.so.1; do
+    grep -F "Shared library: [$library]" "$EVIDENCE/shim-readelf-dynamic.txt" >/dev/null
+    grep -F "$library =>" "$EVIDENCE/shim-ldd.txt" >/dev/null
+done
 nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' \
     >"$EVIDENCE/tiny-library-symbol.txt"
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"

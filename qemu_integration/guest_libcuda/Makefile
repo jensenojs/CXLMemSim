@@ -27,7 +27,9 @@ test-binaries: $(CUDA_TESTS) $(BAR_TESTS) $(TRANSPORT_TEST)
 tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)
 
 $(CUDA_SHIM): libcuda.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_transport.c -ldl $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_transport.c -ldl \
+		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
+		$(LDFLAGS) $(LDLIBS)
 
 $(CUDA_LINK): $(CUDA_SHIM)
 	ln -sf $(CUDA_SHIM) $@
