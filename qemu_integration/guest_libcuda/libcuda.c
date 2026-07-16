@@ -31,6 +31,11 @@
 #include "cxl_gpu_cmd.h"
 #include "cxl_gpu_transport.h"
 
+/* These symbols are linked into the shim's declared runtime dependency set. */
+extern int LZ4_decompress_safe(const char *src, char *dst, int compressed_size, int dst_capacity);
+extern size_t ZSTD_decompress(void *dst, size_t dst_capacity, const void *src, size_t compressed_size);
+extern unsigned int ZSTD_isError(size_t code);
+
 /* CUDA types */
 typedef int CUresult;
 typedef int CUdevice;
@@ -1590,22 +1595,8 @@ static CUresult cudart_decode_fatbin_file(const CudartFatbinFileHeader *file, un
 
     size_t decoded_size = 0;
     if (lz4_compressed) {
-        typedef int (*lz4_decompress_safe_t)(const char *, char *, int, int);
-        void *lz4 = dlopen("liblz4.so.1", RTLD_NOW | RTLD_LOCAL);
-        lz4_decompress_safe_t decompress =
-            lz4 ? (lz4_decompress_safe_t)dlsym(lz4, "LZ4_decompress_safe") : NULL;
-        if (!decompress) {
-            fprintf(stderr, "[CXL-CUDA]   library module decode reject: liblz4.so.1 unavailable: %s\n",
-                    dlerror());
-            if (lz4) {
-                dlclose(lz4);
-            }
-            free(decoded);
-            return CUDA_ERROR_NOT_SUPPORTED;
-        }
-        int result = decompress((const char *)payload, (char *)decoded, (int)file->compressed_size,
-                                (int)capacity);
-        dlclose(lz4);
+        int result = LZ4_decompress_safe((const char *)payload, (char *)decoded, (int)file->compressed_size,
+                                         (int)capacity);
         if (result <= 0 || (size_t)result > capacity) {
             fprintf(stderr, "[CXL-CUDA]   library module decode reject: LZ4 result=%d\n", result);
             free(decoded);
@@ -1613,23 +1604,8 @@ static CUresult cudart_decode_fatbin_file(const CudartFatbinFileHeader *file, un
         }
         decoded_size = (size_t)result;
     } else {
-        typedef size_t (*zstd_decompress_t)(void *, size_t, const void *, size_t);
-        typedef unsigned int (*zstd_is_error_t)(size_t);
-        void *zstd = dlopen("libzstd.so.1", RTLD_NOW | RTLD_LOCAL);
-        zstd_decompress_t decompress = zstd ? (zstd_decompress_t)dlsym(zstd, "ZSTD_decompress") : NULL;
-        zstd_is_error_t is_error = zstd ? (zstd_is_error_t)dlsym(zstd, "ZSTD_isError") : NULL;
-        if (!decompress || !is_error) {
-            fprintf(stderr, "[CXL-CUDA]   library module decode reject: libzstd.so.1 unavailable: %s\n",
-                    dlerror());
-            if (zstd) {
-                dlclose(zstd);
-            }
-            free(decoded);
-            return CUDA_ERROR_NOT_SUPPORTED;
-        }
-        size_t result = decompress(decoded, capacity, payload, file->compressed_size);
-        unsigned int failed = is_error(result);
-        dlclose(zstd);
+        size_t result = ZSTD_decompress(decoded, capacity, payload, file->compressed_size);
+        unsigned int failed = ZSTD_isError(result);
         if (failed || result > capacity) {
             fprintf(stderr, "[CXL-CUDA]   library module decode reject: Zstd result=%zu failed=%u\n", result,
                     failed);
