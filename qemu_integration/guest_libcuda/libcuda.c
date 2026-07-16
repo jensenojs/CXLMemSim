@@ -174,6 +174,8 @@ typedef struct {
     void *option_values[CUDART_LIBRARY_RECORD_OPTION_CAP];
 } CudartLibraryRecord;
 
+CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
+
 static CudartLibraryRecord g_cudart_library_records[CUDART_LIBRARY_RECORD_CAP];
 static unsigned int g_cudart_library_record_count = 0;
 
@@ -1957,12 +1959,61 @@ CUresult cuLibraryEnumerateKernels(CUkernel *kernels, unsigned int numKernels, C
 }
 
 CUresult cuKernelGetFunction(CUfunction *pFunc, CUkernel kernel) {
-    fprintf(stderr, "[CXL-CUDA] cuKernelGetFunction(kernel=%p) -> CUDA_ERROR_NOT_SUPPORTED\n", kernel);
     if (!pFunc || !kernel) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     *pFunc = NULL;
-    return CUDA_ERROR_NOT_SUPPORTED;
+
+    Dl_info kernel_info;
+    if (!dladdr(kernel, &kernel_info) || !kernel_info.dli_fbase || !kernel_info.dli_sname) {
+        fprintf(stderr,
+                "[CXL-CUDA] cuKernelGetFunction(kernel=%p) -> CUDA_ERROR_NOT_SUPPORTED "
+                "reason=kernel-symbol-unavailable\n",
+                kernel);
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    CUfunction resolved = NULL;
+    unsigned int matches = 0;
+    for (unsigned int i = 0; i < g_cudart_library_record_count; i++) {
+        CudartLibraryRecord *record = &g_cudart_library_records[i];
+        Dl_info code_info;
+        if (!record->alive || !record->module ||
+            !dladdr(record->code, &code_info) || code_info.dli_fbase != kernel_info.dli_fbase) {
+            continue;
+        }
+
+        CUfunction candidate = NULL;
+        CUresult result = cuModuleGetFunction(&candidate, record->module, kernel_info.dli_sname);
+        if (result == CUDA_ERROR_NOT_FOUND) {
+            continue;
+        }
+        if (result != CUDA_SUCCESS) {
+            fprintf(stderr,
+                    "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s library_id=%u module=%p) "
+                    "-> error=%d\n",
+                    kernel, kernel_info.dli_sname, record->id, record->module, result);
+            return result;
+        }
+        resolved = candidate;
+        matches++;
+    }
+
+    if (matches != 1) {
+        fprintf(stderr,
+                "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s owner=%s) -> "
+                "CUDA_ERROR_NOT_SUPPORTED reason=module-match-count count=%u\n",
+                kernel, kernel_info.dli_sname,
+                kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", matches);
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+
+    *pFunc = resolved;
+    fprintf(stderr,
+            "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s owner=%s) -> function=%p CUDA_SUCCESS\n",
+            kernel, kernel_info.dli_sname,
+            kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", resolved);
+    return CUDA_SUCCESS;
 }
 
 CUresult cuKernelGetAttribute(int *pi, CUfunction_attribute attrib, CUkernel kernel) {
@@ -2091,19 +2142,21 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
       if (!hmod) {
           return CUDA_ERROR_INVALID_HANDLE;
       }
-      reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hmod));
-
     size_t len = strlen(name) + 1;
     if (len > CXL_GPU_DATA_SIZE) {
         return CUDA_ERROR_INVALID_VALUE;
     }
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hmod));
     data_write(0, name, len);
 
-      CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET);
-      if (err == CUDA_SUCCESS) {
-          *hfunc = (CUfunction)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
-          DLOG("  func=%p\n", *hfunc);
-      }
+    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET);
+    if (err == CUDA_SUCCESS) {
+        *hfunc = (CUfunction)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
+        DLOG("  func=%p\n", *hfunc);
+    }
+    cmd_unlock();
     return err;
 }
 
