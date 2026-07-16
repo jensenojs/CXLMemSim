@@ -23,13 +23,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 #include "cxl_gpu_cmd.h"
+#include "cxl_gpu_transport.h"
 
 /* CUDA types */
 typedef int CUresult;
@@ -138,20 +138,13 @@ typedef struct {
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR 75
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR 76
 
-/* CXL Type 2 device info */
-#define CXL_TYPE2_VENDOR_ID 0x8086
-#define CXL_TYPE2_DEVICE_ID 0x0d92
 #define CXL_MAX_KERNEL_ARGS 64
 
 /* Global state */
-static volatile uint32_t *g_regs = NULL;
-static volatile uint8_t *g_data = NULL;
+static CxlGpuTransport g_transport = CXL_GPU_TRANSPORT_INITIALIZER;
 static int g_initialized = 0;
-static int g_pci_fd = -1;
-static size_t g_bar_size = 0;
 static CUcontext g_context = NULL;
 static CUcontext g_primary_context = NULL;
-static char g_pci_bdf[64] = "";
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLIBRY" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL;  /* "CXDKERNL" diagnostic placeholder */
@@ -203,19 +196,19 @@ static int g_debug = 0;
 static inline uint64_t maybe_bar4_offset(uint64_t value);
 static inline uint64_t bar4_offset_of(void *host_ptr);
 
-/* Register access helpers */
-static inline uint32_t reg_read32(uint32_t offset) { return *(volatile uint32_t *)((uint8_t *)g_regs + offset); }
+/* The CUDA shim and cxl-gpu-case share the transport implementation.  These
+ * wrappers preserve the existing call sites while keeping BAR2 ownership in
+ * cxl_gpu_transport.c. */
+static inline uint32_t reg_read32(uint32_t offset) { return cxl_gpu_transport_read32(&g_transport, offset); }
 
-static inline uint64_t reg_read64(uint32_t offset) { return *(volatile uint64_t *)((uint8_t *)g_regs + offset); }
+static inline uint64_t reg_read64(uint32_t offset) { return cxl_gpu_transport_read64(&g_transport, offset); }
 
 static inline void reg_write32(uint32_t offset, uint32_t value) {
-    *(volatile uint32_t *)((uint8_t *)g_regs + offset) = value;
-    __sync_synchronize();
+    cxl_gpu_transport_write32(&g_transport, offset, value);
 }
 
 static inline void reg_write64(uint32_t offset, uint64_t value) {
-    *(volatile uint64_t *)((uint8_t *)g_regs + offset) = value;
-    __sync_synchronize();
+    cxl_gpu_transport_write64(&g_transport, offset, value);
 }
 
 /* QEMU stores module/function handles as zero-based array indices. CUDA opaque
@@ -226,38 +219,11 @@ static inline void *cxl_gpu_handle_from_id(uint64_t id) { return (void *)(uintpt
 static inline uint64_t cxl_gpu_id_from_handle(const void *handle) { return (uint64_t)(uintptr_t)handle - 1; }
 
 static inline void data_write(size_t offset, const void *src, size_t len) {
-    if (offset + len <= CXL_GPU_DATA_SIZE) {
-        const uint8_t *s = (const uint8_t *)src;
-        volatile uint8_t *d = g_data + offset;
-        size_t i = 0;
-        /* BAR2 accepts 8-byte accesses. Moving full words avoids one KVM MMIO
-         * exit per byte when loading compressed CUDA modules. */
-        for (; i + sizeof(uint64_t) <= len; i += sizeof(uint64_t)) {
-            uint64_t value;
-            memcpy(&value, s + i, sizeof(value));
-            *(volatile uint64_t *)(void *)(d + i) = value;
-        }
-        for (; i < len; i++) {
-            d[i] = s[i];
-        }
-        __sync_synchronize();
-    }
+    cxl_gpu_transport_data_write(&g_transport, offset, src, len);
 }
 
 static inline void data_read(size_t offset, void *dst, size_t len) {
-    if (offset + len <= CXL_GPU_DATA_SIZE) {
-        __sync_synchronize();
-        uint8_t *d = (uint8_t *)dst;
-        volatile uint8_t *s = g_data + offset;
-        size_t i = 0;
-        for (; i + sizeof(uint64_t) <= len; i += sizeof(uint64_t)) {
-            uint64_t value = *(volatile uint64_t *)(const void *)(s + i);
-            memcpy(d + i, &value, sizeof(value));
-        }
-        for (; i < len; i++) {
-            d[i] = s[i];
-        }
-    }
+    cxl_gpu_transport_data_read(&g_transport, offset, dst, len);
 }
 
 /* Cross-process lock for command serialization.
@@ -265,168 +231,24 @@ static inline void data_read(size_t offset, void *dst, size_t len) {
  * their full command sequences (write params  write cmd  poll status  read result).
  * Callers that write params before execute_cmd must call cmd_lock()/cmd_unlock(). */
 static void cmd_lock(void) {
-    if (g_pci_fd >= 0)
-        flock(g_pci_fd, LOCK_EX);
+    if (cxl_gpu_transport_lock(&g_transport) != 0)
+        DLOG("BAR2 command lock failed: %s\n", strerror(errno));
 }
 
 static void cmd_unlock(void) {
-    if (g_pci_fd >= 0)
-        flock(g_pci_fd, LOCK_UN);
+    if (cxl_gpu_transport_unlock(&g_transport) != 0)
+        DLOG("BAR2 command unlock failed: %s\n", strerror(errno));
 }
 
 /* Execute command and wait for completion.
  * Caller MUST hold cmd_lock() if params were written before this call. */
 static CUresult execute_cmd(uint32_t cmd) {
-    reg_write32(CXL_GPU_REG_CMD, cmd);
-
-    /* Wait for completion */
-    int timeout = 1000000;
-    while (timeout > 0) {
-        uint32_t status = reg_read32(CXL_GPU_REG_CMD_STATUS);
-        if (status == CXL_GPU_CMD_STATUS_COMPLETE) {
-            return reg_read32(CXL_GPU_REG_CMD_RESULT);
-        }
-        if (status == CXL_GPU_CMD_STATUS_ERROR) {
-            return reg_read32(CXL_GPU_REG_CMD_RESULT);
-        }
-        timeout--;
-    }
-
-    return CUDA_ERROR_UNKNOWN;
+    return (CUresult)cxl_gpu_transport_execute(&g_transport, cmd);
 }
 
 /* Find and map CXL Type 2 device */
 static int find_and_map_device(void) {
-    DIR *dir;
-    struct dirent *entry;
-    char path[256];
-    char buf[32];
-    int fd;
-    uint16_t vendor, device;
-
-    dir = opendir("/sys/bus/pci/devices");
-    if (!dir) {
-        DLOG("Cannot open /sys/bus/pci/devices\n");
-        return -1;
-    }
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.')
-            continue;
-
-        /* Check vendor ID */
-        snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/vendor", entry->d_name);
-        fd = open(path, O_RDONLY);
-        if (fd < 0)
-            continue;
-        if (read(fd, buf, sizeof(buf)) <= 0) {
-            close(fd);
-            continue;
-        }
-        close(fd);
-        vendor = strtol(buf, NULL, 16);
-
-        /* Check device ID */
-        snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/device", entry->d_name);
-        fd = open(path, O_RDONLY);
-        if (fd < 0)
-            continue;
-        if (read(fd, buf, sizeof(buf)) <= 0) {
-            close(fd);
-            continue;
-        }
-        close(fd);
-        device = strtol(buf, NULL, 16);
-
-        if (vendor == CXL_TYPE2_VENDOR_ID && device == CXL_TYPE2_DEVICE_ID) {
-            DLOG("Found CXL Type 2 device at %s\n", entry->d_name);
-            snprintf(g_pci_bdf, sizeof(g_pci_bdf), "%s", entry->d_name);
-
-            /* Enable device */
-            snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/enable", entry->d_name);
-            fd = open(path, O_WRONLY);
-            if (fd >= 0) {
-                write(fd, "1", 1);
-                close(fd);
-            }
-
-            /* Get BAR2 resource info */
-            snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource", entry->d_name);
-            FILE *fp = fopen(path, "r");
-            if (fp) {
-                uint64_t start, end, flags;
-                /* Skip BAR0 and BAR1 */
-                for (int i = 0; i < 2; i++) {
-                    if (fscanf(fp, "0x%lx 0x%lx 0x%lx\n", &start, &end, &flags) != 3) {
-                        break;
-                    }
-                }
-                /* Read BAR2 */
-                if (fscanf(fp, "0x%lx 0x%lx 0x%lx", &start, &end, &flags) == 3) {
-                    g_bar_size = end - start + 1;
-                    DLOG("BAR2: start=0x%lx end=0x%lx size=%zu\n", start, end, g_bar_size);
-                }
-                fclose(fp);
-            }
-
-            /* Map BAR2 */
-            snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource2", entry->d_name);
-            g_pci_fd = open(path, O_RDWR | O_SYNC);
-            if (g_pci_fd < 0) {
-                DLOG("Cannot open %s: %s\n", path, strerror(errno));
-                closedir(dir);
-                return -1;
-            }
-
-            if (g_bar_size == 0) {
-                g_bar_size = CXL_GPU_CMD_REG_SIZE;
-            }
-
-            void *map = mmap(NULL, g_bar_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_pci_fd, 0);
-            if (map == MAP_FAILED) {
-                DLOG("Cannot mmap BAR2: %s\n", strerror(errno));
-                close(g_pci_fd);
-                g_pci_fd = -1;
-                closedir(dir);
-                return -1;
-            }
-
-            g_regs = (volatile uint32_t *)map;
-            g_data = (volatile uint8_t *)map + CXL_GPU_DATA_OFFSET;
-
-            /* Verify magic number */
-            uint32_t magic = reg_read32(CXL_GPU_REG_MAGIC);
-            if (magic != CXL_GPU_MAGIC) {
-                DLOG("Invalid magic: 0x%x (expected 0x%x)\n", magic, CXL_GPU_MAGIC);
-                munmap(map, g_bar_size);
-                close(g_pci_fd);
-                g_pci_fd = -1;
-                g_regs = NULL;
-                closedir(dir);
-                return -1;
-            }
-
-            DLOG("Device mapped successfully, magic=0x%x version=0x%x\n", magic, reg_read32(CXL_GPU_REG_VERSION));
-
-            /* Check device ready */
-            uint32_t status = reg_read32(CXL_GPU_REG_STATUS);
-            if (!(status & CXL_GPU_STATUS_READY)) {
-                DLOG("Device not ready, status=0x%x\n", status);
-                munmap(map, g_bar_size);
-                close(g_pci_fd);
-                g_pci_fd = -1;
-                g_regs = NULL;
-                continue; /* try next device */
-            }
-
-            closedir(dir);
-            return 0;
-        }
-    }
-
-    closedir(dir);
-    DLOG("CXL Type 2 device not found\n");
-    return -1;
+    return cxl_gpu_transport_open(&g_transport, g_debug);
 }
 
 
@@ -2622,7 +2444,7 @@ CUresult cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
         return CUDA_ERROR_INVALID_VALUE;
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    snprintf(pciBusId, len, "%s", g_pci_bdf[0] ? g_pci_bdf : "0000:00:00.0");
+    snprintf(pciBusId, len, "%s", g_transport.pci_bdf[0] ? g_transport.pci_bdf : "0000:00:00.0");
     return CUDA_SUCCESS;
 }
 
@@ -2630,7 +2452,7 @@ CUresult cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId) {
     DLOG("cuDeviceGetByPCIBusId(%s)\n", pciBusId ? pciBusId : "(null)");
     if (!dev || !pciBusId)
         return CUDA_ERROR_INVALID_VALUE;
-    if (g_pci_bdf[0] && strcmp(pciBusId, g_pci_bdf) != 0)
+    if (g_transport.pci_bdf[0] && strcmp(pciBusId, g_transport.pci_bdf) != 0)
         return CUDA_ERROR_INVALID_DEVICE;
     *dev = 0;
     return CUDA_SUCCESS;
@@ -3044,7 +2866,7 @@ static volatile uint8_t *ensure_bar4(void) {
         if (n <= 0)
             continue;
         buf[n] = '\0';
-        if ((uint16_t)strtol(buf, NULL, 16) != CXL_TYPE2_VENDOR_ID) {
+        if ((uint16_t)strtol(buf, NULL, 16) != CXL_GPU_PCI_VENDOR_ID) {
             g_bar4_size = 0;
             continue;
         }
@@ -3058,7 +2880,7 @@ static volatile uint8_t *ensure_bar4(void) {
         if (n <= 0)
             continue;
         buf[n] = '\0';
-        if ((uint16_t)strtol(buf, NULL, 16) != CXL_TYPE2_DEVICE_ID) {
+        if ((uint16_t)strtol(buf, NULL, 16) != CXL_GPU_PCI_DEVICE_ID) {
             g_bar4_size = 0;
             continue;
         }
@@ -3125,7 +2947,7 @@ int cxlCoherentAlloc(uint64_t size, void **host_ptr) {
     if (!bar4)
         return 3;
 
-    if (g_regs) {
+    if (g_transport.regs) {
         cmd_lock();
         reg_write64(CXL_GPU_REG_PARAM0, size);
         CUresult r = execute_cmd(CXL_GPU_CMD_COHERENT_ALLOC);
@@ -3150,7 +2972,7 @@ int cxlCoherentAlloc(uint64_t size, void **host_ptr) {
 }
 
 int cxlCoherentFree(void *host_ptr) {
-    if (g_regs && host_ptr) {
+    if (g_transport.regs && host_ptr) {
         uint64_t offset = bar4_offset_of(host_ptr);
 
         cmd_lock();
@@ -3182,7 +3004,7 @@ static inline uint64_t bar4_offset_of(void *host_ptr) {
 }
 
 int cxlSetBias(void *host_ptr, uint64_t size, int bias_mode) {
-    if (!g_regs)
+    if (!g_transport.regs)
         return 1;
     uint64_t addr = bar4_offset_of(host_ptr);
     cmd_lock();
@@ -3195,7 +3017,7 @@ int cxlSetBias(void *host_ptr, uint64_t size, int bias_mode) {
 }
 
 int cxlGetBias(void *host_ptr, int *bias_mode) {
-    if (!g_regs || !bias_mode)
+    if (!g_transport.regs || !bias_mode)
         return 1;
     uint64_t addr = bar4_offset_of(host_ptr);
     cmd_lock();
@@ -3207,7 +3029,7 @@ int cxlGetBias(void *host_ptr, int *bias_mode) {
 }
 
 int cxlBiasFlip(void *host_ptr, uint64_t size, int new_bias) {
-    if (!g_regs)
+    if (!g_transport.regs)
         return 1;
     uint64_t addr = bar4_offset_of(host_ptr);
     cmd_lock();
@@ -3237,7 +3059,7 @@ typedef struct {
 int cxlGetCoherencyStats(CXLCoherencyStats *stats) {
     if (!stats)
         return 1;
-    if (!g_regs) {
+    if (!g_transport.regs) {
         memset(stats, 0, sizeof(*stats));
         return 2;
     }
@@ -3269,7 +3091,7 @@ int cxlGetCoherencyStats(CXLCoherencyStats *stats) {
 }
 
 int cxlResetCoherencyStats(void) {
-    if (!g_regs)
+    if (!g_transport.regs)
         return 1;
     cmd_lock();
     CUresult r = execute_cmd(CXL_GPU_CMD_COH_RESET_STATS);
@@ -3301,13 +3123,6 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
         close(g_bar4_fd);
         g_bar4_fd = -1;
     }
-    if (g_regs) {
-        munmap((void *)g_regs, g_bar_size);
-        g_regs = NULL;
-    }
-    if (g_pci_fd >= 0) {
-        close(g_pci_fd);
-        g_pci_fd = -1;
-    }
+    cxl_gpu_transport_close(&g_transport);
     g_initialized = 0;
 }

@@ -67,6 +67,8 @@ python3 "$ROOT/scripts/component_artifact.py" verify-archive \
     2>"$WORK/server-help.stderr"
 ldd "$OUTPUT/bin/cxlmemsim_server" >"$WORK/server-ldd.txt"
 ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
+ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
+"$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
 [[ -L $OUTPUT/guest/libcuda.so ]]
 [[ $(readlink "$OUTPUT/guest/libcuda.so") == libcuda.so.1 ]]
 

@@ -21,7 +21,9 @@
   "guest_shim": {
     "make_targets": [
       "libcuda.so.1",
-      "libcuda.so"
+      "libcuda.so",
+      "cxl-gpu-case",
+      "test"
     ],
     "cc": "clang",
     "cflags": [
@@ -46,6 +48,11 @@
       "type": "symlink",
       "mode": "0777",
       "link_target": "libcuda.so.1"
+    },
+    {
+      "path": "guest/cxl-gpu-case",
+      "type": "file",
+      "mode": "0755"
     }
   ]
 }

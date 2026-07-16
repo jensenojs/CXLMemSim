@@ -44,11 +44,12 @@ CXLMemSim/
 payload/
 ├── bin/cxlmemsim_server
 └── guest/
+    ├── cxl-gpu-case
     ├── libcuda.so.1
     └── libcuda.so -> libcuda.so.1
 ```
 
-payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的三个文件；运行与fresh pull环境负责提供系统库。manifest记录ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`和`cxlmemsim_server --help`，让缺失依赖直接失败。
+payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的四项；运行与fresh pull环境负责提供系统库。manifest记录ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`、`cxlmemsim_server --help`和case控制CLI的参数fixture，让缺失依赖和非法输入直接失败。
 
 ## 核心调用链
 
@@ -61,7 +62,7 @@ CNB exact source checkout
       四个always-on CTest
       guest shim Makefile
       server --help
-      生成三文件payload
+      生成四项payload
   → component_artifact.py create-manifest
   → publish_component.sh
       deterministic tar + zstd
@@ -86,7 +87,7 @@ CNB exact source checkout
 - Release与`CMP0091=NEW`；
 - microbenchmarks、RDMA、SlugAllocator全部关闭；
 - 并行度为4，保持迁移时冻结的候选profile；该值只由CNB固定构建任务验证，本地Fedora完整构建不参与冻结云端资源边界；
-- guest shim只构建`libcuda.so.1`和`libcuda.so`；
+- guest构建`libcuda.so.1`、`libcuda.so`和`cxl-gpu-case`，并运行共享transport与CLI非法参数fixture；
 - `outputs`完整定义预期文件路径、类型、mode和symlink target。
 
 构建任务额外构建并运行`test_dcd_gfam`、`test_rob`、`test_mem_stall`和`test_bandwidth_model`。测试二进制不进入payload。
@@ -148,9 +149,9 @@ build/publish任务只输出候选digest和证据，不直接修改Git。候选d
 
 ## 最小接口约束
 
-本任务可以决定CXLMemSim的构建命令、测试目标和三文件payload。它不得捆绑系统动态库，不得初始化十五个submodule，不得恢复或构建QEMU、Concordia、kernel、llama或guest，不得修改CUDA/BAR2协议，不得用artifact证据关闭Type-2或模型任务。
+本任务可以决定CXLMemSim的构建命令、测试目标和四项payload。它不得捆绑系统动态库，不得初始化十五个submodule，不得恢复或构建QEMU、Concordia、kernel、llama或guest，不得用artifact证据关闭Type-2或模型任务。BAR2协议变化由对应跨仓设计和双头一致性验收支配。
 
-下游可依赖的最小事实是：给定正式`repository@digest`，固定puller会恢复上述三文件图，并证明server在声明工具镜像内可装载、四个局部CTest在build任务通过。下游仍需自行证明该server和shim进入实际Type-2运行路径。
+下游可依赖的最小事实是：给定正式`repository@digest`，固定puller会恢复上述四项文件图，并证明server、shim和case控制CLI在声明工具镜像内可装载、四个局部CTest与guest fixture在build任务通过。下游仍需自行证明这些文件进入实际Type-2运行路径。
 
 ## 停止与回滚
 
@@ -163,7 +164,7 @@ build/publish任务只输出候选digest和证据，不直接修改Git。候选d
 - 目标结构符合上述ASCII树，组件build和通用publish/pull职责分离；
 - `bash -n`通过，Python单元测试覆盖普通文件、symlink、篡改、绝对路径、`..`、hardlink、重复路径和symlink祖先；
 - fresh CNB checkout按profile构建server和shim，四个CTest与server help通过；
-- payload恰好三项，类型、mode和link target与profile一致；
+- payload恰好四项，类型、mode和link target与profile一致；
 - 两次本地归档SHA256一致；
 - artifact发布到`docker.cnb.cool/gevico.online/jensen/cxlmemsim`并取得digest；
 - 新CNB任务只按digest恢复，manifest、归档、ELF依赖、symlink和server help均通过；
