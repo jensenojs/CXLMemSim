@@ -30,7 +30,13 @@
       "-O2",
       "-Wall",
       "-Wextra"
-    ]
+    ],
+    "tiny_cuda": {
+      "target": "tiny-probe",
+      "nvcc": "nvcc",
+      "host_cxx": "g++",
+      "arch": "sm_89"
+    }
   },
   "outputs": [
     {
@@ -51,6 +57,16 @@
     },
     {
       "path": "guest/cxl-gpu-case",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/cuda-runtime-dlopen-kernel-probe",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/libtiny_cuda.so",
       "type": "file",
       "mode": "0755"
     }

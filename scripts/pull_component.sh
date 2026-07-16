@@ -68,6 +68,9 @@ python3 "$ROOT/scripts/component_artifact.py" verify-archive \
 ldd "$OUTPUT/bin/cxlmemsim_server" >"$WORK/server-ldd.txt"
 ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
 ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
+ldd "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-ldd.txt"
+ldd "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-ldd.txt"
+nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' >"$WORK/tiny-library-symbol.txt"
 "$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
 [[ -L $OUTPUT/guest/libcuda.so ]]
 [[ $(readlink "$OUTPUT/guest/libcuda.so") == libcuda.so.1 ]]

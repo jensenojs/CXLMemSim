@@ -60,30 +60,57 @@ print(p["cc"])
 print(" ".join(p["cflags"]))
 for target in p["make_targets"]:
     print(target)
+tiny=p["tiny_cuda"]
+print(tiny["target"])
+print(tiny["nvcc"])
+print(tiny["host_cxx"])
+print(tiny["arch"])
 PY
 )
 readonly GUEST_CC=${guest[0]}
 readonly GUEST_CFLAGS=${guest[1]}
-readonly GUEST_TARGETS=("${guest[@]:2}")
+readonly TINY_FIELD_COUNT=4
+readonly GUEST_TARGET_COUNT=$((${#guest[@]} - 2 - TINY_FIELD_COUNT))
+(( GUEST_TARGET_COUNT > 0 ))
+readonly GUEST_TARGETS=("${guest[@]:2:GUEST_TARGET_COUNT}")
+readonly TINY_TARGET=${guest[-4]}
+readonly TINY_NVCC=${guest[-3]}
+readonly TINY_HOST_CXX=${guest[-2]}
+readonly TINY_ARCH=${guest[-1]}
 readonly GUEST_DIR=${GUEST_SOURCE}/qemu_integration/guest_libcuda
 
 make -C "$GUEST_DIR" CC="$GUEST_CC" CFLAGS="$GUEST_CFLAGS" "${GUEST_TARGETS[@]}" \
     2>&1 | tee "$EVIDENCE/guest-shim-build.log"
+make -C "$GUEST_DIR" CC="$GUEST_CC" CFLAGS="$GUEST_CFLAGS" \
+    NVCC="$TINY_NVCC" NVCC_HOST_CXX="$TINY_HOST_CXX" CUDA_ARCH="$TINY_ARCH" "$TINY_TARGET" \
+    2>&1 | tee "$EVIDENCE/tiny-cuda-build.log"
 
 install -m 0755 "$BUILD/cxlmemsim_server" "$PAYLOAD/bin/cxlmemsim_server"
 install -m 0755 "$GUEST_DIR/libcuda.so.1" "$PAYLOAD/guest/libcuda.so.1"
 install -m 0755 "$GUEST_DIR/cxl-gpu-case" "$PAYLOAD/guest/cxl-gpu-case"
+install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
+    "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe"
+install -m 0755 "$GUEST_DIR/libtiny_cuda.so" "$PAYLOAD/guest/libtiny_cuda.so"
 ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
 
 python3 scripts/component_artifact.py verify-profile --payload "$PAYLOAD" --profile "$PROFILE"
 readelf -d "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
+    >"$EVIDENCE/tiny-probe-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-readelf-dynamic.txt"
 ldd "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-ldd.txt"
 ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
 ldd "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-ldd.txt"
+ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
+ldd "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-ldd.txt"
+nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' \
+    >"$EVIDENCE/tiny-library-symbol.txt"
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
-sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/guest/libcuda.so.1" "$PAYLOAD/guest/cxl-gpu-case" \
+sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/guest/libcuda.so.1" \
+    "$PAYLOAD/guest/cxl-gpu-case" "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
+    "$PAYLOAD/guest/libtiny_cuda.so" \
     >"$EVIDENCE/payload-sha256.txt"
 
 printf 'component_build=pass\n'
