@@ -41,7 +41,7 @@ $(TRANSPORT_TEST): test_cxl_gpu_transport.c cxl_gpu_transport.c cxl_gpu_transpor
 	$(CC) $(CFLAGS) -o $@ test_cxl_gpu_transport.c cxl_gpu_transport.c $(LDFLAGS) $(LDLIBS)
 
 $(TINY_CUDA_LIBRARY): tiny_cuda_fatbin.cu
-	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -shared -Xcompiler=-fPIC -o $@ $<
+	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -cudart=shared -shared -Xcompiler=-fPIC -o $@ $<
 
 $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
 	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -o $@ $< -ldl
