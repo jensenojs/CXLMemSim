@@ -143,6 +143,9 @@ typedef struct {
 #define CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z 7
 #define CU_DEVICE_ATTRIBUTE_WARP_SIZE 10
 #define CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT 16
+#define CU_DEVICE_ATTRIBUTE_PCI_BUS_ID 33
+#define CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID 34
+#define CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID 50
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR 75
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR 76
 
@@ -704,6 +707,9 @@ typedef struct {
     int32_t pci_device;
 } IntegrityDeviceHashInfo;
 
+CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
+CUresult cuDeviceGetUuid(void *uuid, CUdevice dev);
+
 static const uint8_t INTEGRITY_MIXING_TABLE[256] = {
     0x29, 0x2e, 0x43, 0xc9, 0xa2, 0xd8, 0x7c, 0x01, 0x3d, 0x36, 0x54, 0xa1, 0xec, 0xf0, 0x06, 0x13,
     0x62, 0xa7, 0x05, 0xf3, 0xc0, 0xc7, 0x73, 0x8c, 0x98, 0x93, 0x2b, 0xd9, 0xbc, 0x4c, 0x82, 0xca,
@@ -777,18 +783,25 @@ static void integrity_pass5(uint8_t state[66], uint64_t out[2]) {
     memcpy(&out[1], state + sizeof(uint64_t), sizeof(uint64_t));
 }
 
-static IntegrityDeviceHashInfo integrity_device_hash_info(void) {
-    IntegrityDeviceHashInfo info;
-    memset(&info, 0, sizeof(info));
-    info.guid.bytes[0] = 0xce;
-    info.guid.bytes[1] = 0x10;
-    info.guid.bytes[15] = 0;
-    /* cuDeviceGetAttribute currently reports 0 for PCI domain/bus/device IDs,
-     * so the integrity input must use the same observable values. */
-    info.pci_domain = 0;
-    info.pci_bus = 0;
-    info.pci_device = 0;
-    return info;
+static CUresult integrity_device_hash_info(IntegrityDeviceHashInfo *info) {
+    if (!info) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    memset(info, 0, sizeof(*info));
+    CUresult err = cuDeviceGetUuid(&info->guid, 0);
+    if (err != CUDA_SUCCESS) {
+        return err;
+    }
+    err = cuDeviceGetAttribute(&info->pci_bus, CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, 0);
+    if (err != CUDA_SUCCESS) {
+        return err;
+    }
+    err = cuDeviceGetAttribute(&info->pci_device, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, 0);
+    if (err != CUDA_SUCCESS) {
+        return err;
+    }
+    return cuDeviceGetAttribute(&info->pci_domain, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, 0);
 }
 
 static int cxl_cuda_effective_driver_version(void) {
@@ -865,7 +878,11 @@ static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_
          (void *)pass3.integrity_check_table, sizeof(INTEGRITY_CHECK_TABLE), pass3.fn_address);
     integrity_hash_pass(state, &pass3, sizeof(pass3), 0);
 
-    IntegrityDeviceHashInfo device_info = integrity_device_hash_info();
+    IntegrityDeviceHashInfo device_info;
+    CUresult device_info_err = integrity_device_hash_info(&device_info);
+    if (device_info_err != CUDA_SUCCESS) {
+        return device_info_err;
+    }
     DLOG("INTEGRITY_CHECK.input device_count=1 uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x pci=%d:%d:%d\n",
          device_info.guid.bytes[0], device_info.guid.bytes[1], device_info.guid.bytes[2], device_info.guid.bytes[3],
          device_info.guid.bytes[4], device_info.guid.bytes[5], device_info.guid.bytes[6], device_info.guid.bytes[7],

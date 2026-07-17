@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef int CUresult;
 typedef int CUdevice;
@@ -17,6 +18,10 @@ typedef struct {
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
+
+#define CU_DEVICE_ATTRIBUTE_PCI_BUS_ID 33
+#define CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID 34
+#define CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID 50
 
 void cxl_cuda_test_reset(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
@@ -50,6 +55,9 @@ CUresult cuGetExportTable(const void **table, const CUuuid *uuid);
 static uint32_t commands[16];
 static unsigned int command_count;
 static uint64_t issued_token = 41;
+static int identity_pci_bus = 131;
+static int identity_pci_device;
+static int identity_pci_domain;
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -84,9 +92,22 @@ static CUresult fake_execute(uint32_t command) {
         cxl_cuda_test_write_result(0, UINT64_C(0x300000000));
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_GET_DEVICE_ATTRIBUTE:
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 97);
-        cxl_cuda_test_write_result(0, 49152);
-        return CUDA_SUCCESS;
+        switch ((int)cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0)) {
+        case 97:
+            cxl_cuda_test_write_result(0, 49152);
+            return CUDA_SUCCESS;
+        case CU_DEVICE_ATTRIBUTE_PCI_BUS_ID:
+            cxl_cuda_test_write_result(0, (uint64_t)(int64_t)identity_pci_bus);
+            return CUDA_SUCCESS;
+        case CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID:
+            cxl_cuda_test_write_result(0, (uint64_t)(int64_t)identity_pci_device);
+            return CUDA_SUCCESS;
+        case CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID:
+            cxl_cuda_test_write_result(0, (uint64_t)(int64_t)identity_pci_domain);
+            return CUDA_SUCCESS;
+        default:
+            return CUDA_ERROR_NOT_SUPPORTED;
+        }
     case CXL_GPU_CMD_CTX_DESTROY:
         return CUDA_SUCCESS;
     default:
@@ -226,7 +247,36 @@ static int test_integrity_export_table_shape(void) {
     return 0;
 }
 
+static int test_integrity_uses_runtime_device_identity(void) {
+    typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
+    const void *table = NULL;
+    uint64_t first[2] = {0, 0};
+    uint64_t second[2] = {0, 0};
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    identity_pci_device = 0;
+    identity_pci_domain = 0;
+
+    CHECK(cuGetExportTable(&table, &integrity_check_uuid) == CUDA_SUCCESS);
+    integrity_check_t callback = (integrity_check_t)((const void *const *)table)[1];
+
+    identity_pci_bus = 131;
+    CHECK(callback(12092, UINT64_C(1784320000), first) == CUDA_SUCCESS);
+    identity_pci_bus = 132;
+    CHECK(callback(12092, UINT64_C(1784320000), second) == CUDA_SUCCESS);
+
+    CHECK(command_count == 6);
+    for (unsigned int index = 0; index < command_count; index++) {
+        CHECK(commands[index] == CXL_GPU_CMD_GET_DEVICE_ATTRIBUTE);
+    }
+    CHECK(memcmp(first, second, sizeof(first)) != 0);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
-           test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape();
+           test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
+           test_integrity_uses_runtime_device_identity();
 }
