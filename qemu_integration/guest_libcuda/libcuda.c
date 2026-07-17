@@ -806,8 +806,19 @@ static int cxl_cuda_effective_driver_version(void) {
 }
 
 static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_t result[2]) {
-    DLOG("INTEGRITY_CHECK.integrity_check(version=%u, unix_seconds=%llu)\n", version,
-         (unsigned long long)unix_seconds);
+    DLOG("INTEGRITY_CHECK.integrity_check(version=%u, unix_seconds=%llu)\n", version, (unsigned long long)unix_seconds);
+    if (g_debug) {
+        const void *caller = __builtin_return_address(0);
+        Dl_info caller_info = {0};
+        if (dladdr(caller, &caller_info) != 0) {
+            uintptr_t base = (uintptr_t)caller_info.dli_fbase;
+            DLOG("INTEGRITY_CHECK.caller address=%p file=%s base=%p offset=0x%" PRIxPTR "\n", caller,
+                 caller_info.dli_fname ? caller_info.dli_fname : "<unknown>", caller_info.dli_fbase,
+                 (uintptr_t)caller - base);
+        } else {
+            DLOG("INTEGRITY_CHECK.caller address=%p unresolved=1\n", caller);
+        }
+    }
     if (!result) {
         return CUDA_ERROR_INVALID_VALUE;
     }
