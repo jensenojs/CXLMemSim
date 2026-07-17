@@ -75,6 +75,9 @@ for library in liblz4.so.1 libzstd.so.1; do
     grep -F "Shared library: [$library]" "$WORK/shim-readelf-dynamic.txt" >/dev/null
     grep -F "$library =>" "$WORK/shim-ldd.txt" >/dev/null
 done
+readelf -d "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-readelf-dynamic.txt"
+grep -F 'Shared library: [libcudart.so.12]' "$WORK/tiny-probe-readelf-dynamic.txt" >/dev/null
+! readelf -SW "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" | grep -F '.nv_fatbin' >/dev/null
 nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' >"$WORK/tiny-library-symbol.txt"
 "$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
 [[ -L $OUTPUT/guest/libcuda.so ]]

@@ -5,6 +5,7 @@ LDLIBS ?=
 NVCC ?= nvcc
 NVCC_HOST_CXX ?= g++
 CUDA_ARCH ?= sm_89
+CUDA_HOME ?= /usr/local/cuda
 
 CUDA_SHIM := libcuda.so.1
 CUDA_LINK := libcuda.so
@@ -60,7 +61,9 @@ $(TINY_CUDA_LIBRARY): tiny_cuda_fatbin.cu
 	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -cudart=shared -shared -Xcompiler=-fPIC -o $@ $<
 
 $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
-	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -o $@ $< -ldl
+	# The probe owns no CUDA kernel.  Keep its only runtime dependency dynamic so
+	# the DSO below remains the single owner of the tiny fatbin registration.
+	$(CC) $(CFLAGS) -I$(CUDA_HOME)/include -o $@ $< -L$(CUDA_HOME)/lib64 -lcudart -ldl $(LDFLAGS) $(LDLIBS)
 
 test: $(CASE_CONTROL) $(TRANSPORT_TEST)
 	./$(TRANSPORT_TEST)

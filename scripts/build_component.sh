@@ -109,6 +109,8 @@ for library in liblz4.so.1 libzstd.so.1; do
     grep -F "Shared library: [$library]" "$EVIDENCE/shim-readelf-dynamic.txt" >/dev/null
     grep -F "$library =>" "$EVIDENCE/shim-ldd.txt" >/dev/null
 done
+grep -F 'Shared library: [libcudart.so.12]' "$EVIDENCE/tiny-probe-readelf-dynamic.txt" >/dev/null
+! readelf -SW "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" | grep -F '.nv_fatbin' >/dev/null
 nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' \
     >"$EVIDENCE/tiny-library-symbol.txt"
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
