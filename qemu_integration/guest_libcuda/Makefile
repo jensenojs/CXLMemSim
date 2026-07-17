@@ -61,9 +61,9 @@ $(TINY_CUDA_LIBRARY): tiny_cuda_fatbin.cu
 	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -cudart=shared -shared -Xcompiler=-fPIC -o $@ $<
 
 $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
-	# The probe owns no CUDA kernel.  Keep its only runtime dependency dynamic so
-	# the DSO below remains the single owner of the tiny fatbin registration.
-	$(CC) $(CFLAGS) -I$(CUDA_HOME)/include -o $@ $< -L$(CUDA_HOME)/lib64 -lcudart -ldl $(LDFLAGS) $(LDLIBS)
+	# This executable must reach main() before anything loads CUDA Runtime.  The
+	# DSO below owns both the tiny fatbin and all CUDA Runtime calls.
+	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
 
 test: $(CASE_CONTROL) $(TRANSPORT_TEST)
 	./$(TRANSPORT_TEST)
