@@ -1732,8 +1732,11 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
     }
 
     const unsigned char *files = (const unsigned char *)header + header->header_size;
+    const CudartFatbinFileHeader *ptx_candidate = NULL;
+    uint64_t ptx_offset = 0;
     const CudartFatbinFileHeader *elf_candidate = NULL;
     uint64_t elf_offset = 0;
+    uint32_t target_sm = reg_read32(CXL_GPU_REG_CC_MAJOR) * 10U + reg_read32(CXL_GPU_REG_CC_MINOR);
     uint64_t offset = 0;
     while (offset + sizeof(CudartFatbinFileHeader) <= header->files_size) {
         const CudartFatbinFileHeader *file =
@@ -1746,26 +1749,11 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
             return CUDA_ERROR_INVALID_VALUE;
         }
 
-        if (file->kind == CUDART_FATBIN_KIND_PTX) {
-            unsigned char *ptx = NULL;
-            size_t ptx_size = 0;
-            CUresult decode_result = cudart_decode_fatbin_file(file, &ptx, &ptx_size);
-            if (decode_result != CUDA_SUCCESS) {
-                return decode_result;
-            }
-
-            while (ptx_size && ptx[ptx_size - 1] == '\0') {
-                ptx_size--;
-            }
-            ptx[ptx_size] = '\0';
-            fprintf(stderr,
-                    "[CXL-CUDA]   library PTX load selected offset=%llu sm=0x%x decoded_size=%zu\n",
-                    (unsigned long long)offset, file->sm_version, ptx_size);
-            CUresult result = cuModuleLoadData(module, ptx);
-            free(ptx);
-            return result;
+        if (file->kind == CUDART_FATBIN_KIND_PTX && !ptx_candidate) {
+            ptx_candidate = file;
+            ptx_offset = offset;
         }
-        if (file->kind == CUDART_FATBIN_KIND_ELF && !elf_candidate) {
+        if (file->kind == CUDART_FATBIN_KIND_ELF && file->sm_version == target_sm && !elf_candidate) {
             elf_candidate = file;
             elf_offset = offset;
         }
@@ -1809,7 +1797,29 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
         return result;
     }
 
-    fprintf(stderr, "[CXL-CUDA]   library module load reject: no PTX or ELF file in selected fatbin submodule\n");
+    if (ptx_candidate) {
+        unsigned char *ptx = NULL;
+        size_t ptx_size = 0;
+        CUresult decode_result = cudart_decode_fatbin_file(ptx_candidate, &ptx, &ptx_size);
+        if (decode_result != CUDA_SUCCESS) {
+            return decode_result;
+        }
+
+        while (ptx_size && ptx[ptx_size - 1] == '\0') {
+            ptx_size--;
+        }
+        ptx[ptx_size] = '\0';
+        fprintf(stderr,
+                "[CXL-CUDA]   library PTX load selected offset=%llu sm=0x%x decoded_size=%zu\n",
+                (unsigned long long)ptx_offset, ptx_candidate->sm_version, ptx_size);
+        CUresult result = cuModuleLoadData(module, ptx);
+        free(ptx);
+        return result;
+    }
+
+    fprintf(stderr,
+            "[CXL-CUDA]   library module load reject: no PTX or sm_%u ELF file in selected fatbin submodule\n",
+            target_sm);
     return CUDA_ERROR_NOT_SUPPORTED;
 }
 
