@@ -10,6 +10,8 @@ CUDA_SHIM := libcuda.so.1
 CUDA_LINK := libcuda.so
 CASE_CONTROL := cxl-gpu-case
 TRANSPORT_TEST := test_cxl_gpu_transport
+CONTEXT_STATE_TEST := test_cxl_gpu_context_state
+CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 
@@ -18,7 +20,7 @@ BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe
+.PHONY: all clean static test test-binaries tiny-probe test-context-state test-context-shim
 
 all: $(TARGETS)
 
@@ -26,8 +28,8 @@ test-binaries: $(CUDA_TESTS) $(BAR_TESTS) $(TRANSPORT_TEST)
 
 tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)
 
-$(CUDA_SHIM): libcuda.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_transport.c -ldl \
+$(CUDA_SHIM): libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
 
@@ -39,6 +41,20 @@ $(CASE_CONTROL): cxl_gpu_case.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_
 
 $(TRANSPORT_TEST): test_cxl_gpu_transport.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -o $@ test_cxl_gpu_transport.c cxl_gpu_transport.c $(LDFLAGS) $(LDLIBS)
+
+$(CONTEXT_STATE_TEST): test_cxl_gpu_context_state.c cxl_gpu_context_state.c cxl_gpu_context_state.h
+	$(CC) $(CFLAGS) -pthread -o $@ test_cxl_gpu_context_state.c cxl_gpu_context_state.c $(LDFLAGS) $(LDLIBS)
+
+test-context-state: $(CONTEXT_STATE_TEST)
+	./$(CONTEXT_STATE_TEST)
+
+$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -o $@ test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
+		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
+		$(LDFLAGS) $(LDLIBS)
+
+test-context-shim: $(CONTEXT_SHIM_TEST)
+	./$(CONTEXT_SHIM_TEST)
 
 $(TINY_CUDA_LIBRARY): tiny_cuda_fatbin.cu
 	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -cudart=shared -shared -Xcompiler=-fPIC -o $@ $<
@@ -72,4 +88,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)

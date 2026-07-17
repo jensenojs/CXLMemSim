@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "cxl_gpu_cmd.h"
+#include "cxl_gpu_context_state.h"
 #include "cxl_gpu_transport.h"
 
 /* These symbols are linked into the shim's declared runtime dependency set. */
@@ -127,6 +128,8 @@ typedef struct {
 #define CUDA_ERROR_NOT_FOUND 500
 #define CUDA_ERROR_NOT_READY 600
 #define CUDA_ERROR_LAUNCH_FAILED 700
+#define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
+#define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
 #define CUDA_ERROR_UNKNOWN 999
 
@@ -148,8 +151,10 @@ typedef struct {
 /* Global state */
 static CxlGpuTransport g_transport = CXL_GPU_TRANSPORT_INITIALIZER;
 static int g_initialized = 0;
-static CUcontext g_context = NULL;
-static CUcontext g_primary_context = NULL;
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+static uint8_t g_test_bar2[CXL_GPU_CMD_REG_SIZE];
+static CUresult (*g_test_execute_cmd)(uint32_t cmd);
+#endif
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLIBRY" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL;  /* "CXDKERNL" diagnostic placeholder */
@@ -199,6 +204,15 @@ static int g_debug = 0;
         if (g_debug)                                                                                                   \
             fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                                \
     } while (0)
+
+static void log_context_state(const char *api, CUresult result) {
+    CxlCudaContextStateView state = cxl_cuda_context_state_view();
+
+    DLOG("context_state api=%s result=%d token=%" PRIuPTR " mode=%u "
+         "primary_retain_count=%u current_depth=%u\n",
+         api, result, state.token, state.mode, state.primary_retain_count,
+         state.current_depth);
+}
 
 static inline uint64_t maybe_bar4_offset(uint64_t value);
 static inline uint64_t bar4_offset_of(void *host_ptr);
@@ -250,8 +264,49 @@ static void cmd_unlock(void) {
 /* Execute command and wait for completion.
  * Caller MUST hold cmd_lock() if params were written before this call. */
 static CUresult execute_cmd(uint32_t cmd) {
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+    if (g_test_execute_cmd)
+        return g_test_execute_cmd(cmd);
+#endif
     return (CUresult)cxl_gpu_transport_execute(&g_transport, cmd);
 }
+
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+void cxl_cuda_test_reset(void)
+{
+    memset(g_test_bar2, 0, sizeof(g_test_bar2));
+    g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
+    g_transport.regs = (volatile uint32_t *)g_test_bar2;
+    g_transport.data = (volatile uint8_t *)g_test_bar2 + CXL_GPU_DATA_OFFSET;
+    g_transport.bar_size = sizeof(g_test_bar2);
+    g_initialized = 1;
+    g_test_execute_cmd = NULL;
+    cxl_cuda_context_state_reset();
+}
+
+void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd))
+{
+    g_test_execute_cmd = executor;
+}
+
+uint64_t cxl_cuda_test_read_reg64(uint32_t offset)
+{
+    return reg_read64(offset);
+}
+
+void cxl_cuda_test_write_result(unsigned int index, uint64_t value)
+{
+    static const uint32_t result_offsets[] = {
+        CXL_GPU_REG_RESULT0,
+        CXL_GPU_REG_RESULT1,
+        CXL_GPU_REG_RESULT2,
+        CXL_GPU_REG_RESULT3,
+    };
+
+    if (index < sizeof(result_offsets) / sizeof(result_offsets[0]))
+        reg_write64(result_offsets[index], value);
+}
+#endif
 
 /* Find and map CXL Type 2 device */
 static int find_and_map_device(void) {
@@ -1202,10 +1257,17 @@ CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev) {
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!bytes)
         return CUDA_ERROR_INVALID_VALUE;
+    if (dev != 0)
+        return CUDA_ERROR_INVALID_DEVICE;
 
-    *bytes = reg_read64(CXL_GPU_REG_TOTAL_MEM);
-    DLOG("  bytes=%zu\n", *bytes);
-    return CUDA_SUCCESS;
+    cmd_lock();
+    CUresult err = execute_cmd(CXL_GPU_CMD_GET_TOTAL_MEM);
+    if (err == CUDA_SUCCESS) {
+        *bytes = reg_read64(CXL_GPU_REG_RESULT0);
+        DLOG("  bytes=%zu\n", *bytes);
+    }
+    cmd_unlock();
+    return err;
 }
 
 CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev) {
@@ -1214,41 +1276,18 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev) {
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!value)
         return CUDA_ERROR_INVALID_VALUE;
+    if (dev != 0)
+        return CUDA_ERROR_INVALID_DEVICE;
 
-    switch (attrib) {
-    case CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK:
-        *value = reg_read32(CXL_GPU_REG_MAX_THREADS);
-        break;
-    case CU_DEVICE_ATTRIBUTE_WARP_SIZE:
-        *value = reg_read32(CXL_GPU_REG_WARP_SIZE);
-        break;
-    case CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT:
-        *value = reg_read32(CXL_GPU_REG_MP_COUNT);
-        break;
-    case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR:
-        *value = reg_read32(CXL_GPU_REG_CC_MAJOR);
-        break;
-    case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR:
-        *value = reg_read32(CXL_GPU_REG_CC_MINOR);
-        break;
-    case CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X:
-    case CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y:
-        *value = 1024;
-        break;
-    case CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z:
-        *value = 64;
-        break;
-    case CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X:
-    case CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y:
-    case CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z:
-        *value = 65535;
-        break;
-    default:
-        *value = 0;
-        break;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(int64_t)(int32_t)attrib);
+    CUresult err = execute_cmd(CXL_GPU_CMD_GET_DEVICE_ATTRIBUTE);
+    if (err == CUDA_SUCCESS) {
+        *value = (int)(int32_t)reg_read64(CXL_GPU_REG_RESULT0);
+        DLOG("  value=%d\n", *value);
     }
-    DLOG("  value=%d\n", *value);
-    return CUDA_SUCCESS;
+    cmd_unlock();
+    return err;
 }
 
 CUresult cuCtxCreate_v2(CUcontext *ctx, unsigned int flags, CUdevice dev) {
@@ -1257,15 +1296,25 @@ CUresult cuCtxCreate_v2(CUcontext *ctx, unsigned int flags, CUdevice dev) {
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!ctx)
         return CUDA_ERROR_INVALID_VALUE;
+    if (dev != 0)
+        return CUDA_ERROR_INVALID_DEVICE;
+    if (flags != 0)
+        return CUDA_ERROR_NOT_SUPPORTED;
+
+    CUresult state_err = cxl_cuda_context_prepare_ordinary_create();
+    if (state_err != CUDA_SUCCESS)
+        return state_err;
 
     cmd_lock();
     CUresult err = execute_cmd(CXL_GPU_CMD_CTX_CREATE);
     if (err == CUDA_SUCCESS) {
         *ctx = (CUcontext)(uintptr_t)reg_read64(CXL_GPU_REG_RESULT0);
-        g_context = *ctx;
-        DLOG("  ctx=%p\n", *ctx);
+        err = cxl_cuda_context_commit_ordinary_create((uintptr_t)*ctx);
+        if (err == CUDA_SUCCESS)
+            DLOG("  ctx=%p\n", *ctx);
     }
     cmd_unlock();
+    log_context_state("cuCtxCreate_v2", err);
     return err;
 }
 
@@ -1274,14 +1323,15 @@ CUresult cuCtxDestroy_v2(CUcontext ctx) {
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
 
+    CUresult state_err = cxl_cuda_context_prepare_destroy((uintptr_t)ctx);
+    if (state_err != CUDA_SUCCESS)
+        return state_err;
+
     cmd_lock();
     CUresult err = execute_cmd(CXL_GPU_CMD_CTX_DESTROY);
     if (err == CUDA_SUCCESS) {
         context_storage_clear_context(ctx, 1);
-        if (g_context == ctx)
-            g_context = NULL;
-        if (g_primary_context == ctx)
-            g_primary_context = NULL;
+        err = cxl_cuda_context_commit_destroy((uintptr_t)ctx);
     }
     cmd_unlock();
     return err;
@@ -2304,20 +2354,25 @@ CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
 
-    size_t total_mem = reg_read64(CXL_GPU_REG_TOTAL_MEM);
-    size_t free_mem = reg_read64(CXL_GPU_REG_FREE_MEM);
-
-    /* Fallback: if free is 0, report total as free */
-    if (free_mem == 0) {
-        free_mem = total_mem;
+    uintptr_t token = 0;
+    CUresult state_err = cxl_cuda_context_get_current_live(&token);
+    if (state_err != CUDA_SUCCESS) {
+        log_context_state("cuMemGetInfo_v2", state_err);
+        return state_err;
     }
 
-    if (total)
-        *total = total_mem;
-    if (free)
-        *free = free_mem;
-
-    return CUDA_SUCCESS;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, token);
+    CUresult err = execute_cmd(CXL_GPU_CMD_MEM_GET_INFO);
+    if (err == CUDA_SUCCESS) {
+        if (free)
+            *free = reg_read64(CXL_GPU_REG_RESULT0);
+        if (total)
+            *total = reg_read64(CXL_GPU_REG_RESULT1);
+    }
+    cmd_unlock();
+    log_context_state("cuMemGetInfo_v2", err);
+    return err;
 }
 
 /* Version compatibility aliases */
@@ -2345,27 +2400,32 @@ CUresult cuCtxGetCurrent(CUcontext *pctx) {
     DLOG("cuCtxGetCurrent()\n");
     if (!pctx)
         return CUDA_ERROR_INVALID_VALUE;
-    *pctx = g_context;
-    return CUDA_SUCCESS;
+    uintptr_t token = 0;
+    CUresult err = cxl_cuda_context_get_current(&token);
+    if (err == CUDA_SUCCESS)
+        *pctx = (CUcontext)token;
+    return err;
 }
 
 CUresult cuCtxSetCurrent(CUcontext ctx) {
     DLOG("cuCtxSetCurrent(%p)\n", ctx);
-    g_context = ctx;
-    return CUDA_SUCCESS;
+    return cxl_cuda_context_set_current((uintptr_t)ctx);
 }
 
 CUresult cuCtxPushCurrent_v2(CUcontext ctx) {
     DLOG("cuCtxPushCurrent_v2(%p)\n", ctx);
-    g_context = ctx;
-    return CUDA_SUCCESS;
+    return cxl_cuda_context_push_current((uintptr_t)ctx);
 }
 
 CUresult cuCtxPopCurrent_v2(CUcontext *pctx) {
     DLOG("cuCtxPopCurrent_v2()\n");
-    if (pctx)
-        *pctx = g_context;
-    return CUDA_SUCCESS;
+    if (!pctx)
+        return CUDA_ERROR_INVALID_VALUE;
+    uintptr_t token = 0;
+    CUresult err = cxl_cuda_context_pop_current(&token);
+    if (err == CUDA_SUCCESS)
+        *pctx = (CUcontext)token;
+    return err;
 }
 
 /* cuGetProcAddress receives the stable API names and selects the ABI version
@@ -2380,6 +2440,10 @@ CUresult cuCtxGetDevice(CUdevice *device) {
     DLOG("cuCtxGetDevice()\n");
     if (!device)
         return CUDA_ERROR_INVALID_VALUE;
+    uintptr_t token = 0;
+    CUresult err = cxl_cuda_context_get_current_live(&token);
+    if (err != CUDA_SUCCESS)
+        return err;
     *device = 0; /* Currently only support device 0 */
     return CUDA_SUCCESS;
 }
@@ -2397,6 +2461,10 @@ CUresult cuCtxGetFlags(unsigned int *flags) {
     DLOG("cuCtxGetFlags()\n");
     if (!flags)
         return CUDA_ERROR_INVALID_VALUE;
+    uintptr_t token = 0;
+    CUresult err = cxl_cuda_context_get_current_live(&token);
+    if (err != CUDA_SUCCESS)
+        return err;
     *flags = 0;
     return CUDA_SUCCESS;
 }
@@ -2409,18 +2477,27 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
         return CUDA_ERROR_INVALID_VALUE;
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    if (!g_primary_context) {
+
+    bool needs_create = false;
+    uintptr_t token = 0;
+    CUresult state_err = cxl_cuda_context_prepare_primary_retain(&needs_create,
+                                                                  &token);
+    if (state_err != CUDA_SUCCESS)
+        return state_err;
+    if (needs_create) {
         cmd_lock();
         CUresult err = execute_cmd(CXL_GPU_CMD_CTX_CREATE);
         if (err == CUDA_SUCCESS) {
-            g_primary_context = (CUcontext)(uintptr_t)reg_read64(CXL_GPU_REG_RESULT0);
-            DLOG("  primary_ctx=%p\n", g_primary_context);
+            token = reg_read64(CXL_GPU_REG_RESULT0);
+            err = cxl_cuda_context_commit_primary_retain(token);
+            if (err == CUDA_SUCCESS)
+                DLOG("  primary_ctx=%p\n", (void *)token);
         }
         cmd_unlock();
         if (err != CUDA_SUCCESS)
             return err;
     }
-    *pctx = g_primary_context;
+    *pctx = (CUcontext)token;
     return CUDA_SUCCESS;
 }
 
@@ -2428,17 +2505,18 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
     DLOG("cuDevicePrimaryCtxRelease(dev=%d)\n", dev);
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    return CUDA_SUCCESS;
+    return cxl_cuda_context_primary_release();
 }
 
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) { return cuDevicePrimaryCtxRelease(dev); }
 
 CUresult cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
     DLOG("cuDevicePrimaryCtxSetFlags(dev=%d, flags=%u)\n", dev, flags);
-    (void)flags;
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    return CUDA_SUCCESS;
+    if (flags != 0)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    return cxl_cuda_context_primary_set_zero_flags();
 }
 
 CUresult cuDevicePrimaryCtxSetFlags_v2(CUdevice dev, unsigned int flags) {
@@ -2449,20 +2527,16 @@ CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags, int *acti
     DLOG("cuDevicePrimaryCtxGetState(dev=%d)\n", dev);
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    if (flags)
-        *flags = 0;
-    if (active)
-        *active = g_primary_context ? 1 : 0;
-    return CUDA_SUCCESS;
+    if (!flags || !active)
+        return CUDA_ERROR_INVALID_VALUE;
+    return cxl_cuda_context_primary_get_state(flags, active);
 }
 
 CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
     DLOG("cuDevicePrimaryCtxReset(dev=%d)\n", dev);
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    if (g_primary_context)
-        return cuCtxDestroy_v2(g_primary_context);
-    return CUDA_SUCCESS;
+    return cxl_cuda_context_primary_reset();
 }
 
 CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) { return cuDevicePrimaryCtxReset(dev); }
@@ -2621,8 +2695,9 @@ CUresult cuPointerGetAttribute(void *data, int attribute, CUdeviceptr ptr) {
     /* Minimal implementation */
     switch (attribute) {
     case 1: /* CU_POINTER_ATTRIBUTE_CONTEXT */
-        *(CUcontext *)data = g_context;
-        return CUDA_SUCCESS;
+        /* Allocation owner is a property of ptr, not the calling thread's
+         * current context.  This shim does not maintain allocation provenance. */
+        return CUDA_ERROR_NOT_SUPPORTED;
     case 2: /* CU_POINTER_ATTRIBUTE_MEMORY_TYPE */
         *(int *)data = 2; /* Device memory */
         return CUDA_SUCCESS;
