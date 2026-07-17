@@ -877,6 +877,15 @@ static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_
     return CUDA_SUCCESS;
 }
 
+/* The real CUDA 12.9 INTEGRITY_CHECK export has a third, non-null slot.  Its
+ * host implementation accepts a boolean and returns CUDA_SUCCESS.  Runtime
+ * initialization probes the slot as part of the table ABI, so a NULL pointer
+ * is an invalid table shape even though slot 1 owns the integrity digest. */
+static CUresult integrity_check_set_enabled(int enabled) {
+    DLOG("INTEGRITY_CHECK.set_enabled(enabled=%d) -> CUDA_SUCCESS\n", enabled != 0);
+    return CUDA_SUCCESS;
+}
+
 static unsigned char TOOLS_RUNTIME_BUFFER1[1024];
 static unsigned char TOOLS_RUNTIME_BUFFER2[14];
 
@@ -1076,7 +1085,7 @@ static const void *CONTEXT_CHECKS_TABLE[15] = {
 static const void *INTEGRITY_CHECK_TABLE[3] = {
     (const void *)(uintptr_t)(sizeof(INTEGRITY_CHECK_TABLE)),
     (const void *)integrity_check,
-    NULL,
+    (const void *)integrity_check_set_enabled,
 };
 
 CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTableId) {

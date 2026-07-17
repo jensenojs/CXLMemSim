@@ -86,6 +86,7 @@ make -C "$GUEST_DIR" CC="$GUEST_CC" CFLAGS="$GUEST_CFLAGS" \
     2>&1 | tee "$EVIDENCE/tiny-cuda-build.log"
 
 install -m 0755 "$BUILD/cxlmemsim_server" "$PAYLOAD/bin/cxlmemsim_server"
+install -m 0755 "$GUEST_DIR/cuda-integrity-export-oracle" "$PAYLOAD/bin/cuda-integrity-export-oracle"
 install -m 0755 "$GUEST_DIR/libcuda.so.1" "$PAYLOAD/guest/libcuda.so.1"
 install -m 0755 "$GUEST_DIR/cxl-gpu-case" "$PAYLOAD/guest/cxl-gpu-case"
 install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
@@ -95,12 +96,14 @@ ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
 
 python3 scripts/component_artifact.py verify-profile --payload "$PAYLOAD" --profile "$PROFILE"
 readelf -d "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-oracle-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
     >"$EVIDENCE/tiny-probe-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-readelf-dynamic.txt"
 ldd "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-ldd.txt"
+ldd "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-oracle-ldd.txt"
 ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
 ldd "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-ldd.txt"
 ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
@@ -116,7 +119,8 @@ for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
     nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F " $symbol" >>"$EVIDENCE/tiny-library-symbol.txt"
 done
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
-sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/guest/libcuda.so.1" \
+"$PAYLOAD/bin/cuda-integrity-export-oracle" --help >"$EVIDENCE/integrity-oracle-help.txt"
+sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/bin/cuda-integrity-export-oracle" "$PAYLOAD/guest/libcuda.so.1" \
     "$PAYLOAD/guest/cxl-gpu-case" "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/libtiny_cuda.so" \
     >"$EVIDENCE/payload-sha256.txt"

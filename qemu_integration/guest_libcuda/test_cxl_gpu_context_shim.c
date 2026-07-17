@@ -8,6 +8,10 @@ typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
 
+typedef struct {
+    unsigned char bytes[16];
+} CUuuid;
+
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_CONTEXT 201
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
@@ -33,18 +37,23 @@ CUresult cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags);
 CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags, int *active);
 CUresult cuDevicePrimaryCtxReset(CUdevice dev);
 CUresult cuPointerGetAttribute(void *data, int attribute, uint64_t ptr);
+CUresult cuGetExportTable(const void **table, const CUuuid *uuid);
 
-#define CHECK(expr)                                                           \
-    do {                                                                      \
-        if (!(expr)) {                                                        \
-            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr);     \
-            return 1;                                                         \
-        }                                                                     \
+#define CHECK(expr)                                                                                                    \
+    do {                                                                                                               \
+        if (!(expr)) {                                                                                                 \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr);                                                 \
+            return 1;                                                                                                  \
+        }                                                                                                              \
     } while (0)
 
 static uint32_t commands[16];
 static unsigned int command_count;
 static uint64_t issued_token = 41;
+
+static const CUuuid integrity_check_uuid = {
+    .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
+};
 
 typedef struct DestroyedContextThread {
     pthread_barrier_t attached;
@@ -60,8 +69,7 @@ typedef struct DestroyedContextThread {
     CUresult mem_info_result;
 } DestroyedContextThread;
 
-static CUresult fake_execute(uint32_t command)
-{
+static CUresult fake_execute(uint32_t command) {
     commands[command_count++] = command;
     switch (command) {
     case CXL_GPU_CMD_CTX_CREATE:
@@ -86,8 +94,7 @@ static CUresult fake_execute(uint32_t command)
     }
 }
 
-static int test_query_and_context_sequence(void)
-{
+static int test_query_and_context_sequence(void) {
     CUcontext context = NULL;
     CUcontext current = (CUcontext)1;
     size_t free_bytes = 0;
@@ -124,8 +131,7 @@ static int test_query_and_context_sequence(void)
     return 0;
 }
 
-static int test_primary_retain_does_not_become_current(void)
-{
+static int test_primary_retain_does_not_become_current(void) {
     CUcontext primary = NULL;
     CUcontext current = (CUcontext)1;
     unsigned int flags = 1;
@@ -154,8 +160,7 @@ static int test_primary_retain_does_not_become_current(void)
     return 0;
 }
 
-static void *thread_with_destroyed_context(void *opaque)
-{
+static void *thread_with_destroyed_context(void *opaque) {
     DestroyedContextThread *thread = opaque;
 
     thread->set_current_result = cuCtxSetCurrent(thread->token);
@@ -166,14 +171,12 @@ static void *thread_with_destroyed_context(void *opaque)
     pthread_barrier_wait(&thread->destroyed);
     thread->get_current_result = cuCtxGetCurrent(&thread->current);
     thread->get_device_result = cuCtxGetDevice(&thread->device);
-    thread->mem_info_result = cuMemGetInfo_v2(&thread->free_bytes,
-                                               &thread->total_bytes);
+    thread->mem_info_result = cuMemGetInfo_v2(&thread->free_bytes, &thread->total_bytes);
     return NULL;
 }
 
-static int test_destroy_keeps_other_thread_token_without_transport(void)
-{
-    DestroyedContextThread thread = { 0 };
+static int test_destroy_keeps_other_thread_token_without_transport(void) {
+    DestroyedContextThread thread = {0};
     CUcontext context = NULL;
     pthread_t worker;
 
@@ -203,9 +206,27 @@ static int test_destroy_keeps_other_thread_token_without_transport(void)
     return 0;
 }
 
-int main(void)
-{
-    return test_query_and_context_sequence() ||
-           test_primary_retain_does_not_become_current() ||
-           test_destroy_keeps_other_thread_token_without_transport();
+static int test_integrity_export_table_shape(void) {
+    typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
+    typedef CUresult (*integrity_enable_t)(int enabled);
+    const void *table = NULL;
+    uint64_t result[2] = {0, 0};
+
+    CHECK(cuGetExportTable(&table, &integrity_check_uuid) == CUDA_SUCCESS);
+    CHECK(table != NULL);
+    const void *const *slots = table;
+    CHECK((uintptr_t)slots[0] == 3 * sizeof(void *));
+    CHECK(slots[1] != NULL);
+    CHECK(slots[2] != NULL);
+    CHECK(((integrity_enable_t)slots[2])(1) == CUDA_SUCCESS);
+    CHECK(((integrity_enable_t)slots[2])(0) == CUDA_SUCCESS);
+    CHECK(((integrity_check_t)slots[1])(12090, UINT64_C(1784320000), result) == CUDA_SUCCESS);
+    CHECK(result[0] == UINT64_C(0x3341181c03cb675c));
+    CHECK(result[1] == UINT64_C(0x8ed383aa1f4cd1e8));
+    return 0;
+}
+
+int main(void) {
+    return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
+           test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape();
 }

@@ -23,6 +23,7 @@
       "libcuda.so.1",
       "libcuda.so",
       "cxl-gpu-case",
+      "integrity-export-oracle",
       "test"
     ],
     "cc": "clang",
@@ -41,6 +42,11 @@
   "outputs": [
     {
       "path": "bin/cxlmemsim_server",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "bin/cuda-integrity-export-oracle",
       "type": "file",
       "mode": "0755"
     },

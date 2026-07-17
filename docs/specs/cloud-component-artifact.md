@@ -42,7 +42,9 @@ CXLMemSim/
 
 ```text
 payload/
-├── bin/cxlmemsim_server
+├── bin/
+│   ├── cxlmemsim_server
+│   └── cuda-integrity-export-oracle
 └── guest/
     ├── cxl-gpu-case
     ├── cuda-runtime-dlopen-kernel-probe
@@ -51,7 +53,7 @@ payload/
     └── libtiny_cuda.so
 ```
 
-payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的六项；运行与fresh pull环境负责提供系统库。tiny library和probe由CUDA 12.9 `nvcc`生成sm_89 CUBIN并静态链接CUDA runtime，仍只保留普通ELF系统依赖。guest shim会在运行时解压CUDA fatbin，因此其ELF明确声明`liblz4.so.1`和`libzstd.so.1`；下游guest builder可沿`ldd`机械收集这两个依赖，不需要知道压缩格式。manifest记录全部ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`、`cxlmemsim_server --help`、case控制CLI的参数fixture和`tiny_cuda_launch`动态符号检查，让缺失依赖和非法输入直接失败。
+payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的七项；运行与fresh pull环境负责提供系统库。tiny library和probe由CUDA 12.9 `nvcc`生成sm_89 CUBIN并静态链接CUDA runtime，仍只保留普通ELF系统依赖。guest shim会在运行时解压CUDA fatbin，因此其ELF明确声明`liblz4.so.1`和`libzstd.so.1`；下游guest builder可沿`ldd`机械收集这两个依赖，不需要知道压缩格式。`cuda-integrity-export-oracle`只在显式的host L40 ABI诊断中同时打开真实Driver与候选guest shim，读取私有`INTEGRITY_CHECK` export table并调用已恢复的slot 1；它不启动CUDA Runtime、QEMU、guest、模型或任何主运行路径。manifest记录全部ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`、`cxlmemsim_server --help`、oracle help、case控制CLI的参数fixture和`tiny_cuda_launch`动态符号检查，让缺失依赖和非法输入直接失败。
 
 ## 核心调用链
 
@@ -64,7 +66,7 @@ CNB exact source checkout
       四个always-on CTest
       guest shim Makefile
       server --help
-      生成四项payload
+      生成七项payload
   → component_artifact.py create-manifest
   → publish_component.sh
       deterministic tar + zstd
@@ -89,7 +91,7 @@ CNB exact source checkout
 - Release与`CMP0091=NEW`；
 - microbenchmarks、RDMA、SlugAllocator全部关闭；
 - 并行度为4，保持迁移时冻结的候选profile；该值只由CNB固定构建任务验证，本地Fedora完整构建不参与冻结云端资源边界；
-- guest构建`libcuda.so.1`、`libcuda.so`和`cxl-gpu-case`，并运行共享transport与CLI非法参数fixture；同一源码owner使用固定`nvcc`、host C++ compiler与`sm_89`生成tiny probe和library；
+- guest构建`libcuda.so.1`、`libcuda.so`、`cxl-gpu-case`和host侧`cuda-integrity-export-oracle`，并运行共享transport、integrity export table与CLI非法参数fixture；同一源码owner使用固定`nvcc`、host C++ compiler与`sm_89`生成tiny probe和library；
 - `outputs`完整定义预期文件路径、类型、mode和symlink target。
 
 构建任务额外构建并运行`test_dcd_gfam`、`test_rob`、`test_mem_stall`和`test_bandwidth_model`。测试二进制不进入payload。
@@ -151,9 +153,9 @@ build/publish任务只输出候选digest和证据，不直接修改Git。候选d
 
 ## 最小接口约束
 
-本任务可以决定CXLMemSim的构建命令、测试目标和四项payload。它不得捆绑系统动态库，不得初始化十五个submodule，不得恢复或构建QEMU、Concordia、kernel、llama或guest，不得用artifact证据关闭Type-2或模型任务。BAR2协议变化由对应跨仓设计和双头一致性验收支配。
+本任务可以决定CXLMemSim的构建命令、测试目标和七项payload。它不得捆绑系统动态库，不得初始化十五个submodule，不得恢复或构建QEMU、Concordia、kernel、llama或guest，不得用artifact证据关闭Type-2或模型任务。BAR2协议变化由对应跨仓设计和双头一致性验收支配。
 
-下游可依赖的最小事实是：给定正式`repository@digest`，固定puller会恢复上述六项文件图，并证明server、shim、case控制CLI、tiny probe和tiny library在声明工具镜像内可装载，library导出`tiny_cuda_launch`，四个局部CTest与guest fixture在build任务通过。下游仍需自行证明这些文件进入实际Type-2运行路径并返回`1234`。
+下游可依赖的最小事实是：给定正式`repository@digest`，固定puller会恢复上述七项文件图，并证明server、host integrity oracle、shim、case控制CLI、tiny probe和tiny library在声明工具镜像内可装载，library导出`tiny_cuda_launch`，四个局部CTest与guest fixture在build任务通过。下游仍需自行证明这些文件进入实际Type-2运行路径并返回`1234`。
 
 ## 停止与回滚
 
@@ -166,7 +168,7 @@ build/publish任务只输出候选digest和证据，不直接修改Git。候选d
 - 目标结构符合上述ASCII树，组件build和通用publish/pull职责分离；
 - `bash -n`通过，Python单元测试覆盖普通文件、symlink、篡改、绝对路径、`..`、hardlink、重复路径和symlink祖先；
 - fresh CNB checkout按profile构建server和shim，四个CTest与server help通过；
-- payload恰好六项，类型、mode和link target与profile一致；
+- payload恰好七项，类型、mode和link target与profile一致；
 - 两次本地归档SHA256一致；
 - artifact发布到`docker.cnb.cool/gevico.online/jensen/cxlmemsim`并取得digest；
 - 新CNB任务只按digest恢复，manifest、归档、ELF依赖、symlink和server help均通过；
