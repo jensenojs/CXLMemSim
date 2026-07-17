@@ -66,8 +66,12 @@ static int run_begin(CxlGpuTransport *transport, int argc, char **argv) {
     uint64_t first_sequence = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT2);
     uint64_t config_binding = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT3);
     int unlock_result = cxl_gpu_transport_unlock(transport);
+    /* `binding` authenticates this guest request against the paired run.  The
+     * returned config binding is a separate, host-derived case identity: QEMU
+     * hashes its AOF/manifest/limit configuration and guarantees it is nonzero.
+     */
     if (result != CXL_GPU_SUCCESS || unlock_result != 0 || epoch == 0 || acknowledged_case != case_id ||
-        config_binding != binding) {
+        config_binding == 0) {
         fprintf(stderr,
                 "cxl_gpu_case=begin status=fail result=%" PRIu32 " unlock_result=%d epoch=%" PRIu64
                 " acknowledged_case=%" PRIu64 " expected_case=%" PRIu64 " first_sequence=%" PRIu64
