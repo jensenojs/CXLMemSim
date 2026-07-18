@@ -937,6 +937,15 @@ static void tools_get_buffer2(void **ptr, size_t *size) {
     }
 }
 
+static CUresult tools_tls_get(void **out) {
+    DLOG("TOOLS_TLS.get(out=%p)\n", (void *)out);
+    if (!out) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *out = NULL;
+    return CUDA_SUCCESS;
+}
+
 static const unsigned char CUDART_INTERFACE_UUID[16] = {0x6b, 0xd5, 0xfb, 0x6c, 0x5b, 0xf4, 0xe7, 0x4a,
                                                        0x89, 0x87, 0xd9, 0x39, 0x12, 0xfd, 0x9d, 0xf9};
 
@@ -1078,11 +1087,10 @@ static const void *TOOLS_RUNTIME_CALLBACK_HOOKS_TABLE[7] = {
     (const void *)tools_get_buffer2,
 };
 
-static const void *TOOLS_TLS_TABLE[4] = {
+static const void *TOOLS_TLS_TABLE[3] = {
     (const void *)(uintptr_t)(sizeof(TOOLS_TLS_TABLE)),
     NULL,
-    NULL,
-    NULL,
+    (const void *)tools_tls_get,
 };
 
 static const void *CONTEXT_LOCAL_STORAGE_TABLE[4] = {

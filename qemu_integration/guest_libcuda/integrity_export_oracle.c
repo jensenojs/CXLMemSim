@@ -363,6 +363,8 @@ static int run_tools_tls_oracle(const char *driver_path, const char *shim_path) 
     }
     print_tools_tls_result("host", "postinit-thread", thread_call_data.result);
 
+    ToolsTlsResult shim_result = call_tools_tls(shim.get);
+    print_tools_tls_result("shim", "slot2", shim_result);
     printf("tools_tls_oracle_relation label=shim slot2_present=%d\n", shim.get != NULL);
     printf("tools_tls_oracle=complete\n");
     dlclose(shim.handle);
