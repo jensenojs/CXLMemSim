@@ -66,6 +66,7 @@ python3 "$ROOT/scripts/component_artifact.py" verify-archive \
 "$OUTPUT/bin/cxlmemsim_server" --help >"$WORK/server-help.stdout" \
     2>"$WORK/server-help.stderr"
 ldd "$OUTPUT/bin/cxlmemsim_server" >"$WORK/server-ldd.txt"
+ldd "$OUTPUT/bin/cuda-integrity-export-oracle" >"$WORK/integrity-oracle-ldd.txt"
 ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
 ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
 ldd "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-ldd.txt"
@@ -75,8 +76,16 @@ for library in liblz4.so.1 libzstd.so.1; do
     grep -F "Shared library: [$library]" "$WORK/shim-readelf-dynamic.txt" >/dev/null
     grep -F "$library =>" "$WORK/shim-ldd.txt" >/dev/null
 done
-nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F ' tiny_cuda_launch' >"$WORK/tiny-library-symbol.txt"
+readelf -d "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-readelf-dynamic.txt"
+! readelf -SW "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" | grep -F '.nv_fatbin' >/dev/null
+! grep -F 'Shared library: [libcudart.so.12]' "$WORK/tiny-probe-readelf-dynamic.txt" >/dev/null
+readelf -d "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-readelf-dynamic.txt"
+grep -F 'Shared library: [libcudart.so.12]' "$WORK/tiny-library-readelf-dynamic.txt" >/dev/null
+for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
+    nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F " $symbol" >>"$WORK/tiny-library-symbol.txt"
+done
 "$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
+"$OUTPUT/bin/cuda-integrity-export-oracle" --help >"$WORK/integrity-oracle-help.txt"
 [[ -L $OUTPUT/guest/libcuda.so ]]
 [[ $(readlink "$OUTPUT/guest/libcuda.so") == libcuda.so.1 ]]
 

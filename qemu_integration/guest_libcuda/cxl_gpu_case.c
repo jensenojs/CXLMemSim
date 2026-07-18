@@ -66,9 +66,20 @@ static int run_begin(CxlGpuTransport *transport, int argc, char **argv) {
     uint64_t first_sequence = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT2);
     uint64_t config_binding = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT3);
     int unlock_result = cxl_gpu_transport_unlock(transport);
+    /* `binding` authenticates this guest request against the paired run.  The
+     * returned config binding is a separate, host-derived case identity: QEMU
+     * hashes its AOF/manifest/limit configuration and guarantees it is nonzero.
+     */
     if (result != CXL_GPU_SUCCESS || unlock_result != 0 || epoch == 0 || acknowledged_case != case_id ||
-        config_binding != binding)
+        config_binding == 0) {
+        fprintf(stderr,
+                "cxl_gpu_case=begin status=fail result=%" PRIu32 " unlock_result=%d epoch=%" PRIu64
+                " acknowledged_case=%" PRIu64 " expected_case=%" PRIu64 " first_sequence=%" PRIu64
+                " config_binding=%" PRIu64 " expected_binding=%" PRIu64 "\n",
+                result, unlock_result, epoch, acknowledged_case, case_id, first_sequence, config_binding, binding);
+        fflush(stderr);
         return 70;
+    }
 
     printf("cxl_gpu_case=begin status=pass protocol=%u case=%s epoch=%" PRIu64 " first_sequence=%" PRIu64
            " binding=%" PRIu64 " config_binding=%" PRIu64 "\n",
@@ -102,8 +113,16 @@ static int run_end(CxlGpuTransport *transport, int argc, char **argv) {
     uint64_t concordia_status = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT2);
     uint64_t reset_status = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT3);
     int unlock_result = cxl_gpu_transport_unlock(transport);
-    if (result != CXL_GPU_SUCCESS || unlock_result != 0 || acknowledged_epoch != epoch)
+    if (result != CXL_GPU_SUCCESS || unlock_result != 0 || acknowledged_epoch != epoch) {
+        fprintf(stderr,
+                "cxl_gpu_case=end status=fail result=%" PRIu32 " unlock_result=%d acknowledged_epoch=%" PRIu64
+                " expected_epoch=%" PRIu64 " last_sequence=%" PRIu64 " concordia_status=%" PRIu64
+                " reset_status=%" PRIu64 " application_exit=%" PRId32 " binding=%" PRIu64 "\n",
+                result, unlock_result, acknowledged_epoch, epoch, last_sequence, concordia_status, reset_status,
+                application_exit, binding);
+        fflush(stderr);
         return 70;
+    }
 
     printf("cxl_gpu_case=end status=pass protocol=%u epoch=%" PRIu64 " last_sequence=%" PRIu64
            " concordia_status=%" PRIu64 " reset_status=%" PRIu64 " application_exit=%" PRId32 " binding=%" PRIu64 "\n",
