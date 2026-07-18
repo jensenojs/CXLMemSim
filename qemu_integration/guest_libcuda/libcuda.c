@@ -942,7 +942,11 @@ static CUresult tools_runtime_callback_hook_slot4(const void *input, uint64_t *o
     if (!out) {
         return CUDA_ERROR_UNKNOWN;
     }
-    *out = input ? *(const uint32_t *)((const unsigned char *)input + 0x38) : 0;
+    // knockout: Kimi currently calls this slot with input=NULL; recover the non-NULL ABI from L40 evidence before use.
+    if (input) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    *out = 0;
     return CUDA_SUCCESS;
 }
 
