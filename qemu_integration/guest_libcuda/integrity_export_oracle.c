@@ -50,6 +50,10 @@ static const CUuuid tools_tls_uuid = {
     .bytes = {0x42, 0xd8, 0x5a, 0x81, 0x23, 0xf6, 0xcb, 0x47, 0x82, 0x98, 0xf6, 0xe7, 0x8a, 0x3a, 0xec, 0xdc},
 };
 
+static const CUuuid runtime_callback_hooks_uuid = {
+    .bytes = {0xa0, 0x94, 0x79, 0x8c, 0x2e, 0x74, 0x2e, 0x74, 0x93, 0xf2, 0x08, 0x00, 0x20, 0x0c, 0x0a, 0x66},
+};
+
 typedef struct {
     const char *label;
     void *handle;
@@ -96,13 +100,21 @@ typedef struct {
     ToolsTlsResult result;
 } ToolsTlsThreadCall;
 
+typedef struct {
+    const char *label;
+    void *handle;
+    const void *table;
+    uintptr_t size_word;
+} RuntimeCallbackHooksTable;
+
 static void usage(FILE *stream) {
     fprintf(stream, "usage: cuda-integrity-export-oracle --shim PATH [--driver PATH] [--seconds UNIX_SECONDS] "
-                    "[--table integrity|tools-tls]\n"
+                    "[--table integrity|tools-tls|runtime-callback-hooks]\n"
                     "\n"
                     "Loads the real NVIDIA Driver and one Type-2 shim with RTLD_LOCAL. integrity\n"
                     "inspects INTEGRITY_CHECK and calls slot 1; tools-tls inspects TOOLS_TLS and\n"
-                    "calls host slot 2 before and after cuInit.\n");
+                    "calls host slot 2 before and after cuInit. runtime-callback-hooks only reads\n"
+                    "the seven-word callback table and code prefixes; it never invokes a callback.\n");
 }
 
 static int parse_seconds(const char *text, uint64_t *seconds) {
@@ -127,6 +139,21 @@ static void print_symbol_location(const char *label, const void *address) {
         return;
     }
     printf("integrity_oracle_symbol label=%s address=%p unresolved=1\n", label, address);
+}
+
+static void print_code_prefix(const char *label, const void *address) {
+    Dl_info info;
+    if (!address || dladdr(address, &info) == 0) {
+        printf("runtime_callback_hooks_oracle_code label=%s address=%p unavailable=1\n", label, address);
+        return;
+    }
+
+    const unsigned char *bytes = address;
+    printf("runtime_callback_hooks_oracle_code label=%s address=%p bytes=", label, address);
+    for (size_t index = 0; index < 16; index++) {
+        printf("%02x", bytes[index]);
+    }
+    printf("\n");
 }
 
 static int load_export_table(ExportTable *export_table, const char *label, const char *path) {
@@ -220,6 +247,57 @@ static int load_tools_tls_table(ToolsTlsTable *table, const char *label, const c
     }
     print_symbol_location("tools_tls_slot1", table->slot1);
     print_symbol_location("tools_tls_slot2", table->slot2);
+    return 0;
+}
+
+static int load_runtime_callback_hooks_table(RuntimeCallbackHooksTable *table, const char *label, const char *path) {
+    cu_get_export_table_t get_export_table;
+
+    memset(table, 0, sizeof(*table));
+    table->label = label;
+    table->handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!table->handle) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error label=%s stage=dlopen path=%s error=%s\n", label, path,
+                dlerror());
+        return -1;
+    }
+
+    dlerror();
+    get_export_table = (cu_get_export_table_t)dlsym(table->handle, "cuGetExportTable");
+    const char *symbol_error = dlerror();
+    if (symbol_error || !get_export_table) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error label=%s stage=dlsym symbol=cuGetExportTable error=%s\n",
+                label, symbol_error ? symbol_error : "<null>");
+        return -1;
+    }
+
+    CUresult result = get_export_table(&table->table, &runtime_callback_hooks_uuid);
+    if (result != CUDA_SUCCESS || !table->table) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error label=%s stage=get_export_table result=%d table=%p\n", label,
+                result, table->table);
+        return -1;
+    }
+
+    const void *const *slots = table->table;
+    table->size_word = (uintptr_t)slots[0];
+    if (table->size_word != 7 * sizeof(void *)) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error label=%s stage=table-size size_word=%" PRIuPTR "\n", label,
+                table->size_word);
+        return -1;
+    }
+
+    printf("runtime_callback_hooks_oracle_table label=%s path=%s table=%p size_word=%" PRIuPTR " slots=7\n", label,
+           path, table->table, table->size_word);
+    for (uintptr_t index = 0; index < 7; index++) {
+        char slot_label[48];
+        snprintf(slot_label, sizeof(slot_label), "runtime_callback_hooks_slot%" PRIuPTR, index);
+        printf("runtime_callback_hooks_oracle_slot label=%s index=%" PRIuPTR " address=%p present=%d\n", label, index,
+               slots[index], slots[index] != NULL);
+        if (index != 0 && slots[index]) {
+            print_symbol_location(slot_label, slots[index]);
+            print_code_prefix(slot_label, slots[index]);
+        }
+    }
     return 0;
 }
 
@@ -372,11 +450,28 @@ static int run_tools_tls_oracle(const char *driver_path, const char *shim_path) 
     return 0;
 }
 
+static int run_runtime_callback_hooks_oracle(const char *driver_path, const char *shim_path) {
+    RuntimeCallbackHooksTable host;
+    RuntimeCallbackHooksTable shim;
+    if (load_runtime_callback_hooks_table(&host, "host", driver_path) != 0 ||
+        load_runtime_callback_hooks_table(&shim, "shim", shim_path) != 0) {
+        return 3;
+    }
+    printf("runtime_callback_hooks_oracle_relation label=host slot4_present=%d\n",
+           ((const void *const *)host.table)[4] != NULL);
+    printf("runtime_callback_hooks_oracle_relation label=shim slot4_present=%d\n",
+           ((const void *const *)shim.table)[4] != NULL);
+    printf("runtime_callback_hooks_oracle=complete\n");
+    dlclose(shim.handle);
+    dlclose(host.handle);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *shim_path = NULL;
     const char *driver_path = "libcuda.so.1";
     uint64_t seconds = (uint64_t)time(NULL);
-    enum { TABLE_INTEGRITY, TABLE_TOOLS_TLS } table = TABLE_INTEGRITY;
+    enum { TABLE_INTEGRITY, TABLE_TOOLS_TLS, TABLE_RUNTIME_CALLBACK_HOOKS } table = TABLE_INTEGRITY;
 
     for (int index = 1; index < argc; index++) {
         if (strcmp(argv[index], "--help") == 0) {
@@ -408,6 +503,10 @@ int main(int argc, char **argv) {
                 table = TABLE_TOOLS_TLS;
                 continue;
             }
+            if (strcmp(value, "runtime-callback-hooks") == 0) {
+                table = TABLE_RUNTIME_CALLBACK_HOOKS;
+                continue;
+            }
             fprintf(stderr, "integrity_oracle_error stage=parse-table value=%s\n", value);
             return 2;
         }
@@ -421,6 +520,9 @@ int main(int argc, char **argv) {
 
     if (table == TABLE_TOOLS_TLS) {
         return run_tools_tls_oracle(driver_path, shim_path);
+    }
+    if (table == TABLE_RUNTIME_CALLBACK_HOOKS) {
+        return run_runtime_callback_hooks_oracle(driver_path, shim_path);
     }
 
     ExportTable host;
