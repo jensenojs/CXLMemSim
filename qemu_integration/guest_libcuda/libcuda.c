@@ -2688,6 +2688,15 @@ CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
+    return cuMemsetD8_v2(dstDevice, uc, N);
+}
+
+CUresult cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc, size_t N, CUstream hStream) {
+    (void)hStream;
+    return cuMemsetD8_v2(dstDevice, uc, N);
+}
+
 CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
     DLOG("cuMemsetD32_v2(dst=0x%lx, val=0x%08x, count=%zu)\n", (unsigned long)dstDevice, ui, N);
 
