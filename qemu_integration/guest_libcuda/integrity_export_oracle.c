@@ -35,6 +35,7 @@ typedef struct {
 
 typedef CUresult (*cu_get_export_table_t)(const void **table, const CUuuid *uuid);
 typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
+typedef CUresult (*tools_tls_get_t)(void **out);
 
 enum {
     CUDA_SUCCESS = 0,
@@ -43,6 +44,10 @@ enum {
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
+};
+
+static const CUuuid tools_tls_uuid = {
+    .bytes = {0x42, 0xd8, 0x5a, 0x81, 0x23, 0xf6, 0xcb, 0x47, 0x82, 0x98, 0xf6, 0xe7, 0x8a, 0x3a, 0xec, 0xdc},
 };
 
 typedef struct {
@@ -69,11 +74,35 @@ typedef struct {
     CallbackResult result;
 } ThreadCall;
 
+typedef struct {
+    const char *label;
+    void *handle;
+    const void *table;
+    uintptr_t size_word;
+    const void *slot1;
+    const void *slot2;
+    tools_tls_get_t get;
+} ToolsTlsTable;
+
+typedef struct {
+    pid_t pid;
+    uintptr_t thread;
+    CUresult result;
+    void *out;
+} ToolsTlsResult;
+
+typedef struct {
+    tools_tls_get_t get;
+    ToolsTlsResult result;
+} ToolsTlsThreadCall;
+
 static void usage(FILE *stream) {
-    fprintf(stream, "usage: cuda-integrity-export-oracle --shim PATH [--driver PATH] [--seconds UNIX_SECONDS]\n"
+    fprintf(stream, "usage: cuda-integrity-export-oracle --shim PATH [--driver PATH] [--seconds UNIX_SECONDS] "
+                    "[--table integrity|tools-tls]\n"
                     "\n"
-                    "Loads the real NVIDIA Driver and one Type-2 shim with RTLD_LOCAL, inspects\n"
-                    "their CUDA INTEGRITY_CHECK export table, and calls slot 1 only.\n");
+                    "Loads the real NVIDIA Driver and one Type-2 shim with RTLD_LOCAL. integrity\n"
+                    "inspects INTEGRITY_CHECK and calls slot 1; tools-tls inspects TOOLS_TLS and\n"
+                    "calls host slot 2 before and after cuInit.\n");
 }
 
 static int parse_seconds(const char *text, uint64_t *seconds) {
@@ -144,35 +173,85 @@ static int load_export_table(ExportTable *export_table, const char *label, const
     return 0;
 }
 
-static int initialize_driver(const ExportTable *export_table) {
+static int load_tools_tls_table(ToolsTlsTable *table, const char *label, const char *path) {
+    cu_get_export_table_t get_export_table;
+
+    memset(table, 0, sizeof(*table));
+    table->label = label;
+    table->handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!table->handle) {
+        fprintf(stderr, "tools_tls_oracle_error label=%s stage=dlopen path=%s error=%s\n", label, path, dlerror());
+        return -1;
+    }
+
+    dlerror();
+    get_export_table = (cu_get_export_table_t)dlsym(table->handle, "cuGetExportTable");
+    const char *symbol_error = dlerror();
+    if (symbol_error || !get_export_table) {
+        fprintf(stderr, "tools_tls_oracle_error label=%s stage=dlsym symbol=cuGetExportTable error=%s\n", label,
+                symbol_error ? symbol_error : "<null>");
+        return -1;
+    }
+
+    CUresult result = get_export_table(&table->table, &tools_tls_uuid);
+    if (result != CUDA_SUCCESS || !table->table) {
+        fprintf(stderr, "tools_tls_oracle_error label=%s stage=get_export_table result=%d table=%p\n", label, result,
+                table->table);
+        return -1;
+    }
+
+    const void *const *slots = table->table;
+    table->size_word = (uintptr_t)slots[0];
+    if (table->size_word < 3 * sizeof(void *) || table->size_word % sizeof(void *) != 0 ||
+        table->size_word > 64 * sizeof(void *)) {
+        fprintf(stderr, "tools_tls_oracle_error label=%s stage=table-size size_word=%" PRIuPTR "\n", label,
+                table->size_word);
+        return -1;
+    }
+    table->slot1 = slots[1];
+    table->slot2 = slots[2];
+    table->get = (tools_tls_get_t)table->slot2;
+
+    printf("tools_tls_oracle_table label=%s path=%s table=%p size_word=%" PRIuPTR " slots=%" PRIuPTR "\n", label, path,
+           table->table, table->size_word, table->size_word / sizeof(void *));
+    for (uintptr_t index = 0; index < table->size_word / sizeof(void *); index++) {
+        printf("tools_tls_oracle_slot label=%s index=%" PRIuPTR " address=%p present=%d\n", label, index, slots[index],
+               slots[index] != NULL);
+    }
+    print_symbol_location("tools_tls_slot1", table->slot1);
+    print_symbol_location("tools_tls_slot2", table->slot2);
+    return 0;
+}
+
+static int initialize_driver_handle(void *handle, const char *label) {
     typedef CUresult (*cu_init_t)(unsigned int flags);
 
     dlerror();
-    cu_init_t init = (cu_init_t)dlsym(export_table->handle, "cuInit");
+    cu_init_t init = (cu_init_t)dlsym(handle, "cuInit");
     const char *symbol_error = dlerror();
     if (symbol_error || !init) {
-        fprintf(stderr, "integrity_oracle_error label=%s stage=dlsym symbol=cuInit error=%s\n", export_table->label,
+        fprintf(stderr, "export_oracle_error label=%s stage=dlsym symbol=cuInit error=%s\n", label,
                 symbol_error ? symbol_error : "<null>");
         return -1;
     }
 
     CUresult result = init(0);
-    printf("integrity_oracle_driver_init label=%s pid=%ld result=%d\n", export_table->label, (long)getpid(), result);
+    printf("export_oracle_driver_init label=%s pid=%ld result=%d\n", label, (long)getpid(), result);
     return result == CUDA_SUCCESS ? 0 : -1;
 }
 
-static int print_driver_identity(const ExportTable *export_table) {
+static int print_driver_identity_handle(void *handle, const char *label) {
     typedef CUresult (*cu_driver_get_version_t)(int *version);
     typedef CUresult (*cu_device_get_count_t)(int *count);
     typedef CUresult (*cu_device_get_uuid_t)(CUuuid *uuid, int device);
     typedef CUresult (*cu_device_get_attribute_t)(int *value, int attribute, int device);
 
-    cu_driver_get_version_t driver_get_version = dlsym(export_table->handle, "cuDriverGetVersion");
-    cu_device_get_count_t device_get_count = dlsym(export_table->handle, "cuDeviceGetCount");
-    cu_device_get_uuid_t device_get_uuid = dlsym(export_table->handle, "cuDeviceGetUuid_v2");
-    cu_device_get_attribute_t device_get_attribute = dlsym(export_table->handle, "cuDeviceGetAttribute");
+    cu_driver_get_version_t driver_get_version = dlsym(handle, "cuDriverGetVersion");
+    cu_device_get_count_t device_get_count = dlsym(handle, "cuDeviceGetCount");
+    cu_device_get_uuid_t device_get_uuid = dlsym(handle, "cuDeviceGetUuid_v2");
+    cu_device_get_attribute_t device_get_attribute = dlsym(handle, "cuDeviceGetAttribute");
     if (!driver_get_version || !device_get_count || !device_get_uuid || !device_get_attribute) {
-        fprintf(stderr, "integrity_oracle_error label=%s stage=identity-symbol\n", export_table->label);
+        fprintf(stderr, "export_oracle_error label=%s stage=identity-symbol\n", label);
         return -1;
     }
 
@@ -191,7 +270,7 @@ static int print_driver_identity(const ExportTable *export_table) {
     printf("integrity_oracle_identity label=%s driver_result=%d driver_version=%d count_result=%d count=%d "
            "uuid_result=%d uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x "
            "pci_domain_result=%d pci_domain=%d pci_bus_result=%d pci_bus=%d pci_device_result=%d pci_device=%d\n",
-           export_table->label, version_result, version, count_result, count, uuid_result, uuid.bytes[0], uuid.bytes[1],
+           label, version_result, version, count_result, count, uuid_result, uuid.bytes[0], uuid.bytes[1],
            uuid.bytes[2], uuid.bytes[3], uuid.bytes[4], uuid.bytes[5], uuid.bytes[6], uuid.bytes[7], uuid.bytes[8],
            uuid.bytes[9], uuid.bytes[10], uuid.bytes[11], uuid.bytes[12], uuid.bytes[13], uuid.bytes[14],
            uuid.bytes[15], domain_result, domain, bus_result, bus, device_result, device);
@@ -230,10 +309,72 @@ static void *thread_call(void *argument) {
     return NULL;
 }
 
+static ToolsTlsResult call_tools_tls(tools_tls_get_t get) {
+    ToolsTlsResult result = {
+        .pid = getpid(),
+        .thread = (uintptr_t)pthread_self(),
+        .result = CUDA_ERROR_NOT_SUPPORTED,
+        .out = (void *)(uintptr_t)UINT64_C(0xfeedfacefeedface),
+    };
+    if (get) {
+        result.result = get(&result.out);
+    }
+    return result;
+}
+
+static void print_tools_tls_result(const char *label, const char *scope, ToolsTlsResult result) {
+    printf("tools_tls_oracle_result label=%s scope=%s pid=%ld tid=%" PRIuPTR " result=%d out=%p\n", label, scope,
+           (long)result.pid, result.thread, result.result, result.out);
+}
+
+static void *tools_tls_thread_call(void *argument) {
+    ToolsTlsThreadCall *call = argument;
+    call->result = call_tools_tls(call->get);
+    return NULL;
+}
+
+static int run_tools_tls_oracle(const char *driver_path, const char *shim_path) {
+    ToolsTlsTable host;
+    ToolsTlsTable shim;
+    if (load_tools_tls_table(&host, "host", driver_path) != 0 || load_tools_tls_table(&shim, "shim", shim_path) != 0) {
+        return 3;
+    }
+
+    ToolsTlsResult host_preinit = call_tools_tls(host.get);
+    print_tools_tls_result("host", "preinit", host_preinit);
+    if (initialize_driver_handle(host.handle, "host") != 0 || print_driver_identity_handle(host.handle, "host") != 0) {
+        return 4;
+    }
+
+    ToolsTlsResult host_first = call_tools_tls(host.get);
+    ToolsTlsResult host_second = call_tools_tls(host.get);
+    print_tools_tls_result("host", "postinit-first", host_first);
+    print_tools_tls_result("host", "postinit-second", host_second);
+
+    ToolsTlsThreadCall thread_call_data = {
+        .get = host.get,
+        .result = {.result = CUDA_ERROR_NOT_SUPPORTED, .out = NULL},
+    };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, tools_tls_thread_call, &thread_call_data) != 0 ||
+        pthread_join(thread, NULL) != 0) {
+        fprintf(stderr, "tools_tls_oracle_error label=host stage=thread\n");
+        return 4;
+    }
+    print_tools_tls_result("host", "postinit-thread", thread_call_data.result);
+
+    printf("tools_tls_oracle_relation label=shim slot2_present=%d\n", shim.get != NULL);
+    printf("tools_tls_oracle=complete\n");
+    dlclose(shim.handle);
+    dlclose(host.handle);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *shim_path = NULL;
     const char *driver_path = "libcuda.so.1";
     uint64_t seconds = (uint64_t)time(NULL);
+    enum { TABLE_INTEGRITY, TABLE_TOOLS_TLS } table = TABLE_INTEGRITY;
 
     for (int index = 1; index < argc; index++) {
         if (strcmp(argv[index], "--help") == 0) {
@@ -255,12 +396,29 @@ int main(int argc, char **argv) {
             }
             continue;
         }
+        if (strcmp(argv[index], "--table") == 0 && index + 1 < argc) {
+            const char *value = argv[++index];
+            if (strcmp(value, "integrity") == 0) {
+                table = TABLE_INTEGRITY;
+                continue;
+            }
+            if (strcmp(value, "tools-tls") == 0) {
+                table = TABLE_TOOLS_TLS;
+                continue;
+            }
+            fprintf(stderr, "integrity_oracle_error stage=parse-table value=%s\n", value);
+            return 2;
+        }
         usage(stderr);
         return 2;
     }
     if (!shim_path) {
         usage(stderr);
         return 2;
+    }
+
+    if (table == TABLE_TOOLS_TLS) {
+        return run_tools_tls_oracle(driver_path, shim_path);
     }
 
     ExportTable host;
@@ -283,7 +441,7 @@ int main(int argc, char **argv) {
     }
     if (preinit_child == 0) {
         close(fork_pipe[0]);
-        if (initialize_driver(&host) != 0) {
+        if (initialize_driver_handle(host.handle, host.label) != 0) {
             close(fork_pipe[1]);
             _exit(2);
         }
@@ -294,12 +452,12 @@ int main(int argc, char **argv) {
     }
     close(fork_pipe[1]);
 
-    if (initialize_driver(&host) != 0) {
+    if (initialize_driver_handle(host.handle, host.label) != 0) {
         close(fork_pipe[0]);
         waitpid(preinit_child, NULL, 0);
         return 4;
     }
-    if (print_driver_identity(&host) != 0) {
+    if (print_driver_identity_handle(host.handle, host.label) != 0) {
         close(fork_pipe[0]);
         waitpid(preinit_child, NULL, 0);
         return 4;

@@ -53,7 +53,7 @@ payload/
     └── libtiny_cuda.so
 ```
 
-payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的七项；运行与fresh pull环境负责提供系统库。tiny library和probe由CUDA 12.9 `nvcc`生成sm_89 CUBIN并静态链接CUDA runtime，仍只保留普通ELF系统依赖。guest shim会在运行时解压CUDA fatbin，因此其ELF明确声明`liblz4.so.1`和`libzstd.so.1`；下游guest builder可沿`ldd`机械收集这两个依赖，不需要知道压缩格式。`cuda-integrity-export-oracle`只在显式的host L40 ABI诊断中同时打开真实Driver与候选guest shim，读取私有`INTEGRITY_CHECK` export table并调用已恢复的slot 1；它不启动CUDA Runtime、QEMU、guest、模型或任何主运行路径。manifest记录全部ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`、`cxlmemsim_server --help`、oracle help、case控制CLI的参数fixture和`tiny_cuda_launch`动态符号检查，让缺失依赖和非法输入直接失败。
+payload不捆绑glibc、libstdc++、libgcc或其他系统动态库。组件仓只拥有自身生成的七项；运行与fresh pull环境负责提供系统库。tiny library和probe由CUDA 12.9 `nvcc`生成sm_89 CUBIN并静态链接CUDA runtime，仍只保留普通ELF系统依赖。guest shim会在运行时解压CUDA fatbin，因此其ELF明确声明`liblz4.so.1`和`libzstd.so.1`；下游guest builder可沿`ldd`机械收集这两个依赖，不需要知道压缩格式。`cuda-integrity-export-oracle`只在显式的host L40 ABI诊断中同时打开真实Driver与候选guest shim。`--table integrity`读取私有`INTEGRITY_CHECK` export table并调用已恢复的slot 1；`--table tools-tls`读取`TOOLS_TLS` table，记录slot layout，并在真实Driver的slot 2上分别采集`cuInit`前、同线程两次初始化后和第二线程的返回值及输出指针。它不启动CUDA Runtime、QEMU、guest、模型或任何主运行路径。manifest记录全部ELF的`DT_NEEDED`名称，fresh pull使用同一固定工具镜像执行`ldd`、`cxlmemsim_server --help`、oracle help、case控制CLI的参数fixture和`tiny_cuda_launch`动态符号检查，让缺失依赖和非法输入直接失败。
 
 ## 核心调用链
 

@@ -43,3 +43,28 @@ $:
             bash scripts/pull_component.sh \
               manifests/artifacts/cxlmemsim.candidate.json \
               .work/restored/cxlmemsim
+
+  api_trigger_tools_tls_export_oracle:
+    - git:
+        submodules: false
+        lfs: false
+      runner:
+        tags: cnb:arch:amd64:gpu:L40
+      docker:
+        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      stages:
+        - name: inspect L40 CUDA TOOLS TLS export table
+          timeout: 15m
+          script: |
+            set -euo pipefail
+            nvidia-smi --query-gpu=uuid,driver_version,name,memory.total --format=csv,noheader
+            driver_path="$(ldconfig -p | awk '$1 == "libcuda.so.1" {print $NF; exit}')"
+            test -n "$driver_path"
+            driver_real="$(readlink -f "$driver_path")"
+            printf 'tools_tls_oracle_driver_path=%s\n' "$driver_real"
+            readelf -n "$driver_real" | awk '/Build ID/ {print "tools_tls_oracle_driver_" $0; exit}'
+            make -C qemu_integration/guest_libcuda libcuda.so.1 integrity-export-oracle
+            qemu_integration/guest_libcuda/cuda-integrity-export-oracle \
+              --table tools-tls \
+              --driver "$driver_real" \
+              --shim "$PWD/qemu_integration/guest_libcuda/libcuda.so.1"
