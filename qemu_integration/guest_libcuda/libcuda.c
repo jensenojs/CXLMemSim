@@ -937,6 +937,15 @@ static void tools_get_buffer2(void **ptr, size_t *size) {
     }
 }
 
+static CUresult tools_runtime_callback_hook_slot4(const void *input, uint64_t *out) {
+    DLOG("TOOLS_RUNTIME_CALLBACK_HOOKS.slot4(input=%p, out=%p)\n", input, (void *)out);
+    if (!out) {
+        return CUDA_ERROR_UNKNOWN;
+    }
+    *out = input ? *(const uint32_t *)((const unsigned char *)input + 0x38) : 0;
+    return CUDA_SUCCESS;
+}
+
 static CUresult tools_tls_get(void **out) {
     DLOG("TOOLS_TLS.get(out=%p)\n", (void *)out);
     if (!out) {
@@ -1082,7 +1091,7 @@ static const void *TOOLS_RUNTIME_CALLBACK_HOOKS_TABLE[7] = {
     NULL,
     (const void *)tools_get_buffer1,
     NULL,
-    NULL,
+    (const void *)tools_runtime_callback_hook_slot4,
     NULL,
     (const void *)tools_get_buffer2,
 };

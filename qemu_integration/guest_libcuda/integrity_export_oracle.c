@@ -36,6 +36,7 @@ typedef struct {
 typedef CUresult (*cu_get_export_table_t)(const void **table, const CUuuid *uuid);
 typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
 typedef CUresult (*tools_tls_get_t)(void **out);
+typedef CUresult (*runtime_callback_hooks_slot4_t)(const void *input, uint64_t *out);
 
 enum {
     CUDA_SUCCESS = 0,
@@ -105,7 +106,13 @@ typedef struct {
     void *handle;
     const void *table;
     uintptr_t size_word;
+    runtime_callback_hooks_slot4_t slot4;
 } RuntimeCallbackHooksTable;
+
+typedef struct {
+    CUresult result;
+    uint64_t out;
+} RuntimeCallbackHooksSlot4Result;
 
 static void usage(FILE *stream) {
     fprintf(stream, "usage: cuda-integrity-export-oracle --shim PATH [--driver PATH] [--seconds UNIX_SECONDS] "
@@ -285,6 +292,7 @@ static int load_runtime_callback_hooks_table(RuntimeCallbackHooksTable *table, c
                 table->size_word);
         return -1;
     }
+    table->slot4 = (runtime_callback_hooks_slot4_t)slots[4];
 
     printf("runtime_callback_hooks_oracle_table label=%s path=%s table=%p size_word=%" PRIuPTR " slots=7\n", label,
            path, table->table, table->size_word);
@@ -461,6 +469,27 @@ static int run_runtime_callback_hooks_oracle(const char *driver_path, const char
            ((const void *const *)host.table)[4] != NULL);
     printf("runtime_callback_hooks_oracle_relation label=shim slot4_present=%d\n",
            ((const void *const *)shim.table)[4] != NULL);
+    if (!host.slot4 || !shim.slot4) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error stage=slot4-null host=%p shim=%p\n", (void *)host.slot4,
+                (void *)shim.slot4);
+        return 4;
+    }
+    RuntimeCallbackHooksSlot4Result host_result = {
+        .result = CUDA_ERROR_NOT_SUPPORTED,
+        .out = UINT64_C(0xfeedfacefeedface),
+    };
+    RuntimeCallbackHooksSlot4Result shim_result = host_result;
+    host_result.result = host.slot4(NULL, &host_result.out);
+    shim_result.result = shim.slot4(NULL, &shim_result.out);
+    printf("runtime_callback_hooks_oracle_slot4 label=host input=NULL result=%d out=%" PRIu64 "\n", host_result.result,
+           host_result.out);
+    printf("runtime_callback_hooks_oracle_slot4 label=shim input=NULL result=%d out=%" PRIu64 "\n", shim_result.result,
+           shim_result.out);
+    if (host_result.result != CUDA_SUCCESS || host_result.out != 0 || shim_result.result != host_result.result ||
+        shim_result.out != host_result.out) {
+        fprintf(stderr, "runtime_callback_hooks_oracle_error stage=slot4-null-input-mismatch\n");
+        return 5;
+    }
     printf("runtime_callback_hooks_oracle=complete\n");
     dlclose(shim.handle);
     dlclose(host.handle);
