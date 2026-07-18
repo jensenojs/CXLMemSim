@@ -2635,11 +2635,13 @@ CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t by
             chunk = CXL_GPU_DATA_SIZE;
         }
 
+        cmd_lock();
         /* Read from source device memory to data region */
         reg_write64(CXL_GPU_REG_PARAM0, srcDevice + offset);
         reg_write64(CXL_GPU_REG_PARAM1, chunk);
         CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_DTOH);
         if (result != CUDA_SUCCESS) {
+            cmd_unlock();
             return result;
         }
 
@@ -2647,6 +2649,7 @@ CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t by
         reg_write64(CXL_GPU_REG_PARAM0, dstDevice + offset);
         reg_write64(CXL_GPU_REG_PARAM1, chunk);
         result = execute_cmd(CXL_GPU_CMD_MEM_COPY_HTOD);
+        cmd_unlock();
         if (result != CUDA_SUCCESS) {
             return result;
         }
@@ -2655,6 +2658,21 @@ CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t by
     }
 
     return CUDA_SUCCESS;
+}
+
+CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount) {
+    return cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount);
+}
+
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount,
+                              CUstream hStream) {
+    (void)hStream;
+    return cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount);
+}
+
+CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount,
+                           CUstream hStream) {
+    return cuMemcpyDtoDAsync_v2(dstDevice, srcDevice, byteCount, hStream);
 }
 
 CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
@@ -2742,6 +2760,10 @@ CUresult cuMemGetAddressRange_v2(CUdeviceptr *pbase, size_t *psize, CUdeviceptr 
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize, CUdeviceptr dptr) {
+    return cuMemGetAddressRange_v2(pbase, psize, dptr);
+}
+
 CUresult cuPointerGetAttribute(void *data, int attribute, CUdeviceptr ptr) {
     DLOG("cuPointerGetAttribute(attr=%d, ptr=0x%lx)\n", attribute, (unsigned long)ptr);
 
@@ -2782,6 +2804,8 @@ CUresult cuEventDestroy_v2(CUevent hEvent) {
     DLOG("cuEventDestroy_v2(%p)\n", hEvent);
     return CUDA_SUCCESS;
 }
+
+CUresult cuEventDestroy(CUevent hEvent) { return cuEventDestroy_v2(hEvent); }
 
 CUresult cuEventRecord(CUevent hEvent, CUstream hStream) {
     DLOG("cuEventRecord(%p, stream=%p)\n", hEvent, hStream);
