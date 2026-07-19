@@ -212,3 +212,22 @@ tensor allocation、module/function 准备和 flash-attention dispatcher：固�
 `Q=[576,2,16,1]`、`K=[576,32,1,1]`、K 的 `[512,...]` V view 与 F16 mask 在 L40 上进入 core
 记录的 `ggml_cuda_flash_attn_ext_mma_f16_case<576,512,2,16>`。它若仍未命中，只排除该图的前置条件；
 它若命中，entry/return 和有界状态才可以约束 guest slot 1 的最小 oracle。
+
+## Flash-attention 公开图先被 dispatcher 拒绝
+
+cxl-lab 的 [`cnb-vfg-1jtsp6d52`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-vfg-1jtsp6d52)
+首次消费正确 pin 的 flash-attention trigger：CXLMemSim `83a4b9587ef21810864d507d29c19f3b4091ca29`。
+target 构建、exact DSO static collector 和 L40 Runtime 都成功；runner log SHA256 是
+`c06f84d0450b54408666f591c33c13ebc17072737267662cb4cda253c83896c7`。immutable result digest 是
+`sha256:4e48861eedfb93b391bbb51956df4b4542aeb409c570e8f76e78970070925190`，archive SHA256 是
+`261da8d6ebea1209fa4ebc08024e8d25707e5498f8ca6709ce9cfb205888f470`。
+
+触发器的 `Q=[576,2,16,1]` 与目标 V head 已正确，`K=[576,32,1,1]` 却在
+`ggml_backend_supports_op` 返回 false。frozen `fattn-common.cuh` 定义
+`FATTN_KQ_STRIDE=256`；DeepSeek/Kimi 的 GQA path 要求 `K.ne[1] % 256 == 0`，所以 32 在 kernel
+wrapper 前被拒绝。slot 1 因此没有被自然调用，这不能当作阴性 ABI 结论。
+
+触发器已改为最小满足条件的 `K=[576,256,1,1]`，并同步调整 V view 和 mask。运行 manifest 同时声明
+`qemu_integration/guest_libcuda/Makefile:ggml-flash-attn-ext-probe`；source-only `sync-source` 会从该
+声明检查已推送 commit 中的 target，再写入 closed pin。下一次 L40 probe 才能判断公开 GGML dispatcher 到
+slot 1 的可达性。

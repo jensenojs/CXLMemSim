@@ -63,8 +63,9 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
   写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。
 - `ggml-flash-attn-ext-trigger`用冻结 llama source 的公开头文件和 extracted guest artifact 的 exact GGML
-  libraries 构造一次小的 public `ggml_flash_attn_ext` 图。固定 `Q=[576,2,16,1]`、`K=[576,32,1,1]`、K 的
-  `[512,...]` V view 与 F16 mask 在 L40 上选择 core 中的 `<576,512,2,16>` CUDA wrapper。构建必须显式传入
+  libraries 构造一次小的 public `ggml_flash_attn_ext` 图。固定 `Q=[576,2,16,1]`、`K=[576,256,1,1]`、K 的
+  `[512,...]` V view 与 F16 mask 在 L40 上选择 core 中的 `<576,512,2,16>` CUDA wrapper。256 是 frozen CUDA
+  GQA dispatcher 的 `FATTN_KQ_STRIDE`，较小的 KV 长度会在 `supports_op` 阶段被拒绝。构建必须显式传入
   `GGML_INCLUDE_DIR`、`GGML_LIBRARY_DIR` 和仅供 link-time closure 的 `GGML_LINK_LIBRARY_DIR`，缺失时 fail
   closed；最后一项不能进入 host runtime 搜索路径。它不读写或调用 private export-table slot。
 - `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。每条受明细上限接纳的

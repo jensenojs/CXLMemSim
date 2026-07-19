@@ -248,8 +248,8 @@ L40 的 backend-init public attribute trigger 已验证 exact `libggml-cuda` 可
 selector `0x111` 未出现。因此 backend construction 不能解释 Kimi core 中该调用的前置状态。
 
 下一触发器不调用 C++ internal wrapper，也不伪造 kernel argument。它从 exact llama source 的公开头文件构造
-一张 `ggml_flash_attn_ext` 图：`Q=[576,2,16,1]`、`K=[576,32,1,1]`、`V` 为 K 的 `[512,...]` view，附带
-连续 F16 mask。对 L40 的 CUDA 选择代码，这组 shape 选择 core 中记录的
+一张 `ggml_flash_attn_ext` 图：`Q=[576,2,16,1]`、`K=[576,256,1,1]`、`V` 为 K 的 `[512,...]` view，附带
+连续 F16 mask。256 是 CUDA GQA dispatcher 的 `FATTN_KQ_STRIDE`，使公开图通过 `supports_op` 并选择 core 中记录的
 `ggml_cuda_flash_attn_ext_mma_f16_case<576,512,2,16>`。图在 exact guest artifact 的
 `libggml-cuda.so.0` 与 `libggml-base.so.0` 上分配、计算和同步一次；它只使用公开 GGML API，模型、QEMU
 和 guest shim 都不参与。

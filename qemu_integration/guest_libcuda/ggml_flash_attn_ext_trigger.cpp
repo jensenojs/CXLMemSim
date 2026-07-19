@@ -21,7 +21,11 @@ constexpr int64_t kHeadQ = 576;
 constexpr int64_t kHeadV = 512;
 constexpr int64_t kQueryTokens = 2;
 constexpr int64_t kQueryHeads = 16;
-constexpr int64_t kKeyValueTokens = 32;
+// The frozen CUDA GQA dispatcher requires K.ne[1] to be divisible by
+// FATTN_KQ_STRIDE (256).  Keeping this equal to the smallest supported
+// length makes the public graph reach the same <576,512,2,16> wrapper
+// selected in the Kimi core rather than being rejected at supports_op.
+constexpr int64_t kKeyValueTokens = 256;
 constexpr int64_t kKeyValueHeads = 1;
 constexpr size_t kContextBytes = 1024 * 1024;
 
@@ -33,7 +37,7 @@ void usage(FILE *stream) {
                 "GGML_INCLUDE_DIR、GGML_LIBRARY_DIR 和 GGML_LINK_LIBRARY_DIR；入口不会从系统路径搜索或回退到其他 "
                 "llama/ggml 库。\n"
                 "最后一项只让链接器解析 frozen libggml-cuda 的 libnccl.so.2 传递依赖；实际运行仍使用固定 L40 工具链。\n"
-                "固定形状 Q=[576,2,16,1]、K=[576,32,1,1]、V=K 的 [512,...] view、F16 mask，\n"
+                "固定形状 Q=[576,2,16,1]、K=[576,256,1,1]、V=K 的 [512,...] view、F16 mask，\n"
                 "在 L40 上选择 exact libggml-cuda 的 <576,512,2,16> MMA wrapper。\n"
                 "它只调用公开 GGML API；不读取、写入、调用或推断 CUDA private export-table slot。\n");
 }
