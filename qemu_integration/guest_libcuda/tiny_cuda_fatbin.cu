@@ -29,6 +29,17 @@ static int print_cuda_result(const char *stage, cudaError_t error) {
     return error == cudaSuccess ? 0 : 1;
 }
 
+/* CUDA Runtime, rather than this trigger, selects the private table and selector. */
+static int set_tiny_kernel_attributes(void) {
+    int failed = 0;
+    failed |= print_cuda_result("set_attribute_dynamic_shared_memory",
+                                cudaFuncSetAttribute(tiny_cuda_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 0));
+    failed |=
+        print_cuda_result("set_attribute_shared_memory_carveout",
+                          cudaFuncSetAttribute(tiny_cuda_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 50));
+    return failed;
+}
+
 static int print_driver_attribute(cu_device_get_attribute_t get_attribute, int attribute) {
     int value = 0;
     CUresult result = get_attribute(&value, attribute, 0);
@@ -85,6 +96,7 @@ extern "C" int tiny_cuda_probe_run(void) {
 
     failed |= print_cuda_result("set_device", cudaSetDevice(0));
     failed |= print_device_properties();
+    failed |= set_tiny_kernel_attributes();
     failed |= print_cuda_result("malloc", cudaMalloc((void **)&device_out, sizeof(*device_out)));
     if (!device_out) {
         printf("kernel_probe device_out=(nil)\n");

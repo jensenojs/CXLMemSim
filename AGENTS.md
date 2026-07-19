@@ -68,6 +68,9 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - build Type-2 QEMU: `cd /home/jensen/Projects/qemu-cxl-type2 && mkdir -p build && cd build && ../configure --target-list=x86_64-softmmu && ninja -j2 qemu-system-x86_64`
 - check Type-2 device is compiled: `/home/jensen/Projects/qemu-cxl-type2/build/qemu-system-x86_64 -device help | grep -i 'cxl-type2'`
 - build guest CUDA shim: `make -C qemu_integration/guest_libcuda`
+- prepare private export-table probe: `make -C qemu_integration/guest_libcuda private-export-table-probe`
+- run private export-table discovery on an L40: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]`
+- run a bounded private export-table capture: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--selector VALUE] [--memory rsi:BYTES] -- TRIGGER [ARGS...]`
 - Type 2 endpoint smoke: `./qemu_integration/smoke_type2_endpoint.sh`
 
 ## Code Conventions
@@ -96,6 +99,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - `/home/jensen/Projects/cxl-memsim/CXLAgent/` — 本机CXL Type-2 guest observability/reference repo；不属于本组件CNB checkout输入。
 - `qemu_integration/smoke_type2_endpoint.sh` — bounded host-side Type 2 QEMU realization smoke test.
 - `qemu_integration/guest_libcuda/libcuda.c` and `qemu_integration/guest_libcuda/cxl_gpu_cmd.h` — guest CUDA Driver API shim and BAR2 command/register contract.
+- `qemu_integration/guest_libcuda/private_export_probe.py` and `run_private_export_probe.sh` — host L40 Python-GDB observation of naturally reached private export tables. They record table shape, real calls and bounded capture state; they do not invoke unknown slots or prove guest/Type-2 correctness.
 - `script/build_qemu.sh` — builds the CXL-capable QEMU submodule using the vendored Meson wheel.
 - `lib/qemu/` — Type-2 QEMU source checkout after submodule initialization; expected to line up with `qemu-cxl-type2`, not arbitrary upstream QEMU.
 

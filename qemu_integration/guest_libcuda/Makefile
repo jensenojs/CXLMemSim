@@ -16,19 +16,25 @@ CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 INTEGRITY_EXPORT_ORACLE := cuda-integrity-export-oracle
+PRIVATE_EXPORT_PROBE := private_export_probe.py
+PRIVATE_EXPORT_RUNNER := run_private_export_probe.sh
 
 CUDA_TESTS := cuda_test cuda_advanced_test
 BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe integrity-export-oracle test-context-state test-context-shim
+.PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle test-context-state test-context-shim
 
 all: $(TARGETS)
 
 test-binaries: $(CUDA_TESTS) $(BAR_TESTS) $(TRANSPORT_TEST)
 
 tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)
+
+private-export-table-probe: tiny-probe $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_RUNNER)
+	python3 -m py_compile $(PRIVATE_EXPORT_PROBE)
+	bash -n $(PRIVATE_EXPORT_RUNNER)
 
 integrity-export-oracle: $(INTEGRITY_EXPORT_ORACLE)
 
