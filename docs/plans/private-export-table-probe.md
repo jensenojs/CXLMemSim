@@ -130,9 +130,11 @@ Kimi core 已经把下一份 trigger 收敛到一个公开 CUDA Runtime 调用�
 调用方显式给出的 DSO 路径、动态导出 anchor、同一 exact DSO 的 local host-stub ELF offset 和动态 shared
 memory 字节数。它以 `dlopen(..., RTLD_NOW | RTLD_GLOBAL)` 让该 DSO 完成真实 CUDA fatbin 注册，使用 anchor 的
 `dladdr` base 加 offset 计算 host stub，并用 `dl_iterate_phdr` 拒绝不位于该 DSO executable `PT_LOAD` 的地址。
-随后它只调用公开的 `cudaSetDevice(0)` 与
-`cudaFuncSetAttribute(host_stub, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`。private callback table
-仍只由 debugger 被动观察。
+随后它调用公开的 `cudaSetDevice(0)` 与
+`cudaFuncSetAttribute(host_stub, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`。调用方可显式开启
+`--initialize-backend`：它只调用 exact DSO 导出的 `ggml_backend_cuda_init(0)`，再用公开
+`ggml_backend_free` 释放一个 backend，用于重放 Kimi 已建立的 backend Runtime 前置状态。它不构造模型图、
+不加载模型、不调用 private callback；private callback table 仍只由 debugger 被动观察。
 
 这个适配器不从模型、源码或符号表猜输入。L40 composition 在运行前必须校验 artifact manifest 与
 `libggml-cuda.so.0` SHA256，再用 `nm -an` 从该文件解析 local host-stub offset；anchor raw symbol、offset、

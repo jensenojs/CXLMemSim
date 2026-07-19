@@ -129,6 +129,37 @@ guest 的 `tools_get_buffer1` 与 `tools_get_buffer2` 分别返回 1024-byte 和
 它还没有读取返回 buffer 的内容，也没有观察 Runtime 后续如何使用这些 buffer，因此不能宣布 slot 2/6 的
 完整生命周期等价。
 
-主目标在两轮 exact DSO trigger 中仍为 `slot 1 count=0`、`capture_status=not_reached`。下一步需要补足
+## 返回 buffer 内容排除了最后一个 getter 初始化候选
+
+CXLMemSim `372b32b0b0631c23e98f7ec82acafd3376c80dc1` 为自然调用的已知
+`void (void **ptr, size_t *size)` companion 增加了显式的一层 output-buffer projection：GDB 只在 return
+后读取 `*ptr`、`*size`，再读取至多 spec 声明的字节数。它不调用 private slot，也不继续解引用 buffer 内的
+任意内容。
+
+cxl-lab 任务 [`cnb-bh8-1jtsl45h8`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-bh8-1jtsl45h8)
+消费同一 exact `libggml-cuda.so.0` public trigger。runner log SHA256 是
+`ac590d53358a7461b8950c2bd634bd37a4c5f7cce83abe75baf8f49dc21e9039`；虽然 top-level target slot 1
+继续 `not_reached` 而按合同返回 failure，61 个文件的 immutable diagnostic result 已成功发布并 fresh-pull：
+
+```text
+result digest       sha256:3b466ce819ff1af038adc809d79f5119dd0dd5ee39e92a8c2b5bd915b9dd73bc
+archive SHA256      637982aa2ea82e707b9a0dfe4e29ba32661db71bcc5e2edcc1340430e5e13feb
+manifest SHA256     c8a6f2e458bfe7b0871b51ef2e3b962419d7d703aa7c7c549d2d0d7f81e8a069
+```
+
+同一个 L40 Runtime 下，slot 2 的 1024 bytes 和 slot 6 的 14 bytes 都是全零。已有 exact Kimi core 在
+崩溃点读取 guest `TOOLS_RUNTIME_BUFFER1` 与 `TOOLS_RUNTIME_BUFFER2`，也分别得到全零。因此当前可排除：
+
+```text
+真实 Driver 在 slot 2/6 写入非零初始化内容
+→ guest 静态零 buffer 缺少该内容
+→ CUDA Runtime 改走 slot 1
+```
+
+这只比较了 getter return 后的初始字节。buffer 后续所有权、写入时机、并发和生命周期仍未观测；不过这些
+变量不能再作为“slot 1 在首次 cudaFuncSetAttribute 前被触发”的无证据解释。下一边界是 exact DSO 的
+backend/Runtime 前置状态，而不是 slot 2/6。
+
+主目标在三轮 exact DSO trigger 中仍为 `slot 1 count=0`、`capture_status=not_reached`。下一步需要补足
 真实 Kimi 在 `cudaFuncSetAttribute` 前已经建立的 module/function/Runtime 状态，继续让真实 Driver 自然
 调用 slot 1。当前证据不支持修改 slot 2/6，也不支持为 slot 1 填 success stub。

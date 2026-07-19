@@ -27,12 +27,15 @@ enum {
 typedef int cuda_error_t;
 typedef cuda_error_t (*cuda_set_device_t)(int device);
 typedef cuda_error_t (*cuda_func_set_attribute_t)(const void *function, int attribute, int value);
+typedef void *(*ggml_backend_cuda_init_t)(int device);
+typedef void (*ggml_backend_free_t)(void *backend);
 
 struct trigger_options {
     const char *library;
     const char *anchor_symbol;
     uintptr_t kernel_offset;
     int shared_memory_bytes;
+    bool initialize_backend;
 };
 
 struct executable_segment {
@@ -45,7 +48,7 @@ struct executable_segment {
 static void usage(FILE *stream) {
     fprintf(stream,
             "用法：ggml-cuda-attribute-trigger --library PATH --anchor-symbol SYMBOL \\\n"
-            "  --kernel-offset ELF_VADDR --shared-memory-bytes BYTES\n"
+            "  --kernel-offset ELF_VADDR --shared-memory-bytes BYTES [--initialize-backend]\n"
             "\n"
             "输入必须来自同一份 exact DSO 的静态与运行时证据：\n"
             "  --library              exact libggml-cuda 路径；调用前以 artifact manifest/sha256 校验。\n"
@@ -54,7 +57,9 @@ static void usage(FILE *stream) {
             "  --shared-memory-bytes  同一 Runtime/core 观察到的动态 shared-memory 字节数，不从反汇编猜测。\n"
             "\n"
             "程序 dlopen exact DSO 以完成真实 fatbin 注册，验证 base + ELF virtual address 落在该 DSO\n"
-            "的 executable PT_LOAD，然后只调用公开 cudaSetDevice(0) 与 cudaFuncSetAttribute(stub, 8, BYTES)。\n"
+            "的 executable PT_LOAD，然后调用公开 cudaSetDevice(0) 与 cudaFuncSetAttribute(stub, 8, BYTES)。\n"
+            "--initialize-backend 会在 attribute 前调用 exact DSO 的 ggml_backend_cuda_init(0)，并在结束时\n"
+            "调用 ggml_backend_free；它补 backend Runtime 状态，不构造模型图。\n"
             "成功只证明这次 public Runtime trigger 到达；它不证明 private ABI、guest shim、Type-2 或 Kimi correctness，\n"
             "也不会读取、写入或调用 CUDA private export-table entry。\n");
 }
@@ -63,10 +68,10 @@ static void hint(FILE *stream) {
     fprintf(stream,
             "ggml_cuda_attribute_trigger_hint=self=qemu_integration/guest_libcuda/ggml_cuda_attribute_trigger.c\n"
             "ggml_cuda_attribute_trigger_hint=problem=full Kimi warmup reached cudaFuncSetAttribute and then naturally called a NULL CUDA Runtime private export-table slot; replaying the entire model for each ABI question is too expensive\n"
-            "ggml_cuda_attribute_trigger_hint=mental_model=dlopen the exact libggml-cuda to register its real fatbin host stubs; validate base plus the supplied ELF virtual address is executable; call only public cudaSetDevice and cudaFuncSetAttribute; let Python-GDB observe any private table call made naturally by CUDA Runtime\n"
+            "ggml_cuda_attribute_trigger_hint=mental_model=dlopen the exact libggml-cuda to register its real fatbin host stubs; validate base plus the supplied ELF virtual address is executable; optionally initialize and free one exact ggml CUDA backend; call public cudaSetDevice and cudaFuncSetAttribute; let Python-GDB observe any private table call made naturally by CUDA Runtime\n"
             "ggml_cuda_attribute_trigger_hint=role=produce the smallest public Runtime action that preserves the exact ggml registered-stub shape seen in the Kimi failure without embedding or invoking a private ABI\n"
             "ggml_cuda_attribute_trigger_hint=use_when=static evidence identifies one exact registered host-stub virtual address and the real failing path is a cudaFuncSetAttribute call whose private table behavior must be observed on the matching L40 Driver and Runtime\n"
-            "ggml_cuda_attribute_trigger_hint=inputs=exact libggml-cuda path and SHA256 checked by the outer run spec; exported anchor symbol; ELF virtual address of the registered host stub; observed dynamic shared-memory byte count\n"
+            "ggml_cuda_attribute_trigger_hint=inputs=exact libggml-cuda path and SHA256 checked by the outer run spec; exported anchor symbol; ELF virtual address of the registered host stub; observed dynamic shared-memory byte count; optional --initialize-backend\n"
             "ggml_cuda_attribute_trigger_hint=outputs=public trigger begin/end markers, exact DSO base and resolved stub address, public API arguments and CUDA return codes; private table events are separate outputs of run_private_export_probe.sh\n"
             "ggml_cuda_attribute_trigger_hint=interpret=trigger success means the exact DSO loaded, the supplied stub address belonged to its executable mapping, and CUDA Runtime accepted the public set-device and function-attribute calls; inspect the paired GDB capture to learn whether UUID slot and selector were naturally reached\n"
             "ggml_cuda_attribute_trigger_hint=proves=one exact public cudaFuncSetAttribute call was issued against a registered stub from the declared libggml-cuda under the current host Runtime\n"
@@ -118,6 +123,10 @@ static int parse_options(int argc, char **argv, struct trigger_options *options)
         if (strcmp(argument, "--hint") == 0) {
             hint(stdout);
             return 2;
+        }
+        if (strcmp(argument, "--initialize-backend") == 0) {
+            options->initialize_backend = true;
+            continue;
         }
         if (index + 1 >= argc) {
             fprintf(stderr, "ggml_cuda_attribute_trigger_error=missing value for %s\n", argument);
@@ -200,6 +209,7 @@ int main(int argc, char **argv) {
     printf("ggml_cuda_attribute_kernel_offset=0x%" PRIxPTR "\n", options.kernel_offset);
     printf("ggml_cuda_attribute_public_attribute=%d\n", CUDA_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_MEMORY_SIZE);
     printf("ggml_cuda_attribute_shared_memory_bytes=%d\n", options.shared_memory_bytes);
+    printf("ggml_cuda_attribute_initialize_backend=%d\n", options.initialize_backend);
     fflush(stdout);
 
     void *handle = dlopen(options.library, RTLD_NOW | RTLD_GLOBAL);
@@ -262,6 +272,23 @@ int main(int argc, char **argv) {
         return 25;
     }
 
+    ggml_backend_cuda_init_t initialize_backend = NULL;
+    ggml_backend_free_t free_backend = NULL;
+    if (options.initialize_backend) {
+        dlerror();
+        initialize_backend = (ggml_backend_cuda_init_t)dlsym(handle, "ggml_backend_cuda_init");
+        const char *initialize_error = dlerror();
+        dlerror();
+        free_backend = (ggml_backend_free_t)dlsym(RTLD_DEFAULT, "ggml_backend_free");
+        const char *free_error = dlerror();
+        if (!initialize_backend || !free_backend) {
+            fprintf(stderr, "ggml_cuda_attribute_trigger_error=backend_symbol_missing initialize=%s free=%s\n",
+                    initialize_error ? initialize_error : "available", free_error ? free_error : "available");
+            dlclose(handle);
+            return 28;
+        }
+    }
+
     printf("ggml_cuda_attribute_anchor_address=%p\n", anchor);
     printf("ggml_cuda_attribute_library_base=%p\n", anchor_info.dli_fbase);
     printf("ggml_cuda_attribute_library_loaded_path=%s\n", anchor_info.dli_fname);
@@ -276,10 +303,25 @@ int main(int argc, char **argv) {
         return 26;
     }
 
+    void *backend = NULL;
+    if (options.initialize_backend) {
+        backend = initialize_backend(0);
+        printf("ggml_cuda_attribute_backend=%p\n", backend);
+        if (!backend) {
+            printf("=== GGML_CUDA_ATTRIBUTE_TRIGGER_FAIL ===\n");
+            dlclose(handle);
+            return 29;
+        }
+    }
+
     const cuda_error_t set_attribute_result =
         set_attribute((const void *)kernel_address, CUDA_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_MEMORY_SIZE,
                       options.shared_memory_bytes);
     printf("ggml_cuda_attribute_set_attribute_result=%d\n", set_attribute_result);
+    if (backend) {
+        free_backend(backend);
+        printf("ggml_cuda_attribute_backend_freed=1\n");
+    }
     if (set_attribute_result != CUDA_SUCCESS) {
         printf("=== GGML_CUDA_ATTRIBUTE_TRIGGER_FAIL ===\n");
         dlclose(handle);
