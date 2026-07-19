@@ -27,13 +27,13 @@ MAX_TERMINATED_WORDS = 256
 DEFAULT_EVENT_LIMIT = 128
 HINT = """private_export_probe_hint=self=qemu_integration/guest_libcuda/private_export_probe.py
 private_export_probe_hint=problem=CUDA Runtime private export tables are undocumented; a NULL guest entry and a host table address reveal neither the slot signature nor the selector-specific state transition needed for a safe shim implementation
-private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; every detailed natural call receives a sequence-bound entry/return record, while capture filters one declared UUID/slot/selector for bounded memory deltas
+private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; every detailed natural call receives a sequence-bound entry/return record, while capture filters one declared UUID/slot/selector for bounded argument memory deltas and one declared returned buffer
 private_export_probe_hint=role=implement the debugger-side observer and machine-readable table/call/capture event model used by multiple public CUDA triggers
 private_export_probe_hint=use_when=a public CUDA API or exact application trigger naturally reaches a private table path on the matching real NVIDIA Driver/Runtime and the unknown ABI must be constrained before changing the guest shim
-private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows and event limit
+private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows, one POINTER_OUT:SIZE_OUT:MAX_BYTES output-buffer projection and event limit
 private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages
 private_export_probe_hint=interpret=calls and returns with the same sequence are one naturally executed private call; capture reached additionally requires the declared UUID/slot/selector and bounded memory pair; not_reached supplies no target ABI authority
-private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, and bounded memory facts only for the declared target
+private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, bounded argument-memory facts and, only when declared, one first-level returned buffer pointer, length and bounded bytes
 private_export_probe_hint=does_not_prove=the complete function signature, semantics outside observed arguments/state, safety of active fuzzing, guest shim correctness, Type-2/Kimi correctness or TPS
 private_export_probe_hint=next=union results from faithful public triggers; for a Kimi blocker use the smallest reached entry/return oracle, and keep unknown or unreached slots NULL and explicit
 """
@@ -71,6 +71,20 @@ def parse_memory(text: str) -> dict[str, int | str]:
     if length == 0 or length > 4096:
         raise argparse.ArgumentTypeError("memory window must be between 1 and 4096 bytes")
     return {"register": match.group(1), "bytes": length}
+
+
+def parse_output_buffer(text: str) -> dict[str, int | str]:
+    match = re.fullmatch(
+        r"(r(?:di|si|dx|cx|8|9)):(r(?:di|si|dx|cx|8|9)):(0x[0-9a-fA-F]+|[0-9]+)", text
+    )
+    if not match:
+        raise argparse.ArgumentTypeError(
+            "output buffer must be POINTER_OUT_REGISTER:SIZE_OUT_REGISTER:MAX_BYTES"
+        )
+    maximum = parse_nonnegative(match.group(3))
+    if maximum == 0 or maximum > 4096:
+        raise argparse.ArgumentTypeError("output buffer maximum must be between 1 and 4096 bytes")
+    return {"pointer_register": match.group(1), "size_register": match.group(2), "max_bytes": maximum}
 
 
 def json_dump(path: pathlib.Path, value: Any) -> None:
@@ -143,7 +157,7 @@ def prepare(args: argparse.Namespace) -> int:
     if args.mode == "capture" and (args.uuid is None or args.slot is None):
         raise RuntimeError("capture mode requires --uuid and --slot")
     if args.mode == "discovery" and (
-        any(value is not None for value in (args.uuid, args.slot, args.selector)) or args.memory
+        any(value is not None for value in (args.uuid, args.slot, args.selector)) or args.memory or args.output_buffer
     ):
         raise RuntimeError("discovery mode does not accept capture filters")
 
@@ -177,6 +191,7 @@ def prepare(args: argparse.Namespace) -> int:
         "slot": args.slot,
         "selector": args.selector,
         "memory": args.memory,
+        "output_buffer": args.output_buffer,
         "selector_max": args.selector_max,
         "event_limit": args.event_limit,
     }
@@ -317,6 +332,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     prepare_parser.add_argument("--slot", type=parse_nonnegative)
     prepare_parser.add_argument("--selector", type=parse_nonnegative)
     prepare_parser.add_argument("--memory", type=parse_memory, action="append", default=[])
+    prepare_parser.add_argument("--output-buffer", type=parse_output_buffer)
     prepare_parser.add_argument("--selector-max", type=parse_nonnegative, default=0x3FF)
     prepare_parser.add_argument("--event-limit", type=parse_nonnegative, default=DEFAULT_EVENT_LIMIT)
     prepare_parser.add_argument("trigger", nargs=argparse.REMAINDER)
@@ -455,6 +471,37 @@ if gdb is not None:
             except gdb.MemoryError as error:
                 return {"status": "unavailable", "reason": str(error)}
             return {"status": "ok", "address": hex_address(address), "bytes_hex": raw.hex()}
+
+        def observe_output_buffer(self, entry_registers: dict[str, str]) -> dict[str, Any] | None:
+            declaration = self.config.get("output_buffer")
+            if declaration is None:
+                return None
+            pointer_out_address = int(entry_registers[declaration["pointer_register"]], 16)
+            size_out_address = int(entry_registers[declaration["size_register"]], 16)
+            try:
+                pointer = self.read_word(pointer_out_address)
+                size = self.read_word(size_out_address)
+            except Exception as error:
+                return {
+                    "status": "unavailable",
+                    "reason": str(error),
+                    "pointer_out_register": declaration["pointer_register"],
+                    "size_out_register": declaration["size_register"],
+                    "max_bytes": declaration["max_bytes"],
+                }
+            result: dict[str, Any] = {
+                "status": "ok",
+                "pointer_out_register": declaration["pointer_register"],
+                "size_out_register": declaration["size_register"],
+                "pointer": hex_address(pointer),
+                "size": size,
+                "max_bytes": declaration["max_bytes"],
+            }
+            if size > declaration["max_bytes"]:
+                result["content"] = {"status": "unavailable", "reason": "declared_max_exceeded"}
+                return result
+            result["content"] = self.read_bytes(pointer, size)
+            return result
 
         @staticmethod
         def register(name: str) -> int:
@@ -663,6 +710,7 @@ if gdb is not None:
                     "return_rax": return_rax,
                     "memory_windows_before": self.memory_before,
                     "memory_windows_after": after,
+                    "output_buffer_after": self.observer.observe_output_buffer(self.entry_registers),
                 }
             )
             return False

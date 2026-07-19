@@ -52,8 +52,10 @@ table 解析只接受两类仓内和 Concordia 已观察的 shape：首 word 为
 table，或由 NULL/`UINTPTR_MAX` 终止的 pointer table。读取必须有显式上限；长度不对齐、越过上限、
 终止符缺失或指针不可读时 fail closed。
 
-capture 只读取调用约定中的整数参数寄存器、栈顶返回地址和调用方声明上限内的可读内存。不可读指针记录
-为 unavailable。探针不把寄存器中的任意整数默认解释成指针，也不沿指针递归读取。
+capture 只读取调用约定中的整数参数寄存器、栈顶返回地址和调用方声明上限内的可读内存。对于已经由自然
+调用证明为 `void **ptr, size_t *size` 形状的函数，调用方还可显式声明两个 out-parameter 寄存器及最大
+字节数；return 后探针读取 `*ptr`、`*size`，再对该唯一返回 buffer 读取至多声明上限的一层字节。不可读或
+超界记录为 unavailable。探针不把寄存器中的任意整数默认解释成指针，也不继续沿返回 buffer 内容递归读取。
 
 ## 影响边界
 
@@ -116,6 +118,7 @@ private-export-table-probe DRIVER -- MODE [FILTERS] -- TRIGGER [ARGS...]
        只对实际调用记录 UUID、slot、caller、thread、入口寄存器、返回RAX与调用次数
   -> capture:
        只在匹配 UUID、slot、selector 时记录 entry/return 和有限内存差异
+       对显式声明的 out-parameter 形状记录一层返回 buffer 的指针、长度和有界内容
   -> 输出 identity.json、tables.jsonl、calls.jsonl、returns.jsonl、captures.jsonl、summary.json
 ```
 
@@ -181,7 +184,9 @@ discovery breakpoint 命中后读取 caller return address、thread 和整数参
 return breakpoint，用同一 sequence 保存 `RAX`；进程正常退出时存在未配对 sequence 会 fail closed。
 capture 根据 UUID、slot 和可选 selector 过滤，并复用同一个 return breakpoint，只有目标匹配时才比较调用方
 显式选择的一个或多个整数参数寄存器指向的有限窗口。每个窗口独立声明 register 与 bytes，探针不沿其中内容
-继续解引用。达到 event limit 后普通明细停止增长，累计调用计数继续更新，目标匹配仍会被捕获。
+继续解引用。对于已知 `void **ptr, size_t *size` out-parameter 的自然 companion call，调用方可额外声明
+`pointer-register:size-register:max-bytes`；probe 仅在 return 后读取这两个 out object，并对输出 pointer 做一次
+有界读取。达到 event limit 后普通明细停止增长，累计调用计数继续更新，目标匹配仍会被捕获。
 
 ## 删除清单与保留清单
 
