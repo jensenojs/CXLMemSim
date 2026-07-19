@@ -25,6 +25,18 @@ POINTER_BYTES = 8
 MAX_TABLE_BYTES = 4096
 MAX_TERMINATED_WORDS = 256
 DEFAULT_EVENT_LIMIT = 128
+HINT = """private_export_probe_hint=self=qemu_integration/guest_libcuda/private_export_probe.py
+private_export_probe_hint=problem=CUDA Runtime private export tables are undocumented; a NULL guest entry and a host table address reveal neither the slot signature nor the selector-specific state transition needed for a safe shim implementation
+private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; discovery inventories UUID, shape, slot, caller and count; capture filters one declared UUID/slot/selector and records bounded entry/return registers and memory deltas
+private_export_probe_hint=role=implement the debugger-side observer and machine-readable table/call/capture event model used by multiple public CUDA triggers
+private_export_probe_hint=use_when=a public CUDA API or exact application trigger naturally reaches a private table path on the matching real NVIDIA Driver/Runtime and the unknown ABI must be constrained before changing the guest shim
+private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows and event limit
+private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages
+private_export_probe_hint=interpret=discovery records only slots actually called; capture reached requires an entry/return pair matching every declared filter; not_reached is a valid negative result and supplies no ABI implementation authority
+private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached and the bounded register/memory facts GDB observed for matched calls
+private_export_probe_hint=does_not_prove=the complete function signature, semantics outside observed arguments/state, safety of active fuzzing, guest shim correctness, Type-2/Kimi correctness or TPS
+private_export_probe_hint=next=union results from faithful public triggers; for a Kimi blocker use the smallest reached entry/return oracle, and keep unknown or unreached slots NULL and explicit
+"""
 
 
 def canonical_uuid(raw: bytes) -> str:
@@ -607,6 +619,9 @@ if gdb is not None:
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["--hint"]:
+        print(HINT, end="")
+        return 0
     args = parse_args(argv)
     return args.handler(args)
 

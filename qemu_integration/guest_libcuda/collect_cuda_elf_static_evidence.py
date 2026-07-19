@@ -55,6 +55,19 @@ private export-table slot，也不证明 guest/Type-2/Kimi correctness。动态 
 Python-enabled gdb probe 的自然调用 capture 取得。
 """
 
+HINT = """cuda_elf_static_evidence_hint=self=qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py
+cuda_elf_static_evidence_hint=problem=manual nm/readelf/objdump commands used during a Kimi core investigation are easy to lose, rerun against the wrong ELF or quote only the matching line while omitting the full symbol and relocation context
+cuda_elf_static_evidence_hint=mental_model=hash one exact ELF first; save complete tool transcripts and command exit codes; apply named selectors only as views over those raw files; fail closed when a required symbol, uniqueness or disassembly predicate is absent
+cuda_elf_static_evidence_hint=role=turn one exact CUDA-related ELF or core companion into reusable static identity, symbol, segment, relocation, version and bounded disassembly evidence without executing it
+cuda_elf_static_evidence_hint=use_when=a crash or runtime observation names an exact guest or host DSO and the next dynamic probe needs verified symbol addresses, registered-stub virtual addresses, call sites or Build ID
+cuda_elf_static_evidence_hint=inputs=exact regular ELF path; expected SHA256 when frozen by a run spec; optional dynamic/local symbol regexes, uniqueness constraints, disassembly windows, required text, DWARF or SASS requests
+cuda_elf_static_evidence_hint=outputs=static-evidence.json plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
+cuda_elf_static_evidence_hint=interpret=status pass means the exact ELF and every requested selector/predicate were satisfied; fail_closed still preserves all raw transcripts and identifies the first missing or ambiguous static fact
+cuda_elf_static_evidence_hint=proves=exact ELF identity, Build ID and the static symbol/segment/relocation/disassembly facts directly present in the saved tool output
+cuda_elf_static_evidence_hint=does_not_prove=that CUDA loads the ELF, a host stub is registered, a private table slot is called, the inferred function signature is correct, guest Type-2 works, Kimi is correct or TPS changes
+cuda_elf_static_evidence_hint=next=use verified static addresses and call shape to configure one public Runtime trigger or read-only core/debugger capture; preserve the evidence directory with the immutable diagnostic result
+"""
+
 
 @dataclass(frozen=True)
 class Symbol:
@@ -327,6 +340,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["--hint"]:
+        print(HINT, end="")
+        return 0
     return collect(parse_args(argv))
 
 

@@ -32,6 +32,22 @@ usage() {
 EOF
 }
 
+hint() {
+    cat <<'EOF'
+cuda_debug_capture_hint=self=qemu_integration/guest_libcuda/run_cuda_debug_capture.sh
+cuda_debug_capture_hint=problem=a one-off GDB or CUDA-GDB session can be impossible to replay when the exact debugger, executable, core, sysroot, commands and transcript are not preserved together
+cuda_debug_capture_hint=mental_model=select ordinary gdb for host ABI/core work or cuda-gdb for device-code state; validate explicit inputs; save debugger and file hashes plus the exact command script; run batch mode once without modifying or compressing the source core
+cuda_debug_capture_hint=role=provide a generic evidence-preserving debugger wrapper for program runs or exact executable/core analysis; specialized semantic probes remain separate consumers
+cuda_debug_capture_hint=use_when=a failure already has an exact executable/core or a bounded program command and the question can be answered by explicit debugger commands; choose cuda-gdb only when device state is actually required
+cuda_debug_capture_hint=inputs=debugger selection, new output directory, command file and either program arguments or exact executable plus core; optional explicit sysroot/search commands belong in the command file
+cuda_debug_capture_hint=outputs=debugger-identity.txt,input-identity.txt,debugger-command.txt,debugger.transcript,debugger-exit.txt with source files left unchanged
+cuda_debug_capture_hint=interpret=the transcript is the authoritative debugger observation; wrapper success only means the debugger invocation completed, while command errors and unresolved symbols remain evidence
+cuda_debug_capture_hint=proves=which exact debugger and input identities produced each saved stack, register, memory, mapping or disassembly observation
+cuda_debug_capture_hint=does_not_prove=that debugger interpretation is semantically correct without matching symbols, that host gdb sees device state, that cuda-gdb is required for host ABI, Kimi correctness or TPS
+cuda_debug_capture_hint=next=combine the transcript with exact ELF/static evidence and choose the narrowest specialized probe or code fix; retain the original core and companion binaries in the immutable result
+EOF
+}
+
 output_dir=
 debugger=gdb
 program=
@@ -47,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --executable) executable=${2:-}; shift 2 ;;
         --core) core=${2:-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
+        --hint) hint; exit 0 ;;
         --) shift; break ;;
         *) die "unknown argument: $1" ;;
     esac

@@ -69,6 +69,8 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
   kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。
 
+上述四个入口与`ggml-cuda-attribute-trigger`都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；内部库、测试夹具和生成二进制不伪装成CLI。
+
 每个新 ABI 失败先复用上述最窄入口，保存 `proves`、`does_not_prove` 和下一边界；不要复制临时 `nm`、
 `readelf`、`objdump` 或 GDB 命令。需要正式 L40、exact artifact 或 core 组合时，输入身份和结果发布由
 `cxl-lab` diagnostic pipeline 管理，不手改本仓 `.cnb.yml` 的 image 行，也不在交互 shell 拼装冻结输入。
@@ -113,7 +115,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - DO make tests self-contained binaries that return nonzero on failure; mirror `tests/test_dcd_gfam.cpp` and register always-on tests with `add_test(...)` in `CMakeLists.txt`.
 - DO keep guest ABI constants synchronized across guest and QEMU-facing code; `qemu_integration/guest_libcuda/cxl_gpu_cmd.h` is the high-fan-in command/register contract for the CUDA shim.
 - DO use `set -euo pipefail` in new maintained shell scripts; `qemu_integration/launch_qemu_vcs_dcd_gfam.sh` and `smoke_type2_endpoint.sh` are the current good examples.
-- DON'T treat `qemu_integration/launch_qemu_type2_gpu.sh` or `launch_qemu_type2_hetgpu.sh` as reliable templates; both contain malformed shell syntax in this checkout.
+- `qemu_integration/AGENTS.md`拥有集成入口、workload inventory与归档路由；`qemu_integration/arch/AGENTS.md`拥有已证实失效文件的操作边界。归档文件不能作为模板、构建输入或运行入口；需要相同能力时在当前合同上新建维护入口。
 - DON'T silently fall back from real GPU mode to simulation in Type 2 GPU work; `README.md` documents that real GPU initialization errors should remain visible.
 
 ## Key Files

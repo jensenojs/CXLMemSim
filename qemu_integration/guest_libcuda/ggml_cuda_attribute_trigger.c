@@ -59,6 +59,22 @@ static void usage(FILE *stream) {
             "也不会读取、写入或调用 CUDA private export-table entry。\n");
 }
 
+static void hint(FILE *stream) {
+    fprintf(stream,
+            "ggml_cuda_attribute_trigger_hint=self=qemu_integration/guest_libcuda/ggml_cuda_attribute_trigger.c\n"
+            "ggml_cuda_attribute_trigger_hint=problem=full Kimi warmup reached cudaFuncSetAttribute and then naturally called a NULL CUDA Runtime private export-table slot; replaying the entire model for each ABI question is too expensive\n"
+            "ggml_cuda_attribute_trigger_hint=mental_model=dlopen the exact libggml-cuda to register its real fatbin host stubs; validate base plus the supplied ELF virtual address is executable; call only public cudaSetDevice and cudaFuncSetAttribute; let Python-GDB observe any private table call made naturally by CUDA Runtime\n"
+            "ggml_cuda_attribute_trigger_hint=role=produce the smallest public Runtime action that preserves the exact ggml registered-stub shape seen in the Kimi failure without embedding or invoking a private ABI\n"
+            "ggml_cuda_attribute_trigger_hint=use_when=static evidence identifies one exact registered host-stub virtual address and the real failing path is a cudaFuncSetAttribute call whose private table behavior must be observed on the matching L40 Driver and Runtime\n"
+            "ggml_cuda_attribute_trigger_hint=inputs=exact libggml-cuda path and SHA256 checked by the outer run spec; exported anchor symbol; ELF virtual address of the registered host stub; observed dynamic shared-memory byte count\n"
+            "ggml_cuda_attribute_trigger_hint=outputs=public trigger begin/end markers, exact DSO base and resolved stub address, public API arguments and CUDA return codes; private table events are separate outputs of run_private_export_probe.sh\n"
+            "ggml_cuda_attribute_trigger_hint=interpret=trigger success means the exact DSO loaded, the supplied stub address belonged to its executable mapping, and CUDA Runtime accepted the public set-device and function-attribute calls; inspect the paired GDB capture to learn whether UUID slot and selector were naturally reached\n"
+            "ggml_cuda_attribute_trigger_hint=proves=one exact public cudaFuncSetAttribute call was issued against a registered stub from the declared libggml-cuda under the current host Runtime\n"
+            "ggml_cuda_attribute_trigger_hint=does_not_prove=the signature or semantics of any private slot, a correct guest shim implementation, BAR2 or Type-2 execution, Kimi output correctness, or TPS\n"
+            "ggml_cuda_attribute_trigger_hint=next=combine this trigger with static-evidence identity and bounded Python-GDB capture; only a naturally observed entry/return and memory-delta shape may justify the smallest guest-shim oracle before the next same-VM Kimi run\n"
+            "ggml_cuda_attribute_trigger_hint=related=qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py,qemu_integration/guest_libcuda/run_private_export_probe.sh,cxl-lab/docs/specs/kimi-private-runtime-abi-diagnostic.md\n");
+}
+
 static int parse_uintptr(const char *text, uintptr_t *value) {
     char *end = NULL;
     unsigned long long parsed;
@@ -98,6 +114,10 @@ static int parse_options(int argc, char **argv, struct trigger_options *options)
         if (strcmp(argument, "--help") == 0 || strcmp(argument, "-h") == 0) {
             usage(stdout);
             return 1;
+        }
+        if (strcmp(argument, "--hint") == 0) {
+            hint(stdout);
+            return 2;
         }
         if (index + 1 >= argc) {
             fprintf(stderr, "ggml_cuda_attribute_trigger_error=missing value for %s\n", argument);
@@ -166,7 +186,7 @@ static int inspect_loaded_object(struct dl_phdr_info *info, size_t size, void *o
 int main(int argc, char **argv) {
     struct trigger_options options;
     const int parse_status = parse_options(argc, argv, &options);
-    if (parse_status > 0) {
+    if (parse_status == 1 || parse_status == 2) {
         return 0;
     }
     if (parse_status < 0) {

@@ -18,6 +18,22 @@ cuGetExportTable tables and table entry calls; it does not invoke private slots.
 EOF
 }
 
+hint() {
+    cat <<'EOF'
+private_export_probe_hint=self=qemu_integration/guest_libcuda/run_private_export_probe.sh
+private_export_probe_hint=problem=running isolated GDB commands by hand loses Driver, Runtime, trigger and probe identities and makes negative private-table results impossible to compare across public triggers
+private_export_probe_hint=mental_model=validate a new output directory and debugger prerequisites; generate one GDB command file loading private_export_probe.py; execute the caller-supplied trigger verbatim; preserve full transcript and identity; require the Python observer summary to close
+private_export_probe_hint=role=provide the command-line boundary for reusable discovery or bounded capture while keeping trigger selection outside the probe implementation
+private_export_probe_hint=use_when=run a low-cost public CUDA trigger on a real compatible NVIDIA environment to inventory natural private calls or capture one UUID/slot/selector already justified by discovery or a Kimi core
+private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/event limits, Python-enabled gdb and an explicit trigger command after --
+private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,captures.jsonl,gdb-status.json,summary.json
+private_export_probe_hint=interpret=exit success means GDB and the observer completed their declared mode; inspect summary capture_status because a successful run may correctly report not_reached
+private_export_probe_hint=proves=the exact trigger/debugger/probe composition and naturally observed private-table events preserved in the output directory
+private_export_probe_hint=does_not_prove=that an unreached slot is unused by Kimi, that a non-NULL entry has a known signature, that active calling is safe, or that guest Type-2/Kimi is correct
+private_export_probe_hint=next=compare discovery sets across triggers or feed a reached bounded capture into a real-Driver oracle and minimal guest-shim repair; never replace not_reached with a guessed success stub
+EOF
+}
+
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 readonly ROOT
 PROBE=$ROOT/qemu_integration/guest_libcuda/private_export_probe.py
@@ -43,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --selector-max) selector_max=${2:-}; shift 2 ;;
         --event-limit) event_limit=${2:-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
+        --hint) hint; exit 0 ;;
         --) shift; break ;;
         *) die "unknown argument: $1" ;;
     esac
