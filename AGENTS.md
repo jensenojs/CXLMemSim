@@ -62,9 +62,10 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
 - `ggml-cuda-attribute-trigger`加载调用方给定的 exact `libggml-cuda`，用已收集的 dynamic anchor 与同 DSO
   local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
   写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。
-- `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。discovery 记录实际
-  可达集合；capture 只在显式 UUID、slot 和可选 selector 匹配时保存有限入口/返回状态。它不主动调用未知 slot，
-  负结果只表示给定 trigger 没有到达该边界。
+- `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。每条受明细上限接纳的
+  调用以 sequence 保存 entry registers 与 return `RAX`；capture 只在显式 UUID、slot 和可选 selector 匹配时
+  读取一个或多个声明的整数参数寄存器窗口。它不主动调用未知 slot，不沿窗口内容继续解引用；负结果只表示
+  给定 trigger 没有到达该边界。
 - `run_cuda_debug_capture.sh`对程序或 exact ELF + core 保存 debugger、命令文件、输入 hash、完整 transcript
   与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
   kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。
@@ -102,7 +103,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - prepare reusable CUDA ELF static evidence collector: `make -C qemu_integration/guest_libcuda cuda-elf-static-evidence-tools`
 - prepare generic gdb/cuda-gdb capture wrapper: `make -C qemu_integration/guest_libcuda cuda-debug-capture-tools`
 - run private export-table discovery on an L40: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]`
-- run a bounded private export-table capture: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--selector VALUE] [--memory rsi:BYTES] -- TRIGGER [ARGS...]`
+- run a bounded private export-table capture: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--selector VALUE] [--memory REGISTER:BYTES ...] -- TRIGGER [ARGS...]`
 - Type 2 endpoint smoke: `./qemu_integration/smoke_type2_endpoint.sh`
 
 ## Code Conventions

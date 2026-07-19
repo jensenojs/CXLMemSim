@@ -84,3 +84,51 @@ Kimi baseline，也不能证明 Type-2、HetGPU translation 或 TPS。
 `ggml_cuda_flash_attn_ext_mma_f16_case<576, 512, 2, 16>` 的调用。只有该 trigger 得到 slot 1 的成对
 entry/return capture，才可以按实际 ABI 修改 `TOOLS_RUNTIME_CALLBACK_HOOKS_TABLE[1]`；随后仍需重建
 component、guest并重新运行同一 Kimi paired correctness contract。
+
+## exact DSO trigger 的自然返回与 companion 输出
+
+cxl-lab 任务 [`cnb-8ro-1jtsh5ghm`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-8ro-1jtsh5ghm)
+消费 CXLMemSim `9b9b2ca83cb61ba41c130ef299458de338a6a3e8`，在同一次 exact
+`libggml-cuda.so.0` public trigger 中为十四条自然 private 调用保存了十四条 sequence 配对的 return。
+runner log SHA256 是
+`03d75f822fd63ec2c3c2eb77d7af67fed20d8010b55b10b233405d992f0e325b`。immutable result 身份是：
+
+```text
+result digest       sha256:3cacae52ec56e55e3cd1e351df27f15b969e45a47c524e679744958e3d36270c
+archive SHA256      1e9528151077fea160bfd9b2e0ed7adb3362573edb54f6a69760564e3b3cb8dc
+manifest SHA256     785b004c0eb01033682d80386ff15482afde9db7d87196f8c56cfe6513f061e4
+```
+
+该结果首次证明探针在真实 L40 Runtime 上能保持 entry/return 完整配对：`call_records=14`、
+`return_records=14`、`unreturned_sequences=[]`。callback-hooks slot 2 与 slot 6 均返回非零 `RAX`，但
+guest 实现已经表明它们是 `void (void **ptr, size_t *size)`；void 函数的残留 `RAX` 不能解释 ABI。
+因此下一条判别量是两个 output word，而不是继续推断返回码。
+
+CXLMemSim `cf18bc60f66c62421ab06411755cce3bf874b82e` 随后允许一个 capture 声明多个整数参数寄存器窗口，
+每个窗口仍有独立字节上限，且不沿读出的指针继续解引用。cxl-lab 任务
+[`cnb-dvo-1jtshu9k3`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-dvo-1jtshu9k3)
+在一个 Job 内对同一 public trigger 顺序执行 target、slot 2 companion 和 slot 6 companion。三次运行的
+GPU、Driver、Runtime、trigger、debugger 和 source identity 完全一致。runner log SHA256 是
+`aa3c1b88e46d9c5048853dddb7b146eac4e064c9ebf77350a4cd7397875380e3`，immutable result 身份是：
+
+```text
+result digest       sha256:a1c16a34bd8a1ed6f90907eef3e7a36f5f831b898001fa3980178b64979088f9
+archive SHA256      9becfdf0b479f699d59e1f3404b06d37d50e502cc0c81b76009ff1365a565e43
+manifest SHA256     5acb166d5e0db3f1e4482b8b1293dc6ef89c1777af1aa16f7e75e84c6b4e604c
+```
+
+L40 companion capture 得到：
+
+| callback-hooks slot | `*ptr` before | `*ptr` after | `*size` before | `*size` after |
+| ---: | --- | --- | ---: | ---: |
+| 2 | `NULL` | 非空 Driver buffer | 0 | 1024 |
+| 6 | `NULL` | 非空 Driver buffer | 0 | 14 |
+
+guest 的 `tools_get_buffer1` 与 `tools_get_buffer2` 分别返回 1024-byte 和 14-byte 静态 buffer。这组证据
+排除了“这两个 getter 写出错误长度，因而让 Runtime 在简化 trigger 与 Kimi 中选择不同后续路径”这一解释。
+它还没有读取返回 buffer 的内容，也没有观察 Runtime 后续如何使用这些 buffer，因此不能宣布 slot 2/6 的
+完整生命周期等价。
+
+主目标在两轮 exact DSO trigger 中仍为 `slot 1 count=0`、`capture_status=not_reached`。下一步需要补足
+真实 Kimi 在 `cudaFuncSetAttribute` 前已经建立的 module/function/Runtime 状态，继续让真实 Driver 自然
+调用 slot 1。当前证据不支持修改 slot 2/6，也不支持为 slot 1 填 success stub。
