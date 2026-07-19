@@ -45,6 +45,7 @@ typedef void *CUmodule;
 typedef void *CUfunction;
 typedef void *CUstream;
 typedef void *CUevent;
+typedef void *CUarray;
 typedef void *CUgraphNode;
 typedef void *CUlibrary;
 typedef void *CUkernel;
@@ -56,6 +57,7 @@ typedef int CUfunc_cache;
 typedef int CUsharedconfig;
 typedef uint64_t CUdeviceptr;
 typedef uint64_t cuuint64_t;
+typedef int CUmemorytype;
 typedef enum {
     CU_GET_PROC_ADDRESS_SUCCESS = 0,
     CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND = 1,
@@ -65,6 +67,25 @@ typedef enum {
 typedef struct {
     unsigned char bytes[16];
 } CUuuid;
+
+typedef struct {
+    size_t srcXInBytes;
+    size_t srcY;
+    CUmemorytype srcMemoryType;
+    const void *srcHost;
+    CUdeviceptr srcDevice;
+    CUarray srcArray;
+    size_t srcPitch;
+    size_t dstXInBytes;
+    size_t dstY;
+    CUmemorytype dstMemoryType;
+    void *dstHost;
+    CUdeviceptr dstDevice;
+    CUarray dstArray;
+    size_t dstPitch;
+    size_t WidthInBytes;
+    size_t Height;
+} CUDA_MEMCPY2D;
 
 typedef struct {
     void *functionTable;
@@ -132,6 +153,8 @@ typedef struct {
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
 #define CUDA_ERROR_UNKNOWN 999
+
+#define CU_MEMORYTYPE_DEVICE 0x02
 
 /* CUDA device attributes */
 #define CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK 1
@@ -2729,6 +2752,78 @@ CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size
 CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount,
                            CUstream hStream) {
     return cuMemcpyDtoDAsync_v2(dstDevice, srcDevice, byteCount, hStream);
+}
+
+static bool cxl_memcpy2d_offset(CUdeviceptr base, size_t pitch, size_t x, size_t y, size_t width,
+                                CUdeviceptr *row) {
+    if (x > pitch || width > pitch - x || (y != 0 && pitch > SIZE_MAX / y)) {
+        return false;
+    }
+
+    size_t offset = y * pitch + x;
+    if (offset < x || offset > UINT64_MAX - base) {
+        return false;
+    }
+
+    *row = base + offset;
+    if (width > UINT64_MAX - *row) {
+        return false;
+    }
+    return true;
+}
+
+static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
+    if (!copy) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    if (copy->srcMemoryType != CU_MEMORYTYPE_DEVICE || copy->dstMemoryType != CU_MEMORYTYPE_DEVICE) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    if (copy->WidthInBytes == 0 || copy->Height == 0) {
+        return CUDA_SUCCESS;
+    }
+    if (!copy->srcDevice || !copy->dstDevice) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    for (size_t row = 0; row < copy->Height; row++) {
+        CUdeviceptr src;
+        CUdeviceptr dst;
+        if (copy->srcY > SIZE_MAX - row || copy->dstY > SIZE_MAX - row ||
+            !cxl_memcpy2d_offset(copy->srcDevice, copy->srcPitch, copy->srcXInBytes, copy->srcY + row,
+                                 copy->WidthInBytes, &src) ||
+            !cxl_memcpy2d_offset(copy->dstDevice, copy->dstPitch, copy->dstXInBytes, copy->dstY + row,
+                                 copy->WidthInBytes, &dst)) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+
+        CUresult result = cuMemcpyDtoD_v2(dst, src, copy->WidthInBytes);
+        if (result != CUDA_SUCCESS) {
+            return result;
+        }
+    }
+
+    return CUDA_SUCCESS;
+}
+
+CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *copy) {
+    DLOG("cuMemcpy2D_v2(copy=%p)\n", (const void *)copy);
+    return cxl_memcpy2d_device_to_device(copy);
+}
+
+CUresult cuMemcpy2D(const CUDA_MEMCPY2D *copy) { return cuMemcpy2D_v2(copy); }
+
+CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
+    DLOG("cuMemcpy2DAsync_v2(copy=%p, stream=%p)\n", (const void *)copy, hStream);
+    (void)hStream;
+    /* knockout: Type-2 currently serializes transfer commands. Preserve the
+     * existing async copy contract by completing this multidimensional copy
+     * before return; add a stream-aware BAR2 protocol only after it is measured. */
+    return cxl_memcpy2d_device_to_device(copy);
+}
+
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) {
+    return cuMemcpy2DAsync_v2(copy, hStream);
 }
 
 CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {

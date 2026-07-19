@@ -9,11 +9,33 @@ typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
 typedef void *CUfunction;
+typedef void *CUstream;
+typedef void *CUarray;
 typedef int CUdriverProcAddressQueryResult;
+typedef int CUmemorytype;
 
 typedef struct {
     unsigned char bytes[16];
 } CUuuid;
+
+typedef struct {
+    size_t srcXInBytes;
+    size_t srcY;
+    CUmemorytype srcMemoryType;
+    const void *srcHost;
+    uint64_t srcDevice;
+    CUarray srcArray;
+    size_t srcPitch;
+    size_t dstXInBytes;
+    size_t dstY;
+    CUmemorytype dstMemoryType;
+    void *dstHost;
+    uint64_t dstDevice;
+    CUarray dstArray;
+    size_t dstPitch;
+    size_t WidthInBytes;
+    size_t Height;
+} CUDA_MEMCPY2D;
 
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
@@ -21,6 +43,8 @@ typedef struct {
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
+
+#define CU_MEMORYTYPE_DEVICE 0x02
 
 #define CU_DEVICE_ATTRIBUTE_PCI_BUS_ID 33
 #define CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID 34
@@ -53,6 +77,7 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CU
                                                                unsigned int flags);
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func, int blockSize,
                                                       size_t dynamicSMemSize);
+CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -62,7 +87,7 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction 
         }                                                                                                              \
     } while (0)
 
-static uint32_t commands[16];
+static uint32_t commands[32];
 static unsigned int command_count;
 static uint64_t issued_token = 41;
 static int identity_pci_bus = 131;
@@ -70,6 +95,11 @@ static int identity_pci_device;
 static int identity_pci_domain;
 static CUresult occupancy_result = CUDA_SUCCESS;
 static uint64_t occupancy_expected_flags;
+static uint64_t memcpy2d_src_rows[8];
+static uint64_t memcpy2d_dst_rows[8];
+static unsigned int memcpy2d_row_count;
+static unsigned int memcpy2d_phase;
+static uint64_t memcpy2d_width;
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -131,6 +161,20 @@ static CUresult fake_execute(uint32_t command) {
             cxl_cuda_test_write_result(0, 3);
         }
         return occupancy_result;
+    case CXL_GPU_CMD_MEM_COPY_DTOH:
+        CHECK(memcpy2d_phase / 2 < memcpy2d_row_count);
+        CHECK(memcpy2d_phase % 2 == 0);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_src_rows[memcpy2d_phase / 2]);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_width);
+        memcpy2d_phase++;
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_MEM_COPY_HTOD:
+        CHECK(memcpy2d_phase / 2 < memcpy2d_row_count);
+        CHECK(memcpy2d_phase % 2 == 1);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_dst_rows[memcpy2d_phase / 2]);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_width);
+        memcpy2d_phase++;
+        return CUDA_SUCCESS;
     default:
         return CUDA_ERROR_INVALID_CONTEXT;
     }
@@ -331,8 +375,63 @@ static int test_occupancy_driver_api_route(void) {
     return 0;
 }
 
+static int test_memcpy2d_device_route(void) {
+    CUdriverProcAddressQueryResult symbol_status = -1;
+    CUDA_MEMCPY2D copy = {
+        .srcXInBytes = 7,
+        .srcY = 3,
+        .srcMemoryType = CU_MEMORYTYPE_DEVICE,
+        .srcDevice = UINT64_C(0x100000),
+        .srcPitch = 1024,
+        .dstXInBytes = 11,
+        .dstY = 5,
+        .dstMemoryType = CU_MEMORYTYPE_DEVICE,
+        .dstDevice = UINT64_C(0x200000),
+        .dstPitch = 2048,
+        .WidthInBytes = 64,
+        .Height = 3,
+    };
+    void *resolved = NULL;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    memcpy2d_row_count = copy.Height;
+    memcpy2d_width = copy.WidthInBytes;
+    memcpy2d_phase = 0;
+    for (size_t row = 0; row < copy.Height; row++) {
+        memcpy2d_src_rows[row] = copy.srcDevice + (copy.srcY + row) * copy.srcPitch + copy.srcXInBytes;
+        memcpy2d_dst_rows[row] = copy.dstDevice + (copy.dstY + row) * copy.dstPitch + copy.dstXInBytes;
+    }
+
+    CHECK(cuGetProcAddress("cuMemcpy2DAsync_v2", &resolved, 12090, 0, &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuMemcpy2DAsync_v2);
+    CHECK(symbol_status == 0);
+    CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_SUCCESS);
+    CHECK(memcpy2d_phase == 2 * copy.Height);
+    CHECK(command_count == 2 * copy.Height);
+
+    copy.WidthInBytes = copy.srcPitch - copy.srcXInBytes + 1;
+    CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2 * memcpy2d_row_count);
+    copy.WidthInBytes = memcpy2d_width;
+    copy.srcMemoryType = 1;
+    CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_NOT_SUPPORTED);
+    CHECK(command_count == 2 * memcpy2d_row_count);
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcY = SIZE_MAX;
+    CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2 * memcpy2d_row_count);
+    copy.srcY = 0;
+    copy.srcDevice = UINT64_MAX - 15;
+    CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2 * memcpy2d_row_count);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
-           test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route();
+           test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
+           test_memcpy2d_device_route();
 }
