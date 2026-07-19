@@ -231,3 +231,54 @@ wrapper 前被拒绝。slot 1 因此没有被自然调用，这不能当作阴�
 `qemu_integration/guest_libcuda/Makefile:ggml-flash-attn-ext-probe`；source-only `sync-source` 会从该
 声明检查已推送 commit 中的 target，再写入 closed pin。下一次 L40 probe 才能判断公开 GGML dispatcher 到
 slot 1 的可达性。
+
+## K=256 图关闭了 host public-graph 候选
+
+cxl-lab 任务 [`cnb-37o-1jtsqajsu`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-37o-1jtsqajsu)
+消费本仓 source `f10367140df75637c0e66387333c3188e1dd8f9c`。这个提交只把 flash-attention trigger 的
+KV 长度从 32 改为 256，并同步 V view 与 mask；`256` 是 frozen dispatcher 已经由上一轮错误定位出的
+必要整除条件。
+
+实际 L40 transcript 为：
+
+```text
+ggml_flash_attn_ext_trigger_shape=q=[576,2,16,1] k=[576,256,1,1] v=view-[512,256,1,1] mask=[256,2,1,1]
+ggml_cuda_init: found 1 CUDA devices
+Device 0: NVIDIA L40, compute capability 8.9
+ggml_flash_attn_ext_trigger_backend_support=1
+ggml_flash_attn_ext_trigger_compute_status=0
+ggml_flash_attn_ext_trigger_synchronize=pass
+=== GGML_FLASH_ATTN_EXT_TRIGGER_PASS ===
+```
+
+运行使用 paired core 的 exact `libggml-cuda.so.0`，SHA256 为
+`7f0bc366d42882d62312509007caa3c7d3f847a5ba5e5fbcd16de5c6df36a9ab`、Build ID 为
+`0da23c284f8a619dfe5e3160f2a60b3689fa3b3a`。静态 collector 在该 DSO 中唯一找到
+`ggml_cuda_flash_attn_ext_mma_f16_case<576,512,2,16>`，并保存其包含
+`cudaFuncSetAttribute@plt` 和 `$0x8,%esi` 的局部反汇编。这里的静态 collector 约束 artifact 与调用点；
+动态图的成功由 support、compute 和 synchronize marker 证明，两者不能互相替代。
+
+Python-GDB observer 保存了 29 条自然 entry 和 29 条 return，`unreturned_sequences=[]`，自身状态为
+`pass`。callback-hooks UUID `a094798c-2e74-2e74-93f2-0800200c0a66` 仍只自然调用 slot 2 和 slot 6
+各一次；slot 1 / selector `0x111` 的 `capture_status=not_reached`。因此顶层 runner 按既定合同
+fail closed，而没有把图成功伪装成 ABI 成功。
+
+不可变结果身份为：
+
+```text
+control commit     bb7c327b8afb3c5eb6d2e64f60bb4b96cd82b36b
+run spec SHA256    c411fb26921ef00202ecc4b5f0e809035723fa7dc94a0eb7bbed355b0de0a58f
+result digest      sha256:df8e2291eb7fdcf06aba41072d200fac176e984b0408ab654d670c357dc3cdd8
+archive SHA256     4020b624a254a9f93e9b0c558b491850f35b795a04b2605386aabc89c8418c0d
+manifest SHA256    d0043c18b3ae0c76b7f6ede3be9b7c5e88581bc6d0199f9ddbccc7458e4d8a58
+runner log SHA256  06d32566f59d30e1270d91c920c3304b4e8e7d1ad71167c9c11e50d841e3b2f1
+```
+
+本轮把 host trigger 的解释空间收紧到一个明确边界：继续增加“更像 Kimi”的 host public graph 已经没有
+直接证据收益，因为 exact Kimi 只有在 guest Runtime 消费 guest shim 返回的 table 时自然调用了 slot 1。
+当前工具仍有长期价值：它保存真实 Driver/Runtime 的动态可达集合、已知 companion 输出和 exact artifact
+静态现场；它不负责把 host 阴性结果转换成 guest ABI。
+
+下一次诊断应在 guest table 上观察已经自然发生的 slot 1 调用。该入口只能记录 selector、整数寄存器、
+显式上限内的输入窗口及必要的返回前后状态，然后 fail closed。没有这份 guest-side capture 之前，仍禁止
+为 slot 1 写 success stub、推测函数签名、主动调用真实 Driver 未知槽或再次用完整 paired Kimi 逐槽碰撞。
