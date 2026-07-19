@@ -11,7 +11,7 @@ usage() {
 usage:
   run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]
   run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N \
-      [--selector VALUE] [--memory rsi:BYTES] -- TRIGGER [ARGS...]
+      [--selector VALUE] [--memory REGISTER:BYTES ...] -- TRIGGER [ARGS...]
 
 The trigger runs once under a Python-enabled host GDB. The probe observes naturally reached
 cuGetExportTable tables and table entry calls; it does not invoke private slots.
@@ -45,7 +45,7 @@ output_dir=
 uuid=
 slot=
 selector=
-memory=
+memory=()
 selector_max=
 event_limit=
 while [[ $# -gt 0 ]]; do
@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
         --uuid) uuid=${2:-}; shift 2 ;;
         --slot) slot=${2:-}; shift 2 ;;
         --selector) selector=${2:-}; shift 2 ;;
-        --memory) memory=${2:-}; shift 2 ;;
+        --memory) memory+=("${2:-}"); shift 2 ;;
         --selector-max) selector_max=${2:-}; shift 2 ;;
         --event-limit) event_limit=${2:-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
@@ -72,14 +72,16 @@ done
 if [[ $mode == capture ]]; then
     [[ -n $uuid && -n $slot ]] || die "capture requires --uuid and --slot"
 else
-    [[ -z $uuid && -z $slot && -z $selector && -z $memory ]] || die "discovery does not accept capture filters"
+    [[ -z $uuid && -z $slot && -z $selector && ${#memory[@]} -eq 0 ]] || die "discovery does not accept capture filters"
 fi
 
 prepare=(python3 "$PROBE" prepare --output-dir "$output_dir" --source-root "$ROOT" --mode "$mode")
 [[ -n $uuid ]] && prepare+=(--uuid "$uuid")
 [[ -n $slot ]] && prepare+=(--slot "$slot")
 [[ -n $selector ]] && prepare+=(--selector "$selector")
-[[ -n $memory ]] && prepare+=(--memory "$memory")
+for window in "${memory[@]}"; do
+    prepare+=(--memory "$window")
+done
 [[ -n $selector_max ]] && prepare+=(--selector-max "$selector_max")
 [[ -n $event_limit ]] && prepare+=(--event-limit "$event_limit")
 prepare+=(-- "$@")

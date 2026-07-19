@@ -63,14 +63,14 @@ def parse_nonnegative(text: str) -> int:
     return value
 
 
-def parse_memory(text: str) -> dict[str, int]:
-    match = re.fullmatch(r"rsi:(0x[0-9a-fA-F]+|[0-9]+)", text)
+def parse_memory(text: str) -> dict[str, int | str]:
+    match = re.fullmatch(r"(r(?:di|si|dx|cx|8|9)):(0x[0-9a-fA-F]+|[0-9]+)", text)
     if not match:
-        raise argparse.ArgumentTypeError("memory window must be rsi:BYTES")
-    length = parse_nonnegative(match.group(1))
+        raise argparse.ArgumentTypeError("memory window must be REGISTER:BYTES for an integer argument register")
+    length = parse_nonnegative(match.group(2))
     if length == 0 or length > 4096:
         raise argparse.ArgumentTypeError("memory window must be between 1 and 4096 bytes")
-    return {"register": "rsi", "bytes": length}
+    return {"register": match.group(1), "bytes": length}
 
 
 def json_dump(path: pathlib.Path, value: Any) -> None:
@@ -142,7 +142,9 @@ def prepare(args: argparse.Namespace) -> int:
         raise RuntimeError("trigger argv after -- is required")
     if args.mode == "capture" and (args.uuid is None or args.slot is None):
         raise RuntimeError("capture mode requires --uuid and --slot")
-    if args.mode == "discovery" and any(value is not None for value in (args.uuid, args.slot, args.selector, args.memory)):
+    if args.mode == "discovery" and (
+        any(value is not None for value in (args.uuid, args.slot, args.selector)) or args.memory
+    ):
         raise RuntimeError("discovery mode does not accept capture filters")
 
     source_root = pathlib.Path(args.source_root).resolve(strict=True)
@@ -314,7 +316,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     prepare_parser.add_argument("--uuid", type=parse_uuid)
     prepare_parser.add_argument("--slot", type=parse_nonnegative)
     prepare_parser.add_argument("--selector", type=parse_nonnegative)
-    prepare_parser.add_argument("--memory", type=parse_memory)
+    prepare_parser.add_argument("--memory", type=parse_memory, action="append", default=[])
     prepare_parser.add_argument("--selector-max", type=parse_nonnegative, default=0x3FF)
     prepare_parser.add_argument("--event-limit", type=parse_nonnegative, default=DEFAULT_EVENT_LIMIT)
     prepare_parser.add_argument("trigger", nargs=argparse.REMAINDER)
@@ -615,11 +617,17 @@ if gdb is not None:
             self.record_return = record_return
             self.capture_sequence = capture_sequence
             self.capture_mappings = capture_mappings
-            memory = observer.config.get("memory")
-            self.memory_before = None
-            if capture_mappings and memory:
-                pointer = int(entry_registers[memory["register"]], 16)
-                self.memory_before = observer.read_bytes(pointer, memory["bytes"])
+            self.memory_before: list[dict[str, Any]] = []
+            if capture_mappings:
+                for memory in observer.config.get("memory", []):
+                    pointer = int(entry_registers[memory["register"]], 16)
+                    self.memory_before.append(
+                        {
+                            "register": memory["register"],
+                            "bytes": memory["bytes"],
+                            "value": observer.read_bytes(pointer, memory["bytes"]),
+                        }
+                    )
 
         def stop(self) -> bool:
             return_rax = hex_address(self.observer.register("rax"))
@@ -635,11 +643,16 @@ if gdb is not None:
                 )
             if not self.capture_mappings:
                 return False
-            memory = self.observer.config.get("memory")
-            after = None
-            if memory:
+            after: list[dict[str, Any]] = []
+            for memory in self.observer.config.get("memory", []):
                 pointer = int(self.entry_registers[memory["register"]], 16)
-                after = self.observer.read_bytes(pointer, memory["bytes"])
+                after.append(
+                    {
+                        "register": memory["register"],
+                        "bytes": memory["bytes"],
+                        "value": self.observer.read_bytes(pointer, memory["bytes"]),
+                    }
+                )
             self.observer.append_capture(
                 {
                     "kind": "capture",
@@ -648,8 +661,8 @@ if gdb is not None:
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in self.capture_mappings],
                     "entry_registers": self.entry_registers,
                     "return_rax": return_rax,
-                    "memory_before": self.memory_before,
-                    "memory_after": after,
+                    "memory_windows_before": self.memory_before,
+                    "memory_windows_after": after,
                 }
             )
             return False

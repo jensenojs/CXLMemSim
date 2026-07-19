@@ -180,7 +180,8 @@ discovery breakpoint 命中后读取 caller return address、thread 和整数参
 `RDI` 另记为 selector candidate，不推断其语义。每条受 event limit 接纳的 entry 建立一个 frame-bound
 return breakpoint，用同一 sequence 保存 `RAX`；进程正常退出时存在未配对 sequence 会 fail closed。
 capture 根据 UUID、slot 和可选 selector 过滤，并复用同一个 return breakpoint，只有目标匹配时才比较调用方
-显式选择的参数指针窗口。达到 event limit 后普通明细停止增长，累计调用计数继续更新，目标匹配仍会被捕获。
+显式选择的一个或多个整数参数寄存器指向的有限窗口。每个窗口独立声明 register 与 bytes，探针不沿其中内容
+继续解引用。达到 event limit 后普通明细停止增长，累计调用计数继续更新，目标匹配仍会被捕获。
 
 ## 删除清单与保留清单
 
