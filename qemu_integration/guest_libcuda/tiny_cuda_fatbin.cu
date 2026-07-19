@@ -1,6 +1,8 @@
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef int CUresult;
 typedef int CUdevice;
@@ -98,6 +100,89 @@ static int print_device_properties(void) {
     return failed;
 }
 
+static int run_noncontiguous_2d_device_copy(void) {
+    constexpr size_t source_pitch = 64;
+    constexpr size_t destination_pitch = 80;
+    constexpr size_t width = 17;
+    constexpr size_t height = 3;
+    constexpr size_t source_x = 7;
+    constexpr size_t source_y = 1;
+    constexpr size_t destination_x = 11;
+    constexpr size_t destination_y = 2;
+    constexpr unsigned char sentinel = 0xa5;
+    constexpr size_t source_bytes = source_pitch * (source_y + height);
+    constexpr size_t destination_bytes = destination_pitch * (destination_y + height);
+    unsigned char source[source_bytes];
+    unsigned char destination[destination_bytes];
+    unsigned char *device_source = NULL;
+    unsigned char *device_destination = NULL;
+    int failed = 0;
+
+    for (size_t index = 0; index < source_bytes; index++) {
+        source[index] = (unsigned char)((index * 29U + 17U) & 0xffU);
+    }
+    memset(destination, sentinel, sizeof(destination));
+    printf("kernel_probe copy_2d_contract width=%zu height=%zu src_pitch=%zu dst_pitch=%zu "
+           "src_x=%zu src_y=%zu dst_x=%zu dst_y=%zu\n",
+           width, height, source_pitch, destination_pitch, source_x, source_y, destination_x, destination_y);
+
+    failed |= print_cuda_result("copy_2d_source_malloc", cudaMalloc((void **)&device_source, source_bytes));
+    failed |= print_cuda_result("copy_2d_destination_malloc", cudaMalloc((void **)&device_destination, destination_bytes));
+    if (!device_source || !device_destination) {
+        failed = 1;
+        goto cleanup;
+    }
+    failed |= print_cuda_result("copy_2d_source_htod",
+                                cudaMemcpy(device_source, source, source_bytes, cudaMemcpyHostToDevice));
+    failed |= print_cuda_result("copy_2d_destination_sentinel_htod",
+                                cudaMemcpy(device_destination, destination, destination_bytes, cudaMemcpyHostToDevice));
+    failed |= print_cuda_result("copy_2d_d2d_async",
+                                cudaMemcpy2DAsync(device_destination + destination_y * destination_pitch + destination_x,
+                                                  destination_pitch,
+                                                  device_source + source_y * source_pitch + source_x,
+                                                  source_pitch, width, height, cudaMemcpyDeviceToDevice, 0));
+    failed |= print_cuda_result("copy_2d_synchronize", cudaDeviceSynchronize());
+    failed |= print_cuda_result("copy_2d_destination_dtoh",
+                                cudaMemcpy(destination, device_destination, destination_bytes, cudaMemcpyDeviceToHost));
+
+    if (!failed) {
+        size_t mismatch_count = 0;
+        size_t sentinel_bytes = 0;
+        for (size_t index = 0; index < destination_bytes; index++) {
+            unsigned char expected = sentinel;
+            for (size_t row = 0; row < height; row++) {
+                size_t target = (destination_y + row) * destination_pitch + destination_x;
+                if (index >= target && index < target + width) {
+                    expected = source[(source_y + row) * source_pitch + source_x + index - target];
+                    break;
+                }
+            }
+            if (expected == sentinel) {
+                sentinel_bytes++;
+            }
+            if (destination[index] != expected) {
+                mismatch_count++;
+            }
+        }
+        if (mismatch_count == 0) {
+            printf("kernel_probe copy_2d_result=pass copied_bytes=%zu sentinel_bytes=%zu\n", width * height,
+                   sentinel_bytes);
+        } else {
+            printf("kernel_probe copy_2d_result=fail mismatches=%zu\n", mismatch_count);
+            failed = 1;
+        }
+    }
+
+cleanup:
+    if (device_destination) {
+        failed |= print_cuda_result("copy_2d_destination_free", cudaFree(device_destination));
+    }
+    if (device_source) {
+        failed |= print_cuda_result("copy_2d_source_free", cudaFree(device_source));
+    }
+    return failed;
+}
+
 extern "C" int tiny_cuda_probe_run(void) {
     int failed = 0;
     int host_out = 0;
@@ -123,6 +208,7 @@ extern "C" int tiny_cuda_probe_run(void) {
     failed |= print_cuda_result("copy_result_dtoh",
                                 cudaMemcpy(&host_out, device_out, sizeof(host_out), cudaMemcpyDeviceToHost));
     failed |= print_cuda_result("free", cudaFree(device_out));
+    failed |= run_noncontiguous_2d_device_copy();
 
     printf("kernel_probe result=%d expected=1234\n", host_out);
     if (host_out != 1234) {
