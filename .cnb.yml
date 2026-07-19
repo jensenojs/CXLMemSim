@@ -111,7 +111,7 @@ $:
         - name: observe L40 CUDA private export table calls
           timeout: 15m
           script: |
-            set -euo pipefail
+            bash -euo pipefail <<'PRIVATE_EXPORT_PROBE_SCRIPT'
             output_root="$PWD/.work/private-export-table-probe"
             make -C qemu_integration/guest_libcuda private-export-table-probe
             qemu_integration/guest_libcuda/run_private_export_probe.sh \
@@ -147,3 +147,4 @@ $:
               done
             done
             printf 'private_export_table_probe=complete\n'
+            PRIVATE_EXPORT_PROBE_SCRIPT
