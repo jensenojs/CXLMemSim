@@ -332,6 +332,16 @@ void cxl_cuda_test_write_result(unsigned int index, uint64_t value)
     if (index < sizeof(result_offsets) / sizeof(result_offsets[0]))
         reg_write64(result_offsets[index], value);
 }
+
+void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value)
+{
+    reg_write32(offset, value);
+}
+
+void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length)
+{
+    cxl_gpu_transport_data_read(&g_transport, offset, dst, length);
+}
 #endif
 
 /* Find and map CXL Type 2 device */
@@ -1793,11 +1803,14 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
             return CUDA_ERROR_INVALID_VALUE;
         }
 
-        if (file->kind == CUDART_FATBIN_KIND_PTX && !ptx_candidate) {
+        if (file->kind == CUDART_FATBIN_KIND_PTX && file->sm_version <= target_sm &&
+            (!ptx_candidate || file->sm_version > ptx_candidate->sm_version)) {
             ptx_candidate = file;
             ptx_offset = offset;
         }
-        if (file->kind == CUDART_FATBIN_KIND_ELF && file->sm_version == target_sm && !elf_candidate) {
+        if (file->kind == CUDART_FATBIN_KIND_ELF && file->sm_version <= target_sm &&
+            file->sm_version / 10U == target_sm / 10U &&
+            (!elf_candidate || file->sm_version > elf_candidate->sm_version)) {
             elf_candidate = file;
             elf_offset = offset;
         }
@@ -1862,7 +1875,8 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
     }
 
     fprintf(stderr,
-            "[CXL-CUDA]   library module load reject: no PTX or sm_%u ELF file in selected fatbin submodule\n",
+            "[CXL-CUDA]   library module load reject: no compatible CUBIN or PTX for sm_%u in selected fatbin "
+            "submodule\n",
             target_sm);
     return CUDA_ERROR_NOT_SUPPORTED;
 }

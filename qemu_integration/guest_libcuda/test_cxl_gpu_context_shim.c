@@ -11,8 +11,10 @@ typedef void *CUcontext;
 typedef void *CUfunction;
 typedef void *CUstream;
 typedef void *CUarray;
+typedef void *CUlibrary;
 typedef int CUdriverProcAddressQueryResult;
 typedef int CUmemorytype;
+typedef int CUlibraryOption;
 
 typedef struct {
     unsigned char bytes[16];
@@ -37,6 +39,30 @@ typedef struct {
     size_t Height;
 } CUDA_MEMCPY2D;
 
+typedef struct __attribute__((aligned(8))) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t header_size;
+    uint64_t files_size;
+} CudartFatbinHeader;
+
+typedef struct {
+    uint16_t kind;
+    uint16_t version;
+    uint32_t header_size;
+    uint32_t payload_size;
+    uint32_t unknown0;
+    uint32_t compressed_size;
+    uint32_t unknown1;
+    uint32_t unknown2;
+    uint32_t sm_version;
+    uint32_t bit_width;
+    uint32_t unknown3;
+    uint64_t flags;
+    uint64_t unknown5;
+    uint64_t uncompressed_payload;
+} CudartFatbinFileHeader;
+
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
 #define CUDA_ERROR_INVALID_CONTEXT 201
@@ -45,6 +71,12 @@ typedef struct {
 #define CUDA_ERROR_NOT_SUPPORTED 801
 
 #define CU_MEMORYTYPE_DEVICE 0x02
+#define CU_LIBRARY_BINARY_IS_PRESERVED 1
+
+#define CUDART_FATBIN_MAGIC 0xBA55ED50U
+#define CUDART_FATBIN_VERSION 0x1U
+#define CUDART_FATBIN_KIND_PTX 0x1U
+#define CUDART_FATBIN_KIND_ELF 0x2U
 
 #define CU_DEVICE_ATTRIBUTE_PCI_BUS_ID 33
 #define CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID 34
@@ -54,6 +86,8 @@ void cxl_cuda_test_reset(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
+void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value);
+void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
 
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
@@ -78,6 +112,9 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CU
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func, int blockSize,
                                                       size_t dynamicSMemSize);
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
+CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOptions, void **jitOptionsValues,
+                           unsigned int numJitOptions, CUlibraryOption *libraryOptions,
+                           void **libraryOptionValues, unsigned int numLibraryOptions);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -100,6 +137,7 @@ static uint64_t memcpy2d_dst_rows[8];
 static unsigned int memcpy2d_row_count;
 static unsigned int memcpy2d_phase;
 static uint64_t memcpy2d_width;
+static unsigned int cubin_load_count;
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -175,6 +213,17 @@ static CUresult fake_execute(uint32_t command) {
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_width);
         memcpy2d_phase++;
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_MODULE_LOAD_CUBIN: {
+        unsigned char observed[8] = {0};
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == sizeof(observed));
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 0);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == sizeof(observed));
+        cxl_cuda_test_read_data(0, observed, sizeof(observed));
+        CHECK(observed[0] == 0x80);
+        cubin_load_count++;
+        cxl_cuda_test_write_result(0, issued_token);
+        return CUDA_SUCCESS;
+    }
     default:
         return CUDA_ERROR_INVALID_CONTEXT;
     }
@@ -429,9 +478,59 @@ static int test_memcpy2d_device_route(void) {
     return 0;
 }
 
+static int test_library_fatbin_prefers_highest_compatible_cubin(void) {
+    unsigned char fatbin[sizeof(CudartFatbinHeader) + 3 * (sizeof(CudartFatbinFileHeader) + 8)] = {0};
+    CudartFatbinHeader header = {
+        .magic = CUDART_FATBIN_MAGIC,
+        .version = CUDART_FATBIN_VERSION,
+        .header_size = sizeof(CudartFatbinHeader),
+        .files_size = sizeof(fatbin) - sizeof(CudartFatbinHeader),
+    };
+    CudartFatbinFileHeader sm80 = {
+        .kind = CUDART_FATBIN_KIND_ELF,
+        .version = 0x101,
+        .header_size = sizeof(CudartFatbinFileHeader),
+        .payload_size = 8,
+        .sm_version = 80,
+        .uncompressed_payload = 8,
+    };
+    CudartFatbinFileHeader sm90 = sm80;
+    CudartFatbinFileHeader ptx120 = sm80;
+    CUlibrary library = NULL;
+    CUlibraryOption options[] = {CU_LIBRARY_BINARY_IS_PRESERVED};
+    void *option_values[] = {(void *)(uintptr_t)1};
+    size_t offset = sizeof(header);
+
+    sm90.sm_version = 90;
+    ptx120.kind = CUDART_FATBIN_KIND_PTX;
+    ptx120.sm_version = 120;
+    memcpy(fatbin, &header, sizeof(header));
+    memcpy(fatbin + offset, &sm80, sizeof(sm80));
+    fatbin[offset + sizeof(sm80)] = 0x80;
+    offset += sizeof(sm80) + 8;
+    memcpy(fatbin + offset, &sm90, sizeof(sm90));
+    fatbin[offset + sizeof(sm90)] = 0x90;
+    offset += sizeof(sm90) + 8;
+    memcpy(fatbin + offset, &ptx120, sizeof(ptx120));
+    memcpy(fatbin + offset + sizeof(ptx120), ".versio", 7);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_CC_MAJOR, 8);
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_CC_MINOR, 9);
+    command_count = 0;
+    cubin_load_count = 0;
+
+    CHECK(cuLibraryLoadData(&library, fatbin, NULL, NULL, 0, options, option_values, 1) == CUDA_SUCCESS);
+    CHECK(library != NULL);
+    CHECK(cubin_load_count == 1);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_MODULE_LOAD_CUBIN);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
-           test_memcpy2d_device_route();
+           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin();
 }

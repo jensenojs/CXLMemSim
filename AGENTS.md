@@ -105,6 +105,10 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
 - `run_cuda_debug_capture.sh`对程序或 exact ELF + core 保存 debugger、命令文件、输入 hash、完整 transcript
   与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
   kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。
+- `probe_cuda_fatbin_cubin_load.py`从 SHA256 已冻结的 CUDA shared library 中按声明的 fatbin `files_size`提取一个
+  ELF CUBIN，并可用当前真实 CUDA Driver 执行一次`cuModuleLoadData`。它用于先回答“这份低架构 CUBIN 是否被
+  目标 L40 接受”；它不启动 guest、BAR2、QEMU、HetGPU或Kimi。必须同时传入 library SHA256、fatbin shape、
+  CUBIN SM 和`--load --expected-device-sm`，使输入或 GPU 身份漂移显式失败。
 
 上述四个入口以及两个 GGML public trigger 都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；内部库、测试夹具和生成二进制不伪装成CLI。
 
@@ -139,6 +143,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - prepare exact trigger tools: `make -C qemu_integration/guest_libcuda ggml-cuda-attribute-probe-tools`
 - prepare reusable CUDA ELF static evidence collector: `make -C qemu_integration/guest_libcuda cuda-elf-static-evidence-tools`
 - prepare generic gdb/cuda-gdb capture wrapper: `make -C qemu_integration/guest_libcuda cuda-debug-capture-tools`
+- prepare exact CUDA fatbin CUBIN Driver-load probe: `make -C qemu_integration/guest_libcuda fatbin-cubin-load-probe`
 - run private export-table discovery on an L40: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]`
 - run a bounded private export-table capture: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--selector VALUE] [--memory REGISTER:BYTES ...] -- TRIGGER [ARGS...]`
 - Type 2 endpoint smoke: `./qemu_integration/smoke_type2_endpoint.sh`

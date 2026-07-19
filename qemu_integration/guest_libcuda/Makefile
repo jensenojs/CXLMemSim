@@ -20,6 +20,7 @@ GGML_CUDA_ATTRIBUTE_TRIGGER := ggml-cuda-attribute-trigger
 GGML_FLASH_ATTN_EXT_TRIGGER := ggml-flash-attn-ext-trigger
 CUDA_ELF_STATIC_EVIDENCE := collect_cuda_elf_static_evidence.py
 CUDA_DEBUG_CAPTURE := run_cuda_debug_capture.sh
+CUDA_FATBIN_CUBIN_LOAD_PROBE := probe_cuda_fatbin_cubin_load.py
 PRIVATE_EXPORT_PROBE := private_export_probe.py
 PRIVATE_EXPORT_RUNNER := run_private_export_probe.sh
 
@@ -29,6 +30,7 @@ BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
 .PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle \
+	fatbin-cubin-load-probe \
 	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-context-state test-context-shim
 
 all: $(TARGETS)
@@ -68,6 +70,9 @@ cuda-elf-static-evidence-tools: $(CUDA_ELF_STATIC_EVIDENCE)
 
 cuda-debug-capture-tools: $(CUDA_DEBUG_CAPTURE)
 	bash -n $(CUDA_DEBUG_CAPTURE)
+
+fatbin-cubin-load-probe: $(CUDA_FATBIN_CUBIN_LOAD_PROBE)
+	python3 -m py_compile $(CUDA_FATBIN_CUBIN_LOAD_PROBE)
 
 $(CUDA_SHIM): libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
