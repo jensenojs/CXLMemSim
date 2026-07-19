@@ -163,3 +163,52 @@ backend/Runtime 前置状态，而不是 slot 2/6。
 主目标在三轮 exact DSO trigger 中仍为 `slot 1 count=0`、`capture_status=not_reached`。下一步需要补足
 真实 Kimi 在 `cudaFuncSetAttribute` 前已经建立的 module/function/Runtime 状态，继续让真实 Driver 自然
 调用 slot 1。当前证据不支持修改 slot 2/6，也不支持为 slot 1 填 success stub。
+
+## Backend 初始化仍未到达 slot 1
+
+上一节把剩余差异收敛到 Kimi 在 public `cudaFuncSetAttribute` 之前建立的状态。首先应区分
+“缺少 CUDA backend 初始化”与“缺少真正的 GGML graph dispatcher”。为此，L40 任务
+[`cnb-rk2-1jtsm25j9`](https://cnb.cool/gevico.online/jensen/cxl-lab/-/build/logs/cnb-rk2-1jtsm25j9)
+消费 control commit `451d2ba687dd64e5c8d5b88fae5f6b9cb535c9de` 和 CXLMemSim
+`ab4b1958022ecf17d8f3c71fdf874633b98d1b3a`。它在同一个 L40 上按下列公开调用顺序执行：
+
+```text
+dlopen exact guest libggml-cuda.so.0
+  -> cudaSetDevice(0)
+  -> ggml_backend_cuda_init(0)
+  -> cudaFuncSetAttribute(exact flash-attention host stub, attribute=8, bytes=58528)
+  -> ggml_backend_free(...)
+```
+
+exact DSO 的 SHA256 是
+`7f0bc366d42882d62312509007caa3c7d3f847a5ba5e5fbcd16de5c6df36a9ab`，Build ID 是
+`0da23c284f8a619dfe5e3160f2a60b3689fa3b3a`。运行使用 L40
+`GPU-09d7c3a9-a10a-fd9d-cf7e-b62a9bac7da1`、Driver `580.95.05`（Build ID
+`b21cc51b8b73433abb27468d0d2ed55a0135ee44`）和 libcudart `12.9.79`（Build ID
+`dee4b68d7f29b160323eff1e31338d5ebf73d190`）。
+
+目标 callback-hooks UUID `a094798c-2e74-2e74-93f2-0800200c0a66` 的 slot 1、selector
+`0x111` 仍没有自然调用。slot 2 和 slot 6 分别自然到达一次，且复用先前已经验证的
+`(void **ptr, size_t *size)` 输出形状与全零初始 buffer。由此排除的是：
+
+```text
+缺少 ggml_backend_cuda_init
+  -> slot 2/6 getter 的输入或初始输出不同
+  -> Runtime 改走 slot 1
+```
+
+该任务按 target 未命中的 fail-closed 合同返回远端 error，但 immutable result 已发布并 fresh-pull。
+result OCI digest 是
+`sha256:6b127c3f0b112a9094c31f03831a75a47a646702dd08873435a6cd995c771364`，
+archive SHA256 是
+`44cea721c228c0b47d801e9e2023b753ca3324fdfd8485758b965edd0b9c0b9b`，
+manifest SHA256 是
+`900023d42b13d5e0eeba78d26d9114c47698932ae58722ff3cf1a47220ae3df1`，
+runner log SHA256 是
+`42c680f7523667cc02880f208721db84f654b6a8c1c0070aee113127af9d896e`。
+
+这条阴性证据不能给 slot 1 填任何实现。下一条最小扰动必须使 Runtime 经真实公开 GGML graph 完成
+tensor allocation、module/function 准备和 flash-attention dispatcher：固定
+`Q=[576,2,16,1]`、`K=[576,32,1,1]`、K 的 `[512,...]` V view 与 F16 mask 在 L40 上进入 core
+记录的 `ggml_cuda_flash_attn_ext_mma_f16_case<576,512,2,16>`。它若仍未命中，只排除该图的前置条件；
+它若命中，entry/return 和有界状态才可以约束 guest slot 1 的最小 oracle。
