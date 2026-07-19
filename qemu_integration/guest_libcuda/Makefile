@@ -90,7 +90,7 @@ test-context-state: $(CONTEXT_STATE_TEST)
 	./$(CONTEXT_STATE_TEST)
 
 $(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -o $@ test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
+	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -Wl,--export-dynamic -o $@ test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
 

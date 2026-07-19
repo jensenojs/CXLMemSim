@@ -8,12 +8,15 @@
 typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
+typedef void *CUfunction;
+typedef int CUdriverProcAddressQueryResult;
 
 typedef struct {
     unsigned char bytes[16];
 } CUuuid;
 
 #define CUDA_SUCCESS 0
+#define CUDA_ERROR_INVALID_VALUE 1
 #define CUDA_ERROR_INVALID_CONTEXT 201
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
@@ -43,6 +46,13 @@ CUresult cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags, int *acti
 CUresult cuDevicePrimaryCtxReset(CUdevice dev);
 CUresult cuPointerGetAttribute(void *data, int attribute, uint64_t ptr);
 CUresult cuGetExportTable(const void **table, const CUuuid *uuid);
+CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, uint64_t flags,
+                          CUdriverProcAddressQueryResult *symbolStatus);
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CUfunction func,
+                                                               int blockSize, size_t dynamicSMemSize,
+                                                               unsigned int flags);
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func, int blockSize,
+                                                      size_t dynamicSMemSize);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -58,6 +68,8 @@ static uint64_t issued_token = 41;
 static int identity_pci_bus = 131;
 static int identity_pci_device;
 static int identity_pci_domain;
+static CUresult occupancy_result = CUDA_SUCCESS;
+static uint64_t occupancy_expected_flags;
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -110,6 +122,15 @@ static CUresult fake_execute(uint32_t command) {
         }
     case CXL_GPU_CMD_CTX_DESTROY:
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_FUNC_GET_OCCUPANCY:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 128);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 73728);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM3) == occupancy_expected_flags);
+        if (occupancy_result == CUDA_SUCCESS) {
+            cxl_cuda_test_write_result(0, 3);
+        }
+        return occupancy_result;
     default:
         return CUDA_ERROR_INVALID_CONTEXT;
     }
@@ -275,8 +296,43 @@ static int test_integrity_uses_runtime_device_identity(void) {
     return 0;
 }
 
+static int test_occupancy_driver_api_route(void) {
+    CUdriverProcAddressQueryResult symbol_status = -1;
+    void *resolved = NULL;
+    int num_blocks = -1;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    occupancy_result = CUDA_SUCCESS;
+    occupancy_expected_flags = 1;
+
+    CHECK(cuGetProcAddress("cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags", &resolved, 7000, 0,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags);
+    CHECK(symbol_status == 0);
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(&num_blocks, (CUfunction)(uintptr_t)5, 128,
+                                                                73728, 1) == CUDA_SUCCESS);
+    CHECK(num_blocks == 3);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_FUNC_GET_OCCUPANCY);
+
+    occupancy_result = CUDA_ERROR_NOT_SUPPORTED;
+    occupancy_expected_flags = 0;
+    num_blocks = 77;
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks, (CUfunction)(uintptr_t)5, 128, 73728) ==
+          CUDA_ERROR_NOT_SUPPORTED);
+    CHECK(num_blocks == 77);
+    CHECK(command_count == 2 && commands[1] == CXL_GPU_CMD_FUNC_GET_OCCUPANCY);
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(NULL, (CUfunction)(uintptr_t)5, 128, 73728, 1) ==
+          CUDA_ERROR_INVALID_VALUE);
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(&num_blocks, NULL, 128, 73728, 1) ==
+          CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
-           test_integrity_uses_runtime_device_identity();
+           test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route();
 }

@@ -40,6 +40,15 @@ static int set_tiny_kernel_attributes(void) {
     return failed;
 }
 
+static int report_tiny_kernel_occupancy(void) {
+    int num_blocks = 0;
+    cudaError_t error = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &num_blocks, tiny_cuda_kernel, 1, 0);
+    printf("kernel_probe occupancy error=%d name=%s string=%s num_blocks=%d\n", (int)error,
+           cudaGetErrorName(error), cudaGetErrorString(error), num_blocks);
+    return error == cudaSuccess && num_blocks > 0 ? 0 : 1;
+}
+
 static int print_driver_attribute(cu_device_get_attribute_t get_attribute, int attribute) {
     int value = 0;
     CUresult result = get_attribute(&value, attribute, 0);
@@ -97,6 +106,7 @@ extern "C" int tiny_cuda_probe_run(void) {
     failed |= print_cuda_result("set_device", cudaSetDevice(0));
     failed |= print_device_properties();
     failed |= set_tiny_kernel_attributes();
+    failed |= report_tiny_kernel_occupancy();
     failed |= print_cuda_result("malloc", cudaMalloc((void **)&device_out, sizeof(*device_out)));
     if (!device_out) {
         printf("kernel_probe device_out=(nil)\n");

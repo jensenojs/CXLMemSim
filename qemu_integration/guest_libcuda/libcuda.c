@@ -2228,6 +2228,33 @@ CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int v
     return err;
 }
 
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CUfunction hfunc, int blockSize,
+                                                               size_t dynamicSMemSize, unsigned int flags) {
+    DLOG("cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(numBlocks=%p, func=%p, blockSize=%d, "
+         "dynamicSMemSize=%zu, flags=%u)\n",
+         (void *)numBlocks, hfunc, blockSize, dynamicSMemSize, flags);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!numBlocks || !hfunc)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hfunc));
+    reg_write64(CXL_GPU_REG_PARAM1, (uint64_t)(int64_t)blockSize);
+    reg_write64(CXL_GPU_REG_PARAM2, dynamicSMemSize);
+    reg_write64(CXL_GPU_REG_PARAM3, flags);
+    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET_OCCUPANCY);
+    if (err == CUDA_SUCCESS)
+        *numBlocks = (int)(int64_t)reg_read64(CXL_GPU_REG_RESULT0);
+    cmd_unlock();
+    return err;
+}
+
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction hfunc, int blockSize,
+                                                      size_t dynamicSMemSize) {
+    return cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(numBlocks, hfunc, blockSize, dynamicSMemSize, 0);
+}
+
 CUresult cuFuncGetName(const char **name, CUfunction hfunc) {
     fprintf(stderr, "[CXL-CUDA] cuFuncGetName(func=%p) -> CUDA_ERROR_NOT_SUPPORTED\n", hfunc);
     if (!name || !hfunc) {
