@@ -5,6 +5,26 @@ CXLMemSim 是 CMake 驱动的 C++20/C 混合项目，核心代码在 `src/` 和 
 Type 2 GPU 路径在 `qemu_integration/guest_libcuda/` 提供 guest CUDA Driver API shim，通过 BAR2 MMIO 协议和修改后的 QEMU CXL Type 2 设备通信。
 本文件是CXLMemSim源码仓职责、构建约束和Type-2局部边界的权威。本机活跃开发checkout位于`/home/jensen/Projects/cxl-cloud/cxlmemsim/`；项目目标、正确性层级和本地/CNB分工由`/home/jensen/Projects/cxl-memsim/AGENTS.md`定义。跨仓exact source组合从`cxl-lab/manifests/sources.lock.json`读取，不在本文件复制。
 
+## 全链路位置
+
+```text
+cxl-models -> guest llama-cpp
+                    |
+                    | CUDA Driver API
+                    v
+  CXLMemSim guest_libcuda [this repository] -> BAR2 command/data window
+                    |                                  |
+                    |                                  v
+  CXLMemSim server / memory model       QEMU cxl-type2 -> Concordia / NVIDIA L40
+                    ^                                  |
+                    +---- Type-2 memory and command state
+
+linux-cxl-type2 discovers the device; type2-guest packages the shim and kernel;
+cxl-lab fixes the exact component artifact and runs the complete contract.
+```
+
+本仓交付两类相连但不同的能力：server侧的CXL内存/拓扑状态，以及guest侧把CUDA API编码为BAR2命令的shim。任何修改先说明它改变哪一类状态、由哪一侧消费，并从对应run或probe取得证据。
+
 ## Cloud Source Authority
 
 CNB `gevico.online/jensen/cxlmemsim`是项目primary，GitHub `jensenojs/CXLMemSim`保存同SHA公开镜像。新提交先进入CNB primary，再把同一SHA推送GitHub；运行任务只消费`cxl-lab` source lock声明的exact source。
