@@ -2212,12 +2212,20 @@ CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute attrib, CUfunction hfu
 }
 
 CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int value) {
-    fprintf(stderr, "[CXL-CUDA] cuFuncSetAttribute(func=%p, attrib=%d, value=%d) -> CUDA_ERROR_NOT_SUPPORTED\n",
-            hfunc, attrib, value);
+    DLOG("cuFuncSetAttribute(func=%p, attrib=%d, value=%d)\n", hfunc, attrib, value);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
     if (!hfunc) {
         return CUDA_ERROR_INVALID_VALUE;
     }
-    return CUDA_ERROR_NOT_SUPPORTED;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hfunc));
+    reg_write64(CXL_GPU_REG_PARAM1, (uint64_t)attrib);
+    reg_write64(CXL_GPU_REG_PARAM2, (uint64_t)(int64_t)value);
+    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_SET_ATTRIBUTE);
+    cmd_unlock();
+    return err;
 }
 
 CUresult cuFuncGetName(const char **name, CUfunction hfunc) {
