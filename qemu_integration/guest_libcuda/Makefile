@@ -17,6 +17,7 @@ TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 INTEGRITY_EXPORT_ORACLE := cuda-integrity-export-oracle
 GGML_CUDA_ATTRIBUTE_TRIGGER := ggml-cuda-attribute-trigger
+GGML_FLASH_ATTN_EXT_TRIGGER := ggml-flash-attn-ext-trigger
 CUDA_ELF_STATIC_EVIDENCE := collect_cuda_elf_static_evidence.py
 CUDA_DEBUG_CAPTURE := run_cuda_debug_capture.sh
 PRIVATE_EXPORT_PROBE := private_export_probe.py
@@ -28,7 +29,7 @@ BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
 .PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle \
-	ggml-cuda-attribute-probe-tools cuda-elf-static-evidence-tools cuda-debug-capture-tools test-context-state test-context-shim
+	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-context-state test-context-shim
 
 all: $(TARGETS)
 
@@ -44,6 +45,23 @@ integrity-export-oracle: $(INTEGRITY_EXPORT_ORACLE)
 
 ggml-cuda-attribute-probe-tools: $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(CUDA_ELF_STATIC_EVIDENCE)
 	python3 -m py_compile $(CUDA_ELF_STATIC_EVIDENCE)
+
+ggml-flash-attn-ext-probe: $(GGML_FLASH_ATTN_EXT_TRIGGER)
+
+$(GGML_FLASH_ATTN_EXT_TRIGGER): ggml_flash_attn_ext_trigger.cpp
+	@test -n "$(GGML_INCLUDE_DIR)" || { echo 'GGML_INCLUDE_DIR is required and must name the frozen llama source headers' >&2; exit 2; }
+	@test -n "$(GGML_LIBRARY_DIR)" || { echo 'GGML_LIBRARY_DIR is required and must name the frozen guest lib directory' >&2; exit 2; }
+	@test -n "$(GGML_LINK_LIBRARY_DIR)" || { echo 'GGML_LINK_LIBRARY_DIR is required and must name the frozen guest NCCL directory used only for link-time transitive closure' >&2; exit 2; }
+	@test -f "$(GGML_INCLUDE_DIR)/ggml.h" || { echo 'GGML_INCLUDE_DIR does not contain ggml.h' >&2; exit 2; }
+	@test -f "$(GGML_INCLUDE_DIR)/ggml-backend.h" || { echo 'GGML_INCLUDE_DIR does not contain ggml-backend.h' >&2; exit 2; }
+	@test -f "$(GGML_INCLUDE_DIR)/ggml-cuda.h" || { echo 'GGML_INCLUDE_DIR does not contain ggml-cuda.h' >&2; exit 2; }
+	@test -f "$(GGML_LIBRARY_DIR)/libggml-cuda.so.0" || { echo 'GGML_LIBRARY_DIR does not contain libggml-cuda.so.0' >&2; exit 2; }
+	@test -f "$(GGML_LIBRARY_DIR)/libggml-base.so.0" || { echo 'GGML_LIBRARY_DIR does not contain libggml-base.so.0' >&2; exit 2; }
+	@test -f "$(GGML_LIBRARY_DIR)/libggml.so.0" || { echo 'GGML_LIBRARY_DIR does not contain libggml.so.0' >&2; exit 2; }
+	@test -f "$(GGML_LINK_LIBRARY_DIR)/libnccl.so.2" || { echo 'GGML_LINK_LIBRARY_DIR does not contain libnccl.so.2' >&2; exit 2; }
+	$(CXX) $(CXXFLAGS) -std=c++17 -I"$(GGML_INCLUDE_DIR)" -o $@ $< -L"$(GGML_LIBRARY_DIR)" \
+		-Wl,-rpath,"$(GGML_LIBRARY_DIR)" -Wl,-rpath-link,"$(GGML_LINK_LIBRARY_DIR)" \
+		-l:libggml-cuda.so.0 -l:libggml-base.so.0 -l:libggml.so.0 $(LDFLAGS) $(LDLIBS)
 
 cuda-elf-static-evidence-tools: $(CUDA_ELF_STATIC_EVIDENCE)
 	python3 -m py_compile $(CUDA_ELF_STATIC_EVIDENCE)
@@ -119,4 +137,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)

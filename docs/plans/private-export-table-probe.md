@@ -241,6 +241,27 @@ host CPU 侧的 Driver/Runtime 调用与间接跳转，不承担 GPU kernel 调�
 只有 capture 得到返回值和有限状态前后差异，才进入 guest shim slot 1 实现。探针本身完成不关闭 Kimi
 correctness；slot 1 修复发布后仍需正式 same-VM baseline、concordia与输出比较。
 
+## exact GGML flash-attention trigger
+
+L40 的 backend-init public attribute trigger 已验证 exact `libggml-cuda` 可以加载、创建 CUDA backend，
+并接受同一 `cudaFuncSetAttribute` 参数；它仍只自然到达 callback-hooks slot 2 和 6，target slot 1 的
+selector `0x111` 未出现。因此 backend construction 不能解释 Kimi core 中该调用的前置状态。
+
+下一触发器不调用 C++ internal wrapper，也不伪造 kernel argument。它从 exact llama source 的公开头文件构造
+一张 `ggml_flash_attn_ext` 图：`Q=[576,2,16,1]`、`K=[576,32,1,1]`、`V` 为 K 的 `[512,...]` view，附带
+连续 F16 mask。对 L40 的 CUDA 选择代码，这组 shape 选择 core 中记录的
+`ggml_cuda_flash_attn_ext_mma_f16_case<576,512,2,16>`。图在 exact guest artifact 的
+`libggml-cuda.so.0` 与 `libggml-base.so.0` 上分配、计算和同步一次；它只使用公开 GGML API，模型、QEMU
+和 guest shim 都不参与。
+
+编译必须同时显式给出冻结 llama source 的 `GGML_INCLUDE_DIR`、extracted guest GGML library 的
+`GGML_LIBRARY_DIR`，以及 exact guest `libnccl.so.2` 所在的 `GGML_LINK_LIBRARY_DIR`。第三个目录只通过
+linker 的 `rpath-link` 关闭 `libggml-cuda.so.0` 的传递链接依赖，不进入运行时搜索路径；把整个 guest
+`lib/` 加进 `LD_LIBRARY_PATH` 会把 guest libc 注入 host 诊断进程，破坏 ABI。缺少任何一个输入时 Make
+target fail closed；它不能改用系统 GGML 或当前 checkout。
+Python-GDB 仍只采集 Runtime 自然执行的 private table entry/return。若 target 仍 not-reached，结果只排除
+这张 exact dispatcher 图的前置条件，不能授权填 slot 1。
+
 ## 未决问题
 
 首个 tiny trigger 是否能产生与 Kimi 相同的 `selector=0x111` 尚未验证。这个变量只影响 trigger adapter，

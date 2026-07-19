@@ -62,6 +62,11 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
 - `ggml-cuda-attribute-trigger`加载调用方给定的 exact `libggml-cuda`，用已收集的 dynamic anchor 与同 DSO
   local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
   写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。
+- `ggml-flash-attn-ext-trigger`用冻结 llama source 的公开头文件和 extracted guest artifact 的 exact GGML
+  libraries 构造一次小的 public `ggml_flash_attn_ext` 图。固定 `Q=[576,2,16,1]`、`K=[576,32,1,1]`、K 的
+  `[512,...]` V view 与 F16 mask 在 L40 上选择 core 中的 `<576,512,2,16>` CUDA wrapper。构建必须显式传入
+  `GGML_INCLUDE_DIR`、`GGML_LIBRARY_DIR` 和仅供 link-time closure 的 `GGML_LINK_LIBRARY_DIR`，缺失时 fail
+  closed；最后一项不能进入 host runtime 搜索路径。它不读写或调用 private export-table slot。
 - `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。每条受明细上限接纳的
   调用以 sequence 保存 entry registers 与 return `RAX`；capture 只在显式 UUID、slot 和可选 selector 匹配时
   读取一个或多个声明的整数参数寄存器窗口。它不主动调用未知 slot，不沿窗口内容继续解引用；负结果只表示
@@ -70,7 +75,7 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
   kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。
 
-上述四个入口与`ggml-cuda-attribute-trigger`都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；内部库、测试夹具和生成二进制不伪装成CLI。
+上述四个入口以及两个 GGML public trigger 都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；内部库、测试夹具和生成二进制不伪装成CLI。
 
 每个新 ABI 失败先复用上述最窄入口，保存 `proves`、`does_not_prove` 和下一边界；不要复制临时 `nm`、
 `readelf`、`objdump` 或 GDB 命令。需要正式 L40、exact artifact 或 core 组合时，输入身份和结果发布由
@@ -99,6 +104,7 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - build guest CUDA shim: `make -C qemu_integration/guest_libcuda`
 - prepare private export-table probe: `make -C qemu_integration/guest_libcuda private-export-table-probe`
 - build exact public `cudaFuncSetAttribute` trigger: `make -C qemu_integration/guest_libcuda ggml-cuda-attribute-trigger`
+- build exact public GGML flash-attention graph trigger: `make -C qemu_integration/guest_libcuda ggml-flash-attn-ext-probe GGML_INCLUDE_DIR=.../ggml/include GGML_LIBRARY_DIR=.../opt/llama/bin GGML_LINK_LIBRARY_DIR=.../lib/x86_64-linux-gnu`; the third path only closes the exact guest NCCL dependency while linking and must not be added to runtime search paths
 - prepare exact trigger tools: `make -C qemu_integration/guest_libcuda ggml-cuda-attribute-probe-tools`
 - prepare reusable CUDA ELF static evidence collector: `make -C qemu_integration/guest_libcuda cuda-elf-static-evidence-tools`
 - prepare generic gdb/cuda-gdb capture wrapper: `make -C qemu_integration/guest_libcuda cuda-debug-capture-tools`
