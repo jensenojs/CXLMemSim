@@ -282,3 +282,31 @@ runner log SHA256  06d32566f59d30e1270d91c920c3304b4e8e7d1ad71167c9c11e50d841e3b
 下一次诊断应在 guest table 上观察已经自然发生的 slot 1 调用。该入口只能记录 selector、整数寄存器、
 显式上限内的输入窗口及必要的返回前后状态，然后 fail closed。没有这份 guest-side capture 之前，仍禁止
 为 slot 1 写 success stub、推测函数签名、主动调用真实 Driver 未知槽或再次用完整 paired Kimi 逐槽碰撞。
+
+## Selector buffer 的元素类型解释了 guest 分叉
+
+exact guest core 后续给出了比 slot 1 observer 更早的控制流。CUDA Runtime 12.9 的
+`cudaFuncSetAttribute` 在调用任何 callback 之前执行：
+
+```asm
+mov 0xa8(%rbx), %rax
+mov 0x444(%rax), %edx
+test %edx, %edx
+je   public_driver_call
+```
+
+同一 core 中，`rbx+0xa8` 指向 `TOOLS_RUNTIME_BUFFER1`。slot 2 getter 的第二个输出为 `1024`；本次
+selector 是 `0x111`，而 `0x111 * sizeof(uint32_t) == 0x444`。因此该输出表示 1024 个 32-bit selector
+元素。旧 shim 把 buffer 声明成 `unsigned char[1024]`，只能容纳 256 个 selector。Runtime 读取
+selector 273 时越过数组结尾，落入后续的 `g_context_storage`；core 中该位置含有析构回调地址的非零高位，
+于是 Runtime 进入 callback 分支并调用 NULL slot 1。
+
+本机用 exact core 和 guest ELF 关闭了这条地址关系：旧 ELF 中 `TOOLS_RUNTIME_BUFFER1` 大小为
+`0x400`，起址后 `0x444` 位于 `g_context_storage`；修复后的 ELF 将其声明为 `uint32_t[1024]`，大小为
+`0x1000`，getter 仍返回元素数 `1024`，selector `0x111` 的初始值为零。这个修复保持真实 L40 已观察到的
+getter 输出，只纠正内部存储单位。
+
+host Kimi 诊断 `cnb-djo-1jtsvoc5f` 使用相同 `llama-completion` 和相同 libcudart Build ID，完整运行成功且
+目标 slot 1 调用数为零。结合上述唯一分支，这说明真实 Driver 的 selector 273 在该调用窗口为零。该证据
+不定义非零 selector 的 callback ABI，也不授权实现 slot 1；下一边界是发布修复后的 guest shim 并重跑
+same-VM paired Kimi，确认 Runtime 直接进入公开 Driver 调用。

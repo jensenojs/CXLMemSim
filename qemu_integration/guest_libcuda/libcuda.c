@@ -914,7 +914,7 @@ static CUresult integrity_check_set_enabled(int enabled) {
     return CUDA_SUCCESS;
 }
 
-static unsigned char TOOLS_RUNTIME_BUFFER1[1024];
+static uint32_t TOOLS_RUNTIME_BUFFER1[1024];
 static unsigned char TOOLS_RUNTIME_BUFFER2[14];
 
 static void tools_get_buffer1(void **ptr, size_t *size) {
@@ -923,7 +923,7 @@ static void tools_get_buffer1(void **ptr, size_t *size) {
         *ptr = TOOLS_RUNTIME_BUFFER1;
     }
     if (size) {
-        *size = sizeof(TOOLS_RUNTIME_BUFFER1);
+        *size = sizeof(TOOLS_RUNTIME_BUFFER1) / sizeof(TOOLS_RUNTIME_BUFFER1[0]);
     }
 }
 
