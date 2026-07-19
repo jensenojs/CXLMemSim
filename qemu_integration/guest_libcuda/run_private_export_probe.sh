@@ -12,10 +12,13 @@ usage:
   run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]
   run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N \
       [--selector VALUE] [--memory REGISTER:BYTES ...] \
-      [--output-buffer POINTER_OUT_REGISTER:SIZE_OUT_REGISTER:MAX_BYTES] -- TRIGGER [ARGS...]
+      [--output-buffer POINTER_OUT_REGISTER:SIZE_OUT_REGISTER:MAX_BYTES] \
+      [--separate-inferior-io] -- TRIGGER [ARGS...]
 
 The trigger runs once under a Python-enabled host GDB. The probe observes naturally reached
 cuGetExportTable tables and table entry calls; it does not invoke private slots.
+With --separate-inferior-io, the exact trigger argv is preserved in inferior-run.gdb while
+inferior.stdout and inferior.stderr are kept separate from gdb.transcript.
 EOF
 }
 
@@ -26,8 +29,8 @@ private_export_probe_hint=problem=running isolated GDB commands by hand loses Dr
 private_export_probe_hint=mental_model=validate a new output directory and debugger prerequisites; generate one GDB command file loading private_export_probe.py; execute the caller-supplied trigger verbatim; preserve full transcript and identity; require the Python observer summary to close
 private_export_probe_hint=role=provide the command-line boundary for reusable discovery or bounded capture while keeping trigger selection outside the probe implementation
 private_export_probe_hint=use_when=run a low-cost public CUDA trigger on a real compatible NVIDIA environment to inventory natural private calls or capture one UUID/slot/selector already justified by discovery or a Kimi core
-private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/event limits and one explicit returned-buffer projection, Python-enabled gdb and an explicit trigger command after --
-private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json
+private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/event limits, one explicit returned-buffer projection, optional separated inferior I/O, Python-enabled gdb and an explicit trigger command after --
+private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json; separated runs also preserve inferior-run.gdb,inferior.stdout,inferior.stderr
 private_export_probe_hint=interpret=matching call/return sequence values prove one natural private call returned; capture_status separately reports whether the declared target was reached, so a successful run may correctly report not_reached
 private_export_probe_hint=proves=the exact trigger/debugger/probe composition and naturally observed private-table events; a declared output-buffer projection may additionally prove one returned pointer, length and bounded first-level byte content
 private_export_probe_hint=does_not_prove=that an unreached slot is unused by Kimi, that a non-NULL entry has a known signature, that active calling is safe, or that guest Type-2/Kimi is correct
@@ -50,6 +53,7 @@ memory=()
 output_buffer=
 selector_max=
 event_limit=
+separate_inferior_io=no
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) mode=${2:-}; shift 2 ;;
@@ -61,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --output-buffer) output_buffer=${2:-}; shift 2 ;;
         --selector-max) selector_max=${2:-}; shift 2 ;;
         --event-limit) event_limit=${2:-}; shift 2 ;;
+        --separate-inferior-io) separate_inferior_io=yes; shift ;;
         --help|-h) usage; exit 0 ;;
         --hint) hint; exit 0 ;;
         --) shift; break ;;
@@ -88,6 +93,7 @@ done
 [[ -n $output_buffer ]] && prepare+=(--output-buffer "$output_buffer")
 [[ -n $selector_max ]] && prepare+=(--selector-max "$selector_max")
 [[ -n $event_limit ]] && prepare+=(--event-limit "$event_limit")
+[[ $separate_inferior_io == no ]] || prepare+=(--separate-inferior-io)
 prepare+=(-- "$@")
 "${prepare[@]}"
 
@@ -95,13 +101,17 @@ config=$output_dir/probe-config.json
 transcript=$output_dir/gdb.transcript
 debugger=${PRIVATE_EXPORT_PROBE_GDB:-gdb}
 command -v "$debugger" >/dev/null 2>&1 || die "missing debugger: $debugger"
+run_command=(-ex run)
+if [[ $separate_inferior_io == yes ]]; then
+    run_command=(-x "$output_dir/inferior-run.gdb")
+fi
 set +e
 "$debugger" --batch \
     -ex 'set pagination off' \
     -ex 'set debuginfod enabled off' \
     -ex "python exec(compile(open(r'$PROBE').read(), r'$PROBE', 'exec'))" \
     -ex "private-export-probe $config" \
-    -ex run \
+    "${run_command[@]}" \
     --args "$@" >"$transcript" 2>&1
 gdb_rc=$?
 set -e

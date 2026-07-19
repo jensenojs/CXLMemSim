@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,8 +31,8 @@ private_export_probe_hint=problem=CUDA Runtime private export tables are undocum
 private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; every detailed natural call receives a sequence-bound entry/return record, while capture filters one declared UUID/slot/selector for bounded argument memory deltas and one declared returned buffer
 private_export_probe_hint=role=implement the debugger-side observer and machine-readable table/call/capture event model used by multiple public CUDA triggers
 private_export_probe_hint=use_when=a public CUDA API or exact application trigger naturally reaches a private table path on the matching real NVIDIA Driver/Runtime and the unknown ABI must be constrained before changing the guest shim
-private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows, one POINTER_OUT:SIZE_OUT:MAX_BYTES output-buffer projection and event limit
-private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages
+private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows, one POINTER_OUT:SIZE_OUT:MAX_BYTES output-buffer projection, event limit and explicit inferior I/O separation
+private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages; separated runs additionally preserve inferior-run.gdb,inferior.stdout,inferior.stderr
 private_export_probe_hint=interpret=calls and returns with the same sequence are one naturally executed private call; capture reached additionally requires the declared UUID/slot/selector and bounded memory pair; not_reached supplies no target ABI authority
 private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, bounded argument-memory facts and, only when declared, one first-level returned buffer pointer, length and bounded bytes
 private_export_probe_hint=does_not_prove=the complete function signature, semantics outside observed arguments/state, safety of active fuzzing, guest shim correctness, Type-2/Kimi correctness or TPS
@@ -64,9 +65,9 @@ def parse_nonnegative(text: str) -> int:
 
 
 def parse_memory(text: str) -> dict[str, int | str]:
-    match = re.fullmatch(r"(r(?:di|si|dx|cx|8|9)):(0x[0-9a-fA-F]+|[0-9]+)", text)
+    match = re.fullmatch(r"(r(?:di|si|dx|cx|8|9|sp)):(0x[0-9a-fA-F]+|[0-9]+)", text)
     if not match:
-        raise argparse.ArgumentTypeError("memory window must be REGISTER:BYTES for an integer argument register")
+        raise argparse.ArgumentTypeError("memory window must be REGISTER:BYTES for a supported entry register")
     length = parse_nonnegative(match.group(2))
     if length == 0 or length > 4096:
         raise argparse.ArgumentTypeError("memory window must be between 1 and 4096 bytes")
@@ -194,7 +195,24 @@ def prepare(args: argparse.Namespace) -> int:
         "output_buffer": args.output_buffer,
         "selector_max": args.selector_max,
         "event_limit": args.event_limit,
+        "inferior_io": None,
     }
+    if args.separate_inferior_io:
+        stdout = output / "inferior.stdout"
+        stderr = output / "inferior.stderr"
+        command_file = output / "inferior-run.gdb"
+        run_argv = " ".join(shlex.quote(value) for value in trigger_argv[1:])
+        redirections = f">{shlex.quote(str(stdout))} 2>{shlex.quote(str(stderr))}"
+        command = "run"
+        if run_argv:
+            command += " " + run_argv
+        command_file.write_text(f"{command} {redirections}\n", encoding="utf-8")
+        config["inferior_io"] = {
+            "mode": "separate",
+            "command_file": str(command_file),
+            "stdout": str(stdout),
+            "stderr": str(stderr),
+        }
     json_dump(output / "identity.json", identity)
     json_dump(output / "probe-config.json", config)
     print(f"private_export_probe_config={output / 'probe-config.json'}")
@@ -234,12 +252,26 @@ def verify(args: argparse.Namespace) -> int:
     call_sequences = {record.get("sequence") for record in calls}
     return_sequences = {record.get("sequence") for record in returns}
     pair_errors: list[str] = []
+    io_errors: list[str] = []
+    inferior_io: dict[str, Any] | None = None
     if None in call_sequences or None in return_sequences:
         pair_errors.append("natural call or return record lacks a sequence")
     if call_sequences != return_sequences:
         pair_errors.append("natural call and return sequences differ")
     if gdb_status.get("unreturned_sequences"):
         pair_errors.append("natural private calls remained unreturned at process exit")
+    if config.get("inferior_io") is not None:
+        inferior_io = {"mode": config["inferior_io"]["mode"]}
+        for stream_name in ("stdout", "stderr"):
+            stream_path = pathlib.Path(config["inferior_io"][stream_name])
+            if not stream_path.is_file():
+                io_errors.append(f"missing separated inferior {stream_name}: {stream_path}")
+                continue
+            inferior_io[stream_name] = {
+                "path": str(stream_path),
+                "size": stream_path.stat().st_size,
+                "sha256": sha256(stream_path),
+            }
     expected = {
         "mode": config["mode"],
         "uuid": config.get("uuid"),
@@ -250,7 +282,7 @@ def verify(args: argparse.Namespace) -> int:
         capture_status = "observed" if calls else "not_reached"
     else:
         capture_status = "reached" if captures else "not_reached"
-    if table_errors or identity_errors or debugger_errors or pair_errors:
+    if table_errors or identity_errors or debugger_errors or pair_errors or io_errors:
         status = "fail_closed"
     elif gdb_status.get("exit_code") != 0:
         status = "trigger_failed"
@@ -271,6 +303,8 @@ def verify(args: argparse.Namespace) -> int:
         "identity_errors": identity_errors,
         "debugger_errors": debugger_errors,
         "pair_errors": pair_errors,
+        "io_errors": io_errors,
+        "inferior_io": inferior_io,
     }
     json_dump(output / "summary.json", summary)
     print(f"private_export_probe_status={summary['status']}")
@@ -335,6 +369,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     prepare_parser.add_argument("--output-buffer", type=parse_output_buffer)
     prepare_parser.add_argument("--selector-max", type=parse_nonnegative, default=0x3FF)
     prepare_parser.add_argument("--event-limit", type=parse_nonnegative, default=DEFAULT_EVENT_LIMIT)
+    prepare_parser.add_argument("--separate-inferior-io", action="store_true")
     prepare_parser.add_argument("trigger", nargs=argparse.REMAINDER)
     prepare_parser.set_defaults(handler=prepare)
     verify_parser = subcommands.add_parser("verify", help="validate debugger output and write summary.json")
@@ -508,7 +543,8 @@ if gdb is not None:
             return int(gdb.parse_and_eval("$" + name))
 
         def registers(self) -> dict[str, str]:
-            return {name: hex_address(self.register(name)) or "0x0" for name in ("rdi", "rsi", "rdx", "rcx", "r8", "r9")}
+            names = ("rdi", "rsi", "rdx", "rcx", "r8", "r9", "rsp")
+            return {name: hex_address(self.register(name)) or "0x0" for name in names}
 
         def caller(self) -> str | None:
             try:
