@@ -139,7 +139,7 @@ $:
             cat "$output_root/pair-identity.json"
             printf '\n=== PRIVATE_EXPORT_PROBE_FILE_END pair-identity.json ===\n'
             for case_dir in "$output_root/discovery" "$output_root/callback-hooks-slot1"; do
-              for result in identity.json probe-config.json tables.jsonl calls.jsonl captures.jsonl gdb-status.json \
+              for result in identity.json probe-config.json tables.jsonl calls.jsonl returns.jsonl captures.jsonl gdb-status.json \
                   summary.json debugger-command.json gdb.transcript; do
                 printf '=== PRIVATE_EXPORT_PROBE_FILE_BEGIN %s/%s ===\n' "$(basename "$case_dir")" "$result"
                 cat "$case_dir/$result"

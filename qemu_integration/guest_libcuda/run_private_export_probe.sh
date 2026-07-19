@@ -26,8 +26,8 @@ private_export_probe_hint=mental_model=validate a new output directory and debug
 private_export_probe_hint=role=provide the command-line boundary for reusable discovery or bounded capture while keeping trigger selection outside the probe implementation
 private_export_probe_hint=use_when=run a low-cost public CUDA trigger on a real compatible NVIDIA environment to inventory natural private calls or capture one UUID/slot/selector already justified by discovery or a Kimi core
 private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/event limits, Python-enabled gdb and an explicit trigger command after --
-private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,captures.jsonl,gdb-status.json,summary.json
-private_export_probe_hint=interpret=exit success means GDB and the observer completed their declared mode; inspect summary capture_status because a successful run may correctly report not_reached
+private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json
+private_export_probe_hint=interpret=matching call/return sequence values prove one natural private call returned; capture_status separately reports whether the declared target was reached, so a successful run may correctly report not_reached
 private_export_probe_hint=proves=the exact trigger/debugger/probe composition and naturally observed private-table events preserved in the output directory
 private_export_probe_hint=does_not_prove=that an unreached slot is unused by Kimi, that a non-NULL entry has a known signature, that active calling is safe, or that guest Type-2/Kimi is correct
 private_export_probe_hint=next=compare discovery sets across triggers or feed a reached bounded capture into a real-Driver oracle and minimal guest-shim repair; never replace not_reached with a guessed success stub

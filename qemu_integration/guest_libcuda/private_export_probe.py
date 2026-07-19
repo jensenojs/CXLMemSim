@@ -27,13 +27,13 @@ MAX_TERMINATED_WORDS = 256
 DEFAULT_EVENT_LIMIT = 128
 HINT = """private_export_probe_hint=self=qemu_integration/guest_libcuda/private_export_probe.py
 private_export_probe_hint=problem=CUDA Runtime private export tables are undocumented; a NULL guest entry and a host table address reveal neither the slot signature nor the selector-specific state transition needed for a safe shim implementation
-private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; discovery inventories UUID, shape, slot, caller and count; capture filters one declared UUID/slot/selector and records bounded entry/return registers and memory deltas
+private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; every detailed natural call receives a sequence-bound entry/return record, while capture filters one declared UUID/slot/selector for bounded memory deltas
 private_export_probe_hint=role=implement the debugger-side observer and machine-readable table/call/capture event model used by multiple public CUDA triggers
 private_export_probe_hint=use_when=a public CUDA API or exact application trigger naturally reaches a private table path on the matching real NVIDIA Driver/Runtime and the unknown ABI must be constrained before changing the guest shim
 private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows and event limit
-private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages
-private_export_probe_hint=interpret=discovery records only slots actually called; capture reached requires an entry/return pair matching every declared filter; not_reached is a valid negative result and supplies no ABI implementation authority
-private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached and the bounded register/memory facts GDB observed for matched calls
+private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages
+private_export_probe_hint=interpret=calls and returns with the same sequence are one naturally executed private call; capture reached additionally requires the declared UUID/slot/selector and bounded memory pair; not_reached supplies no target ABI authority
+private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, and bounded memory facts only for the declared target
 private_export_probe_hint=does_not_prove=the complete function signature, semantics outside observed arguments/state, safety of active fuzzing, guest shim correctness, Type-2/Kimi correctness or TPS
 private_export_probe_hint=next=union results from faithful public triggers; for a Kimi blocker use the smallest reached entry/return oracle, and keep unknown or unreached slots NULL and explicit
 """
@@ -208,11 +208,21 @@ def verify(args: argparse.Namespace) -> int:
     identity = json.loads((output / "identity.json").read_text(encoding="utf-8"))
     tables = read_jsonl(output / "tables.jsonl")
     calls = read_jsonl(output / "calls.jsonl")
+    returns = read_jsonl(output / "returns.jsonl")
     captures = read_jsonl(output / "captures.jsonl")
     gdb_status = json.loads((output / "gdb-status.json").read_text(encoding="utf-8"))
     table_errors = [record for record in tables if record.get("kind") == "table_error"]
     identity_errors = [record for record in tables if record.get("kind") == "identity_error"]
     debugger_errors = gdb_status.get("fatal_errors", [])
+    call_sequences = {record.get("sequence") for record in calls}
+    return_sequences = {record.get("sequence") for record in returns}
+    pair_errors: list[str] = []
+    if None in call_sequences or None in return_sequences:
+        pair_errors.append("natural call or return record lacks a sequence")
+    if call_sequences != return_sequences:
+        pair_errors.append("natural call and return sequences differ")
+    if gdb_status.get("unreturned_sequences"):
+        pair_errors.append("natural private calls remained unreturned at process exit")
     expected = {
         "mode": config["mode"],
         "uuid": config.get("uuid"),
@@ -223,7 +233,7 @@ def verify(args: argparse.Namespace) -> int:
         capture_status = "observed" if calls else "not_reached"
     else:
         capture_status = "reached" if captures else "not_reached"
-    if table_errors or identity_errors or debugger_errors:
+    if table_errors or identity_errors or debugger_errors or pair_errors:
         status = "fail_closed"
     elif gdb_status.get("exit_code") != 0:
         status = "trigger_failed"
@@ -235,6 +245,7 @@ def verify(args: argparse.Namespace) -> int:
         "expected": expected,
         "table_records": len(tables),
         "call_records": len(calls),
+        "return_records": len(returns),
         "capture_records": len(captures),
         "gdb": gdb_status,
         "status": status,
@@ -242,6 +253,7 @@ def verify(args: argparse.Namespace) -> int:
         "table_errors": table_errors,
         "identity_errors": identity_errors,
         "debugger_errors": debugger_errors,
+        "pair_errors": pair_errors,
     }
     json_dump(output / "summary.json", summary)
     print(f"private_export_probe_status={summary['status']}")
@@ -253,7 +265,7 @@ def debugger_failure(args: argparse.Namespace) -> int:
     config_path = pathlib.Path(args.config).resolve(strict=True)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     output = pathlib.Path(config["output_dir"])
-    for name in ("tables.jsonl", "calls.jsonl", "captures.jsonl"):
+    for name in ("tables.jsonl", "calls.jsonl", "returns.jsonl", "captures.jsonl"):
         (output / name).touch(exist_ok=True)
     json_dump(
         output / "gdb-status.json",
@@ -349,16 +361,23 @@ if gdb is not None:
         slot_breakpoints: dict[int, Any] = field(default_factory=dict)
         call_counts: dict[TableSlot, int] = field(default_factory=dict)
         detailed_events: int = 0
+        call_sequence: int = 0
         capture_sequence: int = 0
+        unreturned_sequences: set[int] = field(default_factory=set)
         fatal_errors: list[str] = field(default_factory=list)
 
         def append_table(self, record: dict[str, Any]) -> None:
             append_jsonl(self.output / "tables.jsonl", record)
 
-        def append_call(self, record: dict[str, Any]) -> None:
+        def append_call(self, record: dict[str, Any]) -> bool:
             if self.detailed_events < self.config["event_limit"]:
                 append_jsonl(self.output / "calls.jsonl", record)
                 self.detailed_events += 1
+                return True
+            return False
+
+        def append_return(self, record: dict[str, Any]) -> None:
+            append_jsonl(self.output / "returns.jsonl", record)
 
         def append_capture(self, record: dict[str, Any]) -> None:
             append_jsonl(self.output / "captures.jsonl", record)
@@ -484,19 +503,38 @@ if gdb is not None:
             capture_matches = [mapping for mapping in mappings if self.capture_matches(mapping, selector_candidate)]
             for mapping in mappings:
                 self.call_counts[mapping] = self.call_counts.get(mapping, 0) + 1
-            self.append_call(
+            self.call_sequence += 1
+            sequence = self.call_sequence
+            thread = gdb.selected_thread()
+            recorded = self.append_call(
                 {
                     "kind": "call",
+                    "sequence": sequence,
                     "address": hex_address(address),
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in mappings],
                     "caller": self.caller(),
+                    "thread": None if thread is None else thread.global_num,
+                    "entry_registers": registers,
                     "selector_candidate": selector_candidate,
                     "capture_match": bool(capture_matches),
                 }
             )
-            if capture_matches:
-                self.capture_sequence += 1
-                CaptureReturnBreakpoint(self, gdb.newest_frame(), self.capture_sequence, capture_matches, registers)
+            if recorded or capture_matches:
+                self.unreturned_sequences.add(sequence)
+                capture_sequence = None
+                if capture_matches:
+                    self.capture_sequence += 1
+                    capture_sequence = self.capture_sequence
+                NaturalCallReturnBreakpoint(
+                    self,
+                    gdb.newest_frame(),
+                    sequence,
+                    mappings,
+                    registers,
+                    recorded,
+                    capture_sequence,
+                    capture_matches,
+                )
 
         def capture_matches(self, mapping: TableSlot, selector_candidate: int | None) -> bool:
             if self.config["mode"] != "capture":
@@ -519,6 +557,7 @@ if gdb is not None:
                     "fatal_errors": self.fatal_errors,
                     "call_counts": calls,
                     "detailed_event_limit": self.config["event_limit"],
+                    "unreturned_sequences": sorted(self.unreturned_sequences),
                 },
             )
 
@@ -556,27 +595,46 @@ if gdb is not None:
             return False
 
 
-    class CaptureReturnBreakpoint(gdb.FinishBreakpoint):
+    class NaturalCallReturnBreakpoint(gdb.FinishBreakpoint):
         def __init__(
             self,
             observer: ProbeObserver,
             frame: Any,
-            sequence: int,
+            call_sequence: int,
             mappings: list[TableSlot],
             entry_registers: dict[str, str],
+            record_return: bool,
+            capture_sequence: int | None,
+            capture_mappings: list[TableSlot],
         ) -> None:
             super().__init__(frame, internal=True)
             self.observer = observer
-            self.sequence = sequence
+            self.call_sequence = call_sequence
             self.mappings = mappings
             self.entry_registers = entry_registers
+            self.record_return = record_return
+            self.capture_sequence = capture_sequence
+            self.capture_mappings = capture_mappings
             memory = observer.config.get("memory")
             self.memory_before = None
-            if memory:
+            if capture_mappings and memory:
                 pointer = int(entry_registers[memory["register"]], 16)
                 self.memory_before = observer.read_bytes(pointer, memory["bytes"])
 
         def stop(self) -> bool:
+            return_rax = hex_address(self.observer.register("rax"))
+            self.observer.unreturned_sequences.discard(self.call_sequence)
+            if self.record_return:
+                self.observer.append_return(
+                    {
+                        "kind": "return",
+                        "sequence": self.call_sequence,
+                        "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in self.mappings],
+                        "return_rax": return_rax,
+                    }
+                )
+            if not self.capture_mappings:
+                return False
             memory = self.observer.config.get("memory")
             after = None
             if memory:
@@ -585,10 +643,11 @@ if gdb is not None:
             self.observer.append_capture(
                 {
                     "kind": "capture",
-                    "sequence": self.sequence,
-                    "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in self.mappings],
+                    "sequence": self.capture_sequence,
+                    "call_sequence": self.call_sequence,
+                    "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in self.capture_mappings],
                     "entry_registers": self.entry_registers,
-                    "return_rax": hex_address(self.observer.register("rax")),
+                    "return_rax": return_rax,
                     "memory_before": self.memory_before,
                     "memory_after": after,
                 }
@@ -606,7 +665,7 @@ if gdb is not None:
             output = pathlib.Path(config["output_dir"])
             if not (output / "identity.json").is_file():
                 raise gdb.GdbError("missing identity.json written by prepare")
-            for name in ("tables.jsonl", "calls.jsonl", "captures.jsonl"):
+            for name in ("tables.jsonl", "calls.jsonl", "returns.jsonl", "captures.jsonl"):
                 (output / name).touch(exist_ok=False)
             gdb.execute("set breakpoint pending on")
             observer = ProbeObserver(config=config, output=output)

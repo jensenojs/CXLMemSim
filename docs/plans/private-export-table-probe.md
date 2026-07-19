@@ -23,8 +23,8 @@ guest shim、绕过 CUDA Runtime 或回退 host native 消除。可删除的是�
 建立一个对任意真实 CUDA trigger 可复用的 host L40 探针：
 
 1. 在真实 `cuGetExportTable` 返回时记录该进程请求的 UUID、table shape 和槽身份。
-2. discovery 模式记录该 trigger 实际调用的 UUID、slot、次数和 caller，不采集大块内存。
-3. capture 模式只对调用方选择的 UUID、slot和可选selector记录入口、返回与有限内存差异。
+2. 每次被明细记录的自然调用保存同一 sequence 下的入口寄存器、caller、thread 与返回 `RAX`，不采集未知指针内存。
+3. capture 模式只对调用方选择的 UUID、slot和可选selector额外记录有限内存差异。
 4. 输出由 Driver、CUDA Runtime、trigger 和源码身份约束的机器可读证据。
 5. 让未来显式的 fuzz/主动调用层复用 inventory 与选择器，但不在本切片主动调用未知槽。
 
@@ -113,10 +113,10 @@ private-export-table-probe DRIVER -- MODE [FILTERS] -- TRIGGER [ARGS...]
   -> debugger 在 cuGetExportTable entry/return 观察每张真实 table
   -> 按 table shape 生成 UUID + slot -> function address 映射
   -> discovery:
-       只在实际函数入口记录 UUID、slot、caller、selector候选与调用次数
+       只对实际调用记录 UUID、slot、caller、thread、入口寄存器、返回RAX与调用次数
   -> capture:
        只在匹配 UUID、slot、selector 时记录 entry/return 和有限内存差异
-  -> 输出 identity.json、tables.jsonl、calls.jsonl、captures.jsonl、summary.json
+  -> 输出 identity.json、tables.jsonl、calls.jsonl、returns.jsonl、captures.jsonl、summary.json
 ```
 
 trigger 是 `--` 后的任意 argv，不属于探针硬编码。首个 trigger 使用现有 tiny CUDA DSO 自然调用
@@ -176,9 +176,11 @@ debugger 在 `cuGetExportTable` entry 保存 `ppExportTable` 和 UUID，在函�
 与 table pointer。每个可执行 slot 建立内部 breakpoint，并保存该地址对应的一个或多个 UUID/index。
 同一函数地址被多个槽复用时，记录全部候选映射，不能任意选择一个 owner。
 
-discovery breakpoint 命中后读取 caller return address 和整数参数寄存器，只把可配置小整数范围内的
-`RDI` 另记为 selector candidate，不推断其语义。capture 根据 UUID、slot 和可选 selector 过滤；
-入口快照建立对应 return breakpoint，返回时记录 `RAX` 并比较调用方显式选择的参数指针窗口。
+discovery breakpoint 命中后读取 caller return address、thread 和整数参数寄存器，只把可配置小整数范围内的
+`RDI` 另记为 selector candidate，不推断其语义。每条受 event limit 接纳的 entry 建立一个 frame-bound
+return breakpoint，用同一 sequence 保存 `RAX`；进程正常退出时存在未配对 sequence 会 fail closed。
+capture 根据 UUID、slot 和可选 selector 过滤，并复用同一个 return breakpoint，只有目标匹配时才比较调用方
+显式选择的参数指针窗口。达到 event limit 后普通明细停止增长，累计调用计数继续更新，目标匹配仍会被捕获。
 
 ## 删除清单与保留清单
 
