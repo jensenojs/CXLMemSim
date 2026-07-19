@@ -25,6 +25,16 @@ cxl-lab fixes the exact component artifact and runs the complete contract.
 
 本仓交付两类相连但不同的能力：server侧的CXL内存/拓扑状态，以及guest侧把CUDA API编码为BAR2命令的shim。任何修改先说明它改变哪一类状态、由哪一侧消费，并从对应run或probe取得证据。
 
+## 控制仓回链
+
+本仓产出的源码和组件payload由控制仓组合，具体身份与运行事实沿以下入口继续读取：
+
+- [控制仓职责与组合边界](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/AGENTS.md)
+- [source、artifact、run与result字段](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/manifests/AGENTS.md)
+- [candidate、promotion与fresh-pull](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/scripts/artifacts/AGENTS.md)
+- [正式运行、observer与result发布](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/scripts/run/AGENTS.md)
+- [immutable result、core归档与materialize](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/manifests/results/AGENTS.md)
+
 ## Cloud Source Authority
 
 CNB `gevico.online/jensen/cxlmemsim`是项目primary，GitHub `jensenojs/CXLMemSim`保存同SHA公开镜像。新提交先进入CNB primary，再把同一SHA推送GitHub；运行任务只消费`cxl-lab` source lock声明的exact source。
