@@ -123,6 +123,37 @@ trigger 是 `--` 后的任意 argv，不属于探针硬编码。首个 trigger �
 `cudaFuncSetAttribute`。如果它不能进入 `selector=0x111`，结果必须是 `not_reached`；随后可以替换为
 更接近 exact `libggml-cuda` 的最小 launcher，而不修改探针主体。
 
+Kimi core 已经把下一份 trigger 收敛到一个公开 CUDA Runtime 调用。`ggml-cuda-attribute-trigger` 只接受
+调用方显式给出的 DSO 路径、动态导出 anchor、同一 exact DSO 的 local host-stub ELF offset 和动态 shared
+memory 字节数。它以 `dlopen(..., RTLD_NOW | RTLD_GLOBAL)` 让该 DSO 完成真实 CUDA fatbin 注册，使用 anchor 的
+`dladdr` base 加 offset 计算 host stub，并用 `dl_iterate_phdr` 拒绝不位于该 DSO executable `PT_LOAD` 的地址。
+随后它只调用公开的 `cudaSetDevice(0)` 与
+`cudaFuncSetAttribute(host_stub, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`。private callback table
+仍只由 debugger 被动观察。
+
+这个适配器不从模型、源码或符号表猜输入。L40 composition 在运行前必须校验 artifact manifest 与
+`libggml-cuda.so.0` SHA256，再用 `nm -an` 从该文件解析 local host-stub offset；anchor raw symbol、offset、
+shared-memory bytes 和 artifact hash 都写入 runner log。它不加载 Kimi 模型、不构造 ggml context、不启动 QEMU，
+也不通过手工调用 callback slot 制造命中。
+
+`collect_cuda_elf_static_evidence.py` 是可复用的静态证据生产者。它总会保存 exact library 的
+`nm -D`、`nm -an -C`、`readelf -n`、`readelf -W -l` 原始输出；调用方可以按本轮问题声明任意多个 named
+symbol regex，要求某些匹配唯一，并为某个唯一 local symbol 保存一个局部 `objdump -d -C`。它把所有匹配、
+原始命令、SHA256、Build ID、transcript文件名与失败原因写入 `static-evidence.json`。因此新的 core 只改变
+选择条件，不复制静态分析命令，也不会丢掉未匹配的完整原始 symbol/ELF现场。
+
+Kimi slot 1 的 composition 使用这个通用采集器声明 anchor、wrapper 和 host stub 三个选择；其后对 wrapper
+transcript要求出现对应 host stub、`cudaFuncSetAttribute@plt` 和 public attribute `8`。运行时 executable-segment
+检查仍由 C trigger 再做一次。动态 shared-memory bytes 是本次 Kimi core 的观测输入，采集器记录它但不从静态
+反汇编猜值。
+
+`run_cuda_debug_capture.sh` 把 debugger 现场也收拢到同一证据形状。它可使用 `gdb` 或 `cuda-gdb`，并支持
+程序运行与 exact ELF + core 两种输入。每次输出 debugger version/configuration/hash、ELF/core/command-file
+hash、实际 argv、完整 transcript 与 debugger exit code。core 只读，不会被复制、压缩、删除或修改。private
+export-table probe 仍直接使用 Python-enabled `gdb`，因为它必须在运行时从真实 table 地址创建 breakpoint；它继续
+保存等价的 identity、命令与 transcript。`cuda-gdb` 用于需要 device-code 或 kernel state 的未来问题，不必为它再
+写一串临时命令或单独保存现场。
+
 ## 具体改动清单
 
 | repo | file | symbol/field | action | reason | acceptance |
@@ -132,6 +163,9 @@ trigger 是 `--` 后的任意 argv，不属于探针硬编码。首个 trigger �
 | cxlmemsim | `qemu_integration/guest_libcuda/run_private_export_probe.sh` | host diagnostic entry | add | 收拢身份、argv、debugger与输出目录 | 非法输入和身份漂移fail closed |
 | cxlmemsim | `qemu_integration/guest_libcuda/tiny_cuda_fatbin.cu` | explicit attribute trigger | modify | 提供第一个自然Runtime触发器 | 真实L40调用成功或明确not_reached |
 | cxlmemsim | `qemu_integration/guest_libcuda/Makefile` | probe targets | modify | 复用现有tiny DSO与launcher构建 | make目标成功 |
+| cxlmemsim | `qemu_integration/guest_libcuda/ggml_cuda_attribute_trigger.c` | exact host-stub adapter | add | 让已验证Kimi host stub进入公开Runtime调用 | 只在同一DSO可执行segment内调用；输出public CUDA返回码 |
+| cxlmemsim | `qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py` | generic ELF static collector | add | 收拢core/ELF的symbol、header与局部反汇编现场 | 原始transcript与命名匹配一起保存；要求唯一的条件不成立即失败 |
+| cxlmemsim | `qemu_integration/guest_libcuda/run_cuda_debug_capture.sh` | generic debugger capture | add | 收拢gdb/cuda-gdb程序与core现场 | core只读；输入身份、命令、完整transcript与退出码一起保存 |
 | cxlmemsim | `.cnb.yml` | `api_trigger_private_export_table_probe` | add | 分钟级L40 discovery/capture | exact event保存身份与结果marker |
 | cxlmemsim | `AGENTS.md` | Commands/Key Files/DoD | modify | 让后续agent找到和正确解释探针 | 文档不复制current result |
 | cxlmemsim | `docs/evidence/private-export-table-probe.md` | first L40 evidence | add after run | 保存slot 1结果及证明边界 | 引用SN、SHA、Build ID和原始结果 |
@@ -183,7 +217,7 @@ host CPU 侧的 Driver/Runtime 调用与间接跳转，不承担 GPU kernel 调�
 
 ## 验收方式
 
-本地只运行 Python compile、shell syntax、CLI非法输入和现有 oracle build；这些检查不代替L40。
+本地只运行 Python compile、shell syntax、CLI非法输入、exact trigger build和现有 oracle build；这些检查不代替L40。
 
 真实验收使用一个 CNB L40 event，在同一 Job 内顺序执行：
 
@@ -191,6 +225,8 @@ host CPU 侧的 Driver/Runtime 调用与间接跳转，不承担 GPU kernel 调�
 2. capture，筛选 callback-hooks slot 1和selector `0x111`。
 3. 验证五类机器文件可解析，Driver/libcudart/trigger身份一致，slot 1 entry 与 return 成对。
 4. 若 tiny trigger 报 `not_reached`，保留结果并改用最小 exact ggml trigger；不能因此调用slot 1。
+5. exact ggml trigger 的 capture 只有在 artifact hash、anchor、local host-stub offset、动态 shared-memory
+   bytes 和 L40 Driver/Runtime identity 都保存时才可消费为 guest shim ABI 证据。
 
 只有 capture 得到返回值和有限状态前后差异，才进入 guest shim slot 1 实现。探针本身完成不关闭 Kimi
 correctness；slot 1 修复发布后仍需正式 same-VM baseline、concordia与输出比较。

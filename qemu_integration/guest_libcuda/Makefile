@@ -16,6 +16,9 @@ CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 INTEGRITY_EXPORT_ORACLE := cuda-integrity-export-oracle
+GGML_CUDA_ATTRIBUTE_TRIGGER := ggml-cuda-attribute-trigger
+CUDA_ELF_STATIC_EVIDENCE := collect_cuda_elf_static_evidence.py
+CUDA_DEBUG_CAPTURE := run_cuda_debug_capture.sh
 PRIVATE_EXPORT_PROBE := private_export_probe.py
 PRIVATE_EXPORT_RUNNER := run_private_export_probe.sh
 
@@ -24,7 +27,8 @@ BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle test-context-state test-context-shim
+.PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle \
+	ggml-cuda-attribute-probe-tools cuda-elf-static-evidence-tools cuda-debug-capture-tools test-context-state test-context-shim
 
 all: $(TARGETS)
 
@@ -37,6 +41,15 @@ private-export-table-probe: tiny-probe $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_
 	bash -n $(PRIVATE_EXPORT_RUNNER)
 
 integrity-export-oracle: $(INTEGRITY_EXPORT_ORACLE)
+
+ggml-cuda-attribute-probe-tools: $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(CUDA_ELF_STATIC_EVIDENCE)
+	python3 -m py_compile $(CUDA_ELF_STATIC_EVIDENCE)
+
+cuda-elf-static-evidence-tools: $(CUDA_ELF_STATIC_EVIDENCE)
+	python3 -m py_compile $(CUDA_ELF_STATIC_EVIDENCE)
+
+cuda-debug-capture-tools: $(CUDA_DEBUG_CAPTURE)
+	bash -n $(CUDA_DEBUG_CAPTURE)
 
 $(CUDA_SHIM): libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
@@ -77,6 +90,9 @@ $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
 $(INTEGRITY_EXPORT_ORACLE): integrity_export_oracle.c
 	$(CC) $(CFLAGS) -pthread -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
 
+$(GGML_CUDA_ATTRIBUTE_TRIGGER): ggml_cuda_attribute_trigger.c
+	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
+
 test: $(CASE_CONTROL) $(TRANSPORT_TEST)
 	./$(TRANSPORT_TEST)
 	./$(CASE_CONTROL) --help
@@ -103,4 +119,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(INTEGRITY_EXPORT_ORACLE)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER)

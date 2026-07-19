@@ -47,6 +47,32 @@ CNB任务接管时至少核对repo、branch、exact SHA、event、runner CPU/内
 Type-2 smoke 的观察点：启动参数含 `-device cxl-type2`，QEMU 日志出现 Type-2 realized，guest 能看到 `/dev/cxl/cache0`、`/dev/cxl/mem0`、`/dev/cxl_gpu0`。
 本机`/home/jensen/Projects/cxl-memsim/CXLAgent/`可以在guest rootfs准备好后作为观测工具：先用topology/snapshot类命令确认cache/mem/sysfs/iomem，再考虑memory snapshot和tracepoint；当前诊断initramfs不适合直接跑完整`cxlagent`。
 
+## 可复用调试证据
+
+`qemu_integration/guest_libcuda/`中的 CUDA 诊断工具服务于下一次同类失败的低成本取证。原始 core、CNB
+runner log、exact guest ELF、collector 原始输出、反汇编、阴性 L40 probe、触发器源码和对应 commit 都是
+长期证据。`.work/`中的这些命名现场和`.codex-runs/`中的原始失败目录不能随 build、cache 或普通 generated
+state 清理；它们不进入组件 payload、OCI component artifact 或 Git index。
+
+四个入口按问题边界复用：
+
+- `collect_cuda_elf_static_evidence.py`读取调用方给定的 exact ELF 与命名 selector，写入 SHA256、Build ID、
+  完整 `nm`/`readelf`/`objdump` transcript 和 `static-evidence.json`。它用于确认符号、ELF 段和公开调用形状；
+  它不加载 CUDA，不能证明 Runtime private ABI、guest shim 或 Type-2。
+- `ggml-cuda-attribute-trigger`加载调用方给定的 exact `libggml-cuda`，用已收集的 dynamic anchor 与同 DSO
+  local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
+  写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。
+- `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。discovery 记录实际
+  可达集合；capture 只在显式 UUID、slot 和可选 selector 匹配时保存有限入口/返回状态。它不主动调用未知 slot，
+  负结果只表示给定 trigger 没有到达该边界。
+- `run_cuda_debug_capture.sh`对程序或 exact ELF + core 保存 debugger、命令文件、输入 hash、完整 transcript
+  与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
+  kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。
+
+每个新 ABI 失败先复用上述最窄入口，保存 `proves`、`does_not_prove` 和下一边界；不要复制临时 `nm`、
+`readelf`、`objdump` 或 GDB 命令。需要正式 L40、exact artifact 或 core 组合时，输入身份和结果发布由
+`cxl-lab` diagnostic pipeline 管理，不手改本仓 `.cnb.yml` 的 image 行，也不在交互 shell 拼装冻结输入。
+
 ## Notes
 
 本机实验笔记位于`/home/jensen/Projects/cxl-memsim/Note/`，并遵照`/home/jensen/obsidian/AGENTS.md`。CNB checkout只产出原始任务日志和机器证据，不假设Obsidian目录存在。
@@ -69,6 +95,10 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - check Type-2 device is compiled: `/home/jensen/Projects/qemu-cxl-type2/build/qemu-system-x86_64 -device help | grep -i 'cxl-type2'`
 - build guest CUDA shim: `make -C qemu_integration/guest_libcuda`
 - prepare private export-table probe: `make -C qemu_integration/guest_libcuda private-export-table-probe`
+- build exact public `cudaFuncSetAttribute` trigger: `make -C qemu_integration/guest_libcuda ggml-cuda-attribute-trigger`
+- prepare exact trigger tools: `make -C qemu_integration/guest_libcuda ggml-cuda-attribute-probe-tools`
+- prepare reusable CUDA ELF static evidence collector: `make -C qemu_integration/guest_libcuda cuda-elf-static-evidence-tools`
+- prepare generic gdb/cuda-gdb capture wrapper: `make -C qemu_integration/guest_libcuda cuda-debug-capture-tools`
 - run private export-table discovery on an L40: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode discovery --output-dir DIR -- TRIGGER [ARGS...]`
 - run a bounded private export-table capture: `qemu_integration/guest_libcuda/run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--selector VALUE] [--memory rsi:BYTES] -- TRIGGER [ARGS...]`
 - Type 2 endpoint smoke: `./qemu_integration/smoke_type2_endpoint.sh`
@@ -100,6 +130,9 @@ Obsidian wikilink 使用 vault 根目录绝对路径，不使用 `../` 相对路
 - `qemu_integration/smoke_type2_endpoint.sh` — bounded host-side Type 2 QEMU realization smoke test.
 - `qemu_integration/guest_libcuda/libcuda.c` and `qemu_integration/guest_libcuda/cxl_gpu_cmd.h` — guest CUDA Driver API shim and BAR2 command/register contract.
 - `qemu_integration/guest_libcuda/private_export_probe.py` and `run_private_export_probe.sh` — host L40 Python-GDB observation of naturally reached private export tables. They record table shape, real calls and bounded capture state; they do not invoke unknown slots or prove guest/Type-2 correctness.
+- `qemu_integration/guest_libcuda/ggml_cuda_attribute_trigger.c` — exact-artifact adapter for one public `cudaFuncSetAttribute` call on an explicitly resolved, registered libggml-cuda host stub. It validates the DSO address boundary before the call and must stay paired with the external artifact hash and `nm -an` evidence; it does not implement or invoke a private table ABI.
+- `qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py` — generic static collector for exact CUDA-related ELF/core work. It always saves full `nm`/`readelf` transcripts and accepts named symbol/disassembly selectors for one investigation; it never loads CUDA or a target DSO.
+- `qemu_integration/guest_libcuda/run_cuda_debug_capture.sh` — generic `gdb`/`cuda-gdb` wrapper for program or exact ELF/core runs. It records debugger/input identity and the full transcript without copying, compressing or changing the core; private export-table discovery remains a separate Python-GDB consumer because it needs dynamic table breakpoints.
 - `script/build_qemu.sh` — builds the CXL-capable QEMU submodule using the vendored Meson wheel.
 - `lib/qemu/` — Type-2 QEMU source checkout after submodule initialization; expected to line up with `qemu-cxl-type2`, not arbitrary upstream QEMU.
 
