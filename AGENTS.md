@@ -92,9 +92,13 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   fail closed。它用于确认符号、ELF 段、registration容量和公开调用形状；
   它不加载 CUDA，不能证明 Runtime private ABI、guest shim 或 Type-2。
 - `libcublas_create_probe.so`由现有`cuda-runtime-dlopen-kernel-probe`加载。它先加载调用方固定的exact
-  `libggml-cuda`，再从同一guest CUDA userland解析并调用`cublasCreate_v2/cublasDestroy_v2`，输出明确marker。
-  它用于在模型加载前完成CUDA library registration与cuBLAS初始化；registration总数仍由static collector和
-  上层run spec拥有，DSO本身不猜测数量、不链接宿主`libcublas`替代物。
+  `libggml-cuda`，再从同一guest CUDA userland解析并调用`cublasCreate_v2/cublasDestroy_v2`。两次显式
+  `dlopen`前后各以`dl_iterate_phdr`输出一组严格JSONL loader image；`libcuda.so.1`的每条
+  `cuLibraryLoadData`记录同时保存`code_file`、`code_base`与`code_offset`。cxl-lab把它们与解包后的exact
+  guest build manifest交叉，得到每份已加载ELF的SHA256、Build ID与fatbin descriptor count，并把每条
+  registration绑定到一份实际image。它用于在模型加载前完成CUDA library registration、cuBLAS初始化和
+  runtime DSO集合取证；registration总数仍由static collector和上层run spec拥有，DSO本身不猜测数量、不链接宿主
+  `libcublas`替代物。
 - `ggml-cuda-attribute-trigger`加载调用方给定的 exact `libggml-cuda`，用已收集的 dynamic anchor 与同 DSO
   local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
   写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。

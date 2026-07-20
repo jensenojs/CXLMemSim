@@ -2000,10 +2000,12 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
      * contributor without imposing a process-global library ceiling. */
     Dl_info code_info = {0};
     const char *code_file = "(unmapped)";
+    uintptr_t code_base = 0;
     unsigned long code_offset = 0;
     if (dladdr(code, &code_info) && code_info.dli_fbase) {
         code_file = code_info.dli_fname ? code_info.dli_fname : "(unknown)";
-        code_offset = (unsigned long)((uintptr_t)code - (uintptr_t)code_info.dli_fbase);
+        code_base = (uintptr_t)code_info.dli_fbase;
+        code_offset = (unsigned long)((uintptr_t)code - code_base);
     }
 
     CudartLibraryRecord *record = calloc(1, sizeof(*record));
@@ -2036,10 +2038,11 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
 
     *library = (CUlibrary)record;
     fprintf(stderr,
-            "[CXL-CUDA]   library_record id=%u handle=%p code=%p code_file=%s code_offset=0x%lx "
+            "[CXL-CUDA]   library_record id=%u handle=%p code=%p code_file=%s code_base=0x%llx code_offset=0x%lx "
             "numJitOptions=%u numLibraryOptions=%u "
             "storedOptions=%u preserve_binary=%d module=%p alive=%d magic=0x%llx\n",
-            record->id, (void *)*library, record->code, code_file, code_offset, record->num_jit_options,
+            record->id, (void *)*library, record->code, code_file, (unsigned long long)code_base, code_offset,
+            record->num_jit_options,
             record->num_library_options, record->stored_library_options, record->preserve_binary, record->module,
             record->alive, (unsigned long long)record->magic);
     context_storage_log_entries("cuLibraryLoadData:success_exit");

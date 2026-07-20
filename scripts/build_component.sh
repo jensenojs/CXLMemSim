@@ -37,7 +37,7 @@ readonly PARALLEL=${profile[5]}
 readonly CMAKE_DEFINITIONS=("${profile[@]:6}")
 
 rm -rf "$WORK"
-mkdir -p "$BUILD" "$GUEST_SOURCE" "$PAYLOAD/bin" "$PAYLOAD/guest" "$EVIDENCE"
+mkdir -p "$BUILD" "$GUEST_SOURCE" "$PAYLOAD/bin" "$PAYLOAD/guest" "$PAYLOAD/evidence/cuda-api" "$EVIDENCE"
 
 env CC="$PROFILE_CC" CXX="$PROFILE_CXX" cmake -S "$ROOT" -B "$BUILD" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
@@ -93,6 +93,11 @@ install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe"
 install -m 0755 "$GUEST_DIR/libtiny_cuda.so" "$PAYLOAD/guest/libtiny_cuda.so"
 install -m 0755 "$GUEST_DIR/libcublas_create_probe.so" "$PAYLOAD/guest/libcublas_create_probe.so"
+# These are source facts consumed by cxl-lab's Q/R/N checker.  They come from
+# the same git archive as the shim binary above, so a tiny result never needs
+# to clone a floating component repository to reconstruct its API route.
+install -m 0644 "$GUEST_DIR/libcuda.c" "$PAYLOAD/evidence/cuda-api/libcuda.c"
+install -m 0644 "$GUEST_DIR/cxl_gpu_cmd.h" "$PAYLOAD/evidence/cuda-api/cxl_gpu_cmd.h"
 ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
 
 python3 scripts/component_artifact.py verify-profile --payload "$PAYLOAD" --profile "$PROFILE"

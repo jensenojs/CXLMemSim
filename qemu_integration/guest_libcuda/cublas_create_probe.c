@@ -1,7 +1,10 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <link.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef int (*cublas_create_t)(void **handle);
 typedef int (*cublas_destroy_t)(void *handle);
@@ -9,6 +12,82 @@ typedef int (*cublas_destroy_t)(void *handle);
 static const char *configured_path(const char *name, const char *fallback) {
     const char *value = getenv(name);
     return value && *value ? value : fallback;
+}
+
+/*
+ * The cuBLAS initialization window is where libcudart invokes the guest
+ * shim's cuLibraryLoadData registrations.  dladdr(code) records the
+ * registration origin, while this inventory records the complete loader
+ * image set before and after the two explicit dlopen calls below.  Keep the
+ * output as one JSON value per line: the host verifier can reject malformed
+ * records and bind a registration to path plus load base without interpreting
+ * prose from a serial log.
+ */
+static void json_string(FILE *stream, const char *value) {
+    fputc('"', stream);
+    for (const unsigned char *cursor = (const unsigned char *)(value ? value : ""); *cursor; ++cursor) {
+        switch (*cursor) {
+        case '"':
+            fputs("\\\"", stream);
+            break;
+        case '\\':
+            fputs("\\\\", stream);
+            break;
+        case '\b':
+            fputs("\\b", stream);
+            break;
+        case '\f':
+            fputs("\\f", stream);
+            break;
+        case '\n':
+            fputs("\\n", stream);
+            break;
+        case '\r':
+            fputs("\\r", stream);
+            break;
+        case '\t':
+            fputs("\\t", stream);
+            break;
+        default:
+            if (*cursor < 0x20) {
+                fprintf(stream, "\\u%04x", *cursor);
+            } else {
+                fputc(*cursor, stream);
+            }
+        }
+    }
+    fputc('"', stream);
+}
+
+struct loader_inventory_context {
+    const char *phase;
+    unsigned int count;
+};
+
+static int emit_loader_dso(struct dl_phdr_info *info, size_t size, void *opaque) {
+    (void)size;
+    struct loader_inventory_context *context = opaque;
+    const char *path = info->dlpi_name ? info->dlpi_name : "";
+    const char *kind = path[0] == '\0' ? "main-program"
+                       : (strncmp(path, "linux-vdso", strlen("linux-vdso")) == 0 ? "special" : "file");
+    printf("cublas_loader_dso={\"schema_version\":1,\"phase\":");
+    json_string(stdout, context->phase);
+    printf(",\"kind\":");
+    json_string(stdout, kind);
+    printf(",\"path\":");
+    json_string(stdout, path);
+    printf(",\"load_base\":\"0x%llx\",\"phnum\":%u}\n", (unsigned long long)info->dlpi_addr,
+           (unsigned int)info->dlpi_phnum);
+    context->count++;
+    return 0;
+}
+
+static void emit_loader_inventory(const char *phase) {
+    struct loader_inventory_context context = {.phase = phase, .count = 0};
+    printf("=== CUBLAS_LOADER_INVENTORY_BEGIN phase=%s ===\n", phase);
+    dl_iterate_phdr(emit_loader_dso, &context);
+    printf("=== CUBLAS_LOADER_INVENTORY_END phase=%s count=%u ===\n", phase, context.count);
+    fflush(stdout);
 }
 
 static void *load_library(const char *label, const char *path) {
@@ -40,6 +119,8 @@ int tiny_cuda_probe_run(void) {
     }
     printf("cublas_create_probe_registration_expected=%s\n", expected);
 
+    emit_loader_inventory("before");
+
     ggml = load_library("exact-libggml-cuda", ggml_path);
     if (!ggml) {
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
@@ -51,6 +132,7 @@ int tiny_cuda_probe_run(void) {
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
         return 32;
     }
+    emit_loader_inventory("after");
 
     dlerror();
     cublas_create_t create = (cublas_create_t)dlsym(cublas, "cublasCreate_v2");
