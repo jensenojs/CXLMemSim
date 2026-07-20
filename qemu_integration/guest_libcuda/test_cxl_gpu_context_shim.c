@@ -66,6 +66,7 @@ typedef struct {
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
 #define CUDA_ERROR_INVALID_CONTEXT 201
+#define CUDA_ERROR_NO_BINARY_FOR_GPU 209
 #define CUDA_ERROR_INVALID_HANDLE 400
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
@@ -580,6 +581,11 @@ static int test_library_legacy_only_fatbin_registers_without_module_load(void) {
 
     CHECK(cuLibraryLoadData(&library, fatbin, NULL, NULL, 0, options, option_values, 1) == CUDA_SUCCESS);
     CHECK(library != NULL);
+    CHECK(cubin_load_count == 0);
+    CHECK(command_count == 0);
+    void *module = NULL;
+    CHECK(cuLibraryGetModule(&module, library) == CUDA_ERROR_NO_BINARY_FOR_GPU);
+    CHECK(module == NULL);
     CHECK(cubin_load_count == 0);
     CHECK(command_count == 0);
     CHECK(cuLibraryUnload(library) == CUDA_SUCCESS);

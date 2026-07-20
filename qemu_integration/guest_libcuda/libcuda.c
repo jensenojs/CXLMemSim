@@ -145,6 +145,7 @@ typedef struct {
 #define CUDA_ERROR_NO_DEVICE 100
 #define CUDA_ERROR_INVALID_DEVICE 101
 #define CUDA_ERROR_INVALID_CONTEXT 201
+#define CUDA_ERROR_NO_BINARY_FOR_GPU 209
 #define CUDA_ERROR_INVALID_HANDLE 400
 #define CUDA_ERROR_NOT_FOUND 500
 #define CUDA_ERROR_NOT_READY 600
@@ -1910,7 +1911,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
             "[CXL-CUDA]   library module load reject: no compatible CUBIN or PTX for sm_%u in selected fatbin "
             "submodule\n",
             target_sm);
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return CUDA_ERROR_NO_BINARY_FOR_GPU;
 }
 
 static CUresult cudart_library_materialize_module(CudartLibraryRecord *record) {
