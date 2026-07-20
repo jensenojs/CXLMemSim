@@ -4,6 +4,7 @@
 
 | 路径 | 当前调用者或证据 | 当前状态 | 下一步 |
 | --- | --- | --- | --- |
+| `qemu_integration/guest_libcuda/ggml_flash_attn_ext_trigger.cpp` | `type2-guest/manifests/tiny-1234-profile.json`从CXLMemSim exact source commit提取此文件；guest builder把它与同一profile的llama公开头文件、GGML DSO编成`/bin/ggml-flash-attn-ext-trigger` | active-diagnostic-source | 保持为公开GGML图的唯一源码；变更图shape、oracle或依赖时，同时更新type2-guest profile与cxl-lab tiny gate合同 |
 | `qemu_integration/guest_libcuda/cxl_bar_benchmark.c` | `guest_libcuda/Makefile`的默认BAR target；`qemu_integration/README.md`给出static运行入口 | active-workload | 保持当前位置，后续与guest shim测试边界一起评估是否形成独立workload目录 |
 | `qemu_integration/zettai_benchmark.sh` | `qemu_integration/README.md`仍给出launch、guest与Type-2 benchmark命令 | active-workload | 保持当前入口；补齐最近真实运行身份后再决定目录迁移 |
 | `qemu_integration/ssd_stream_two_qemu_bench.sh` | 直接编译并消费`dax_stream_bench.c`；设计与验证命令保存在对应plan | active-workload | 作为同一SSD/DAX workload组合治理 |
@@ -21,3 +22,28 @@
 | `qemu_integration/guest_libcuda/gpu_validation_bench.c` | 源码内保留native/guest编译命令；未发现当前调用者 | unverified | 查最后运行证据后分类 |
 
 后续迁移必须同时更新Makefile、README、脚本调用点和证据路径。`arch/`不进入自动发现、构建、CNB或Kimi运行；任何入口一旦仍有current caller，就不能只凭文件名或时间归档。
+
+## 公开 GGML 图在 cheap gate 中的位置
+
+`ggml_flash_attn_ext_trigger.cpp`把一次已经在Kimi core中观察到的公开GGML CUDA图缩小为合法、可重复的输入。它用公开GGML API建立F16的Q、K、V、mask和输出tensor，要求CUDA backend支持该图，计算完成后同步，并逐元素检查零输入应得到有限的`0.0f`输出。这个数值oracle让“程序退出零”与“计算结果正确”成为两个独立事实。
+
+该源文件属于CXLMemSim，因为它定义了要触及的guest CUDA shim、BAR2、QEMU和HetGPU边界；它的编译输入属于type2-guest，因为guest executable必须链接本轮profile已经冻结的GGML动态库。最终组合关系是：
+
+```text
+CXLMemSim exact source commit
+  -> ggml_flash_attn_ext_trigger.cpp
+
+llama-cpp exact source commit
+  -> ggml/include
+
+llama-cpp component artifact
+  -> libggml-cuda.so.0 + libggml-base.so.0 + libggml.so.0
+
+type2-guest builder
+  -> /bin/ggml-flash-attn-ext-trigger
+
+cxl-lab Type-2 tiny run
+  -> C_init -> C_ggml -> C_tiny
+```
+
+这个关系避免从开发机checkout或不同版本的头文件借用编译输入。源文件、头文件、library和initramfs executable的SHA256由type2-guest materialization/build manifest保存；CXL Type-2真实执行、同步和数值结果由cxl-lab的run result保存。入口、输入参数和调试边界见仓库根[`AGENTS.md`](../AGENTS.md)中的可复用调试证据。
