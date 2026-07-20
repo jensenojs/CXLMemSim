@@ -24,12 +24,16 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+CUDA_FATBIN_DESCRIPTOR_SIZE_BYTES = 24
 
 HELP_EPILOG = """
 证据模型：
   这个工具用于把一次手工的 nm/readelf/objdump 调查变成可重放的证据目录。
-  它始终保存完整 nm-dynamic.txt、nm-local-demangled.txt、readelf-notes.txt 和
-  readelf-program-headers.txt；named query 只是从完整现场选出本轮关心的符号。
+  它始终保存完整 nm-dynamic.txt、nm-local-demangled.txt、readelf-notes.txt、
+  readelf-program-headers.txt 和 readelf-sections.txt；named query 只是从完整现场
+  选出本轮关心的符号。ELF section 会进入 static-evidence.json；若存在
+  .nvFatBinSegment，还会按 64 位 CUDA fatbin registration descriptor 的 24 字节
+  形状输出 descriptor_count，不能整除时 fail closed。
   所有匹配数、匹配内容、执行 argv、退出码、ELF SHA256、Build ID 与失败原因写入
   static-evidence.json。output-dir 必须是新目录，旧 core/ELF 与既有证据不会被覆盖。
 
@@ -57,11 +61,11 @@ Python-enabled gdb probe 的自然调用 capture 取得。
 
 HINT = """cuda_elf_static_evidence_hint=self=qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py
 cuda_elf_static_evidence_hint=problem=manual nm/readelf/objdump commands used during a Kimi core investigation are easy to lose, rerun against the wrong ELF or quote only the matching line while omitting the full symbol and relocation context
-cuda_elf_static_evidence_hint=mental_model=hash one exact ELF first; save complete tool transcripts and command exit codes; apply named selectors only as views over those raw files; fail closed when a required symbol, uniqueness or disassembly predicate is absent
+cuda_elf_static_evidence_hint=mental_model=hash one exact ELF first; save complete tool transcripts and command exit codes; parse section identity from the saved readelf transcript; derive .nvFatBinSegment registration descriptor count only when its byte size is divisible by the 24-byte 64-bit wrapper shape; apply named selectors only as views over raw files
 cuda_elf_static_evidence_hint=role=turn one exact CUDA-related ELF or core companion into reusable static identity, symbol, segment, relocation, version and bounded disassembly evidence without executing it
 cuda_elf_static_evidence_hint=use_when=a crash or runtime observation names an exact guest or host DSO and the next dynamic probe needs verified symbol addresses, registered-stub virtual addresses, call sites or Build ID
 cuda_elf_static_evidence_hint=inputs=exact regular ELF path; expected SHA256 when frozen by a run spec; optional dynamic/local symbol regexes, uniqueness constraints, disassembly windows, required text, DWARF or SASS requests
-cuda_elf_static_evidence_hint=outputs=static-evidence.json plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
+cuda_elf_static_evidence_hint=outputs=static-evidence.json with complete ELF section facts and optional .nvFatBinSegment size,24-byte descriptor count,remainder plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
 cuda_elf_static_evidence_hint=interpret=status pass means the exact ELF and every requested selector/predicate were satisfied; fail_closed still preserves all raw transcripts and identifies the first missing or ambiguous static fact
 cuda_elf_static_evidence_hint=proves=exact ELF identity, Build ID and the static symbol/segment/relocation/disassembly facts directly present in the saved tool output
 cuda_elf_static_evidence_hint=does_not_prove=that CUDA loads the ELF, a host stub is registered, a private table slot is called, the inferred function signature is correct, guest Type-2 works, Kimi is correct or TPS changes
@@ -77,6 +81,36 @@ class Symbol:
 
     def json(self) -> dict[str, Any]:
         return {"address": f"0x{self.address:x}", "kind": self.kind, "name": self.name}
+
+
+@dataclass(frozen=True)
+class ElfSection:
+    index: int
+    name: str
+    section_type: str
+    address: int
+    offset: int
+    size: int
+    entry_size: int
+    flags: str
+    link: int
+    info: int
+    alignment: int
+
+    def json(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "name": self.name,
+            "type": self.section_type,
+            "address": f"0x{self.address:x}",
+            "offset": self.offset,
+            "size_bytes": self.size,
+            "entry_size_bytes": self.entry_size,
+            "flags": self.flags,
+            "link": self.link,
+            "info": self.info,
+            "alignment": self.alignment,
+        }
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -133,9 +167,68 @@ def parse_nm(text: str) -> list[Symbol]:
         match = re.fullmatch(r"\s*([0-9A-Fa-f]+)\s+([A-Za-z])\s+(.+)", line)
         if match:
             rows.append(Symbol(int(match.group(1), 16), match.group(2), match.group(3)))
-    if not rows:
-        raise RuntimeError("nm produced no parseable symbols")
     return rows
+
+
+def parse_readelf_sections(text: str) -> list[ElfSection]:
+    rows: list[ElfSection] = []
+    row_pattern = re.compile(
+        r"^\s*\[\s*(?P<index>\d+)\]\s+(?P<prefix>.*?)\s+"
+        r"(?P<address>[0-9A-Fa-f]+)\s+(?P<offset>[0-9A-Fa-f]+)\s+"
+        r"(?P<size>[0-9A-Fa-f]+)\s+(?P<entry_size>[0-9A-Fa-f]+)\s*"
+        r"(?P<flags>[A-Za-z]*)\s+(?P<link>\d+)\s+(?P<info>\d+)\s+(?P<alignment>\d+)\s*$"
+    )
+    for line in text.splitlines():
+        match = row_pattern.fullmatch(line)
+        if not match:
+            continue
+        prefix = match.group("prefix").split()
+        if len(prefix) == 1:
+            name = ""
+            section_type = prefix[0]
+        elif len(prefix) == 2:
+            name, section_type = prefix
+        else:
+            raise RuntimeError(f"unexpected readelf section prefix: {match.group('prefix')}")
+        rows.append(
+            ElfSection(
+                index=int(match.group("index")),
+                name=name,
+                section_type=section_type,
+                address=int(match.group("address"), 16),
+                offset=int(match.group("offset"), 16),
+                size=int(match.group("size"), 16),
+                entry_size=int(match.group("entry_size"), 16),
+                flags=match.group("flags"),
+                link=int(match.group("link")),
+                info=int(match.group("info")),
+                alignment=int(match.group("alignment")),
+            )
+        )
+    if not rows:
+        raise RuntimeError("readelf produced no parseable section headers")
+    indices = [row.index for row in rows]
+    if len(indices) != len(set(indices)):
+        raise RuntimeError("readelf produced duplicate section indices")
+    return rows
+
+
+def fatbin_registration_facts(sections: list[ElfSection]) -> dict[str, Any] | None:
+    matches = [section for section in sections if section.name == ".nvFatBinSegment"]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise RuntimeError(f"expected at most one .nvFatBinSegment, got {len(matches)}")
+    section = matches[0]
+    count, remainder = divmod(section.size, CUDA_FATBIN_DESCRIPTOR_SIZE_BYTES)
+    return {
+        "name": section.name,
+        "section_index": section.index,
+        "size_bytes": section.size,
+        "descriptor_size_bytes": CUDA_FATBIN_DESCRIPTOR_SIZE_BYTES,
+        "descriptor_count": count,
+        "remainder_bytes": remainder,
+    }
 
 
 class Collector:
@@ -189,18 +282,31 @@ def collect(args: argparse.Namespace) -> int:
         notes = collector.run("readelf-notes", ["readelf", "-n", str(library)])
         collector.run("readelf-program-headers", ["readelf", "-W", "-l", str(library)])
         collector.run("readelf-dynamic", ["readelf", "-W", "-d", str(library)])
-        collector.run("readelf-sections", ["readelf", "-W", "-S", str(library)])
+        sections_text = collector.run("readelf-sections", ["readelf", "-W", "-S", str(library)])
         collector.run("readelf-relocations", ["readelf", "-W", "-r", str(library)])
         collector.run("readelf-version-info", ["readelf", "-W", "--version-info", str(library)])
         collector.run("objdump-dynamic-symbols", ["objdump", "-T", str(library)])
         collector.run("objdump-dynamic-relocations", ["objdump", "-R", str(library)])
         dynamic_symbols = parse_nm(dynamic_nm)
         local_symbols = parse_nm(local_nm)
+        sections = parse_readelf_sections(sections_text)
     except RuntimeError as error:
         errors.append(str(error))
         dynamic_symbols = []
         local_symbols = []
+        sections = []
         notes = ""
+
+    registration: dict[str, Any] | None = None
+    if sections:
+        try:
+            registration = fatbin_registration_facts(sections)
+        except RuntimeError as error:
+            errors.append(str(error))
+    if registration is not None and registration["remainder_bytes"] != 0:
+        errors.append(
+            ".nvFatBinSegment size is not divisible by the 24-byte CUDA fatbin registration descriptor"
+        )
 
     cuobjdump = shutil.which("cuobjdump")
     if cuobjdump:
@@ -284,6 +390,8 @@ def collect(args: argparse.Namespace) -> int:
     result = {
         "schema_version": SCHEMA_VERSION,
         "library": {"path": str(library), "sha256": actual_sha256, "build_id": build_id(notes)},
+        "elf_sections": [section.json() for section in sections],
+        "cuda_fatbin_registration": registration,
         "queries": all_queries,
         "commands": collector.commands,
         "transcripts": collector.transcripts,

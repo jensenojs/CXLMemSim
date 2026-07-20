@@ -87,8 +87,14 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
 四个入口按问题边界复用：
 
 - `collect_cuda_elf_static_evidence.py`读取调用方给定的 exact ELF 与命名 selector，写入 SHA256、Build ID、
-  完整 `nm`/`readelf`/`objdump` transcript 和 `static-evidence.json`。它用于确认符号、ELF 段和公开调用形状；
+  完整 `nm`/`readelf`/`objdump` transcript 和 `static-evidence.json`。section facts进入结构化结果；存在
+  `.nvFatBinSegment`时按64位CUDA registration descriptor的24字节形状输出count与remainder，不能整除时
+  fail closed。它用于确认符号、ELF 段、registration容量和公开调用形状；
   它不加载 CUDA，不能证明 Runtime private ABI、guest shim 或 Type-2。
+- `libcublas_create_probe.so`由现有`cuda-runtime-dlopen-kernel-probe`加载。它先加载调用方固定的exact
+  `libggml-cuda`，再从同一guest CUDA userland解析并调用`cublasCreate_v2/cublasDestroy_v2`，输出明确marker。
+  它用于在模型加载前完成CUDA library registration与cuBLAS初始化；registration总数仍由static collector和
+  上层run spec拥有，DSO本身不猜测数量、不链接宿主`libcublas`替代物。
 - `ggml-cuda-attribute-trigger`加载调用方给定的 exact `libggml-cuda`，用已收集的 dynamic anchor 与同 DSO
   local host-stub 虚拟地址执行一次公开 `cudaFuncSetAttribute`。它会拒绝 DSO 可执行段外的地址；它绝不读取、
   写入或调用 private export-table slot。shared-memory 字节数必须来自同一 Runtime/core 观察，不能由反汇编猜测。
@@ -110,7 +116,7 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   目标 L40 接受”；它不启动 guest、BAR2、QEMU、HetGPU或Kimi。必须同时传入 library SHA256、fatbin shape、
   CUBIN SM 和`--load --expected-device-sm`，使输入或 GPU 身份漂移显式失败。
 
-上述四个入口以及两个 GGML public trigger 都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；内部库、测试夹具和生成二进制不伪装成CLI。
+上述直接CLI入口以及两个 GGML public trigger 都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；`libcublas_create_probe.so`这类由统一launcher加载的内部DSO、测试夹具和生成二进制不伪装成CLI。collector与cuBLAS probe的底层合同分别由`test-static-collector`和`test-cublas-create-probe`保护；cxl-lab测试只验证上层编排。
 
 每个新 ABI 失败先复用上述最窄入口，保存 `proves`、`does_not_prove` 和下一边界；不要复制临时 `nm`、
 `readelf`、`objdump` 或 GDB 命令。需要正式 L40、exact artifact 或 core 组合时，输入身份和结果发布由

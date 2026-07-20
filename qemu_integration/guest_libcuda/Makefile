@@ -15,6 +15,8 @@ CONTEXT_STATE_TEST := test_cxl_gpu_context_state
 CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
+CUBLAS_CREATE_PROBE := libcublas_create_probe.so
+CUBLAS_CREATE_FAKE := libcublas_create_probe_fake.so
 INTEGRITY_EXPORT_ORACLE := cuda-integrity-export-oracle
 GGML_CUDA_ATTRIBUTE_TRIGGER := ggml-cuda-attribute-trigger
 GGML_FLASH_ATTN_EXT_TRIGGER := ggml-flash-attn-ext-trigger
@@ -30,15 +32,26 @@ BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe private-export-table-probe integrity-export-oracle \
+.PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe private-export-table-probe integrity-export-oracle \
 	fatbin-cubin-load-probe fatbin-library-load-probe \
-	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-context-state test-context-shim
+	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-static-collector test-context-state test-context-shim
 
 all: $(TARGETS)
 
 test-binaries: $(CUDA_TESTS) $(BAR_TESTS) $(TRANSPORT_TEST)
 
-tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE)
+tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE)
+
+test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE)
+	@output="$$(CUBLAS_CREATE_EXPECTED_REGISTRATIONS=3346 \
+		CUBLAS_CREATE_GGML_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
+		CUBLAS_CREATE_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
+		./$(TINY_CUDA_PROBE) "$(CURDIR)/$(CUBLAS_CREATE_PROBE)")"; \
+	printf '%s\n' "$$output"; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_create_probe_registration_expected=3346' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_create_result=0 handle=0x1' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_destroy_result=0' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx '=== CUBLAS_CREATE_PROBE_PASS ===' >/dev/null
 
 private-export-table-probe: tiny-probe $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_RUNNER)
 	python3 -m py_compile $(PRIVATE_EXPORT_PROBE)
@@ -68,6 +81,9 @@ $(GGML_FLASH_ATTN_EXT_TRIGGER): ggml_flash_attn_ext_trigger.cpp
 
 cuda-elf-static-evidence-tools: $(CUDA_ELF_STATIC_EVIDENCE)
 	python3 -m py_compile $(CUDA_ELF_STATIC_EVIDENCE)
+
+test-static-collector: cuda-elf-static-evidence-tools
+	python3 -m unittest -v test_collect_cuda_elf_static_evidence.py
 
 cuda-debug-capture-tools: $(CUDA_DEBUG_CAPTURE)
 	bash -n $(CUDA_DEBUG_CAPTURE)
@@ -114,6 +130,12 @@ $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
 	# DSO below owns both the tiny fatbin and all CUDA Runtime calls.
 	$(CC) $(CFLAGS) -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
 
+$(CUBLAS_CREATE_PROBE): cublas_create_probe.c
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
+
+$(CUBLAS_CREATE_FAKE): test_cublas_create_fake.c
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
+
 $(INTEGRITY_EXPORT_ORACLE): integrity_export_oracle.c
 	$(CC) $(CFLAGS) -pthread -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
 
@@ -146,4 +168,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)

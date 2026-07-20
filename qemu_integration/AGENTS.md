@@ -20,4 +20,9 @@ workload-inventory.md
 
 由人或agent直接调用的维护中Shell/Python入口必须提供`--help`与`--hint`。`--help`说明参数和失败语义；`--hint`指出项目/仓库/目录权威、相邻工具、输入、输出、证明边界和下一条证据边界。内部库、测试夹具、生成二进制和`arch/`中的失效文件不伪装成CLI。
 
+`guest_libcuda/`中的统一dlopen launcher可以加载多个同签名诊断DSO。`libtiny_cuda.so`验证基础计算；
+`libcublas_create_probe.so`验证exact CUDA userland在模型加载前的registration与cuBLAS初始化。二者共享launcher
+与Type-2 case lifecycle，但由run spec选择其一，不能在同一计数窗口内混跑后再把registration总数解释为
+单一exact DSO集合。底层测试分别使用真实tiny CUDA DSO和不依赖GPU的fake cuBLAS DSO。
+
 进入`guest_libcuda/`修改公开CUDA入口、private export-table探针或BAR2协议前，继续读取仓库根`AGENTS.md`中的ABI与验证边界。任何正式L40/exact artifact运行由cxl-lab diagnostic run spec拥有，不在本目录手工拼接CNB身份。

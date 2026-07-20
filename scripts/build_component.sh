@@ -92,6 +92,7 @@ install -m 0755 "$GUEST_DIR/cxl-gpu-case" "$PAYLOAD/guest/cxl-gpu-case"
 install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe"
 install -m 0755 "$GUEST_DIR/libtiny_cuda.so" "$PAYLOAD/guest/libtiny_cuda.so"
+install -m 0755 "$GUEST_DIR/libcublas_create_probe.so" "$PAYLOAD/guest/libcublas_create_probe.so"
 ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
 
 python3 scripts/component_artifact.py verify-profile --payload "$PAYLOAD" --profile "$PROFILE"
@@ -102,12 +103,14 @@ readelf -d "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-readelf-dynami
 readelf -d "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
     >"$EVIDENCE/tiny-probe-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/guest/libcublas_create_probe.so" >"$EVIDENCE/cublas-create-probe-readelf-dynamic.txt"
 ldd "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-ldd.txt"
 ldd "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-oracle-ldd.txt"
 ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
 ldd "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-ldd.txt"
 ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
 ldd "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-ldd.txt"
+ldd "$PAYLOAD/guest/libcublas_create_probe.so" >"$EVIDENCE/cublas-create-probe-ldd.txt"
 for library in liblz4.so.1 libzstd.so.1; do
     grep -F "Shared library: [$library]" "$EVIDENCE/shim-readelf-dynamic.txt" >/dev/null
     grep -F "$library =>" "$EVIDENCE/shim-ldd.txt" >/dev/null
@@ -118,11 +121,14 @@ grep -F 'Shared library: [libcudart.so.12]' "$EVIDENCE/tiny-library-readelf-dyna
 for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
     nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F " $symbol" >>"$EVIDENCE/tiny-library-symbol.txt"
 done
+nm -D "$PAYLOAD/guest/libcublas_create_probe.so" | grep -F ' tiny_cuda_probe_run' \
+    >"$EVIDENCE/cublas-create-probe-symbol.txt"
+! grep -F 'Shared library: [libcublas.so.12]' "$EVIDENCE/cublas-create-probe-readelf-dynamic.txt" >/dev/null
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
 "$PAYLOAD/bin/cuda-integrity-export-oracle" --help >"$EVIDENCE/integrity-oracle-help.txt"
 sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/bin/cuda-integrity-export-oracle" "$PAYLOAD/guest/libcuda.so.1" \
     "$PAYLOAD/guest/cxl-gpu-case" "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
-    "$PAYLOAD/guest/libtiny_cuda.so" \
+    "$PAYLOAD/guest/libtiny_cuda.so" "$PAYLOAD/guest/libcublas_create_probe.so" \
     >"$EVIDENCE/payload-sha256.txt"
 
 printf 'component_build=pass\n'

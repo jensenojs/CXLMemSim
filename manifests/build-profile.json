@@ -24,7 +24,9 @@
       "libcuda.so",
       "cxl-gpu-case",
       "integrity-export-oracle",
-      "test"
+      "test",
+      "test-static-collector",
+      "test-cublas-create-probe"
     ],
     "cc": "clang",
     "cflags": [
@@ -73,6 +75,11 @@
     },
     {
       "path": "guest/libtiny_cuda.so",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/libcublas_create_probe.so",
       "type": "file",
       "mode": "0755"
     }
