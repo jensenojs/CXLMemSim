@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """在真实 CUDA Driver 上加载一份精确重建的 CUDA fatbin library wrapper。
 
-Kimi Type-2 baseline 的 guest shim 曾在 libcublas 的 cuLibraryLoadData 调用处，先把一个
-只含 sm_50、sm_60、sm_61 ELF 的 113616-byte fatbin 判成与 L40 sm_89 不兼容并返回 801。
-这个入口把同一份 library bytes 重新放入当前进程的 CudartFatbincWrapper，然后只向真实
-NVIDIA Driver 问一次：cuLibraryLoadData 是否接受完整的 library container。
+Kimi Type-2 baseline 的 guest shim 会把 Runtime 传来的 fatbin wrapper 保存为 CUlibrary record，
+随后由 cuLibraryGetModule 请求 module materialization。这个入口按 manifest 声明的精确 fatbin
+偏移，从同一份 SHA256 已冻结的 library bytes 重建 process-local CudartFatbincWrapper，再向真实
+NVIDIA Driver 询问完整 library container 的 load/get-module/unload 生命周期。
 
 它不启动 guest、BAR2、QEMU、HetGPU 或 Kimi。`--get-module` 会在成功注册后调用真实
 `cuLibraryGetModule`，复原本轮 cuBLAS 初始化窗口实际继续消费的 API。输入身份、fatbin layout、
@@ -31,7 +31,7 @@ from probe_cuda_fatbin_cubin_load import (
     FATBIN_KIND_PTX,
     FatbinFile,
     ProbeFailure,
-    locate_unique_fatbin,
+    parse_fatbin_files,
     parse_nonnegative,
     parse_sha256,
     sha256_file,
@@ -57,16 +57,32 @@ class CudartFatbincWrapper(ctypes.Structure):
 def hint(stream: Any) -> None:
     stream.write(
         "fatbin_library_load_probe_hint=self=qemu_integration/guest_libcuda/probe_cuda_fatbin_library_load.py\n"
-        "fatbin_library_load_probe_hint=problem=Kimi guest shim rejected a legacy-only libcublas fatbin before the native NVIDIA Driver saw its cuLibraryLoadData wrapper\n"
-        "fatbin_library_load_probe_hint=question=Does the real L40 Driver accept the exact full wrapper containing ELF sm_50/sm_60/sm_61 when CU_LIBRARY_BINARY_IS_PRESERVED=1, and when requested does its cuLibraryGetModule return a module?\n"
-        "fatbin_library_load_probe_hint=mental_model=The exact library SHA256 locates one fatbin. This tool copies its 16-byte header plus declared files region, constructs a fresh process-local 24-byte wrapper, and keeps both buffers alive through cuLibraryUnload. Guest pointer values are process-local and are not reused.\n"
-        "fatbin_library_load_probe_hint=inputs=library path; expected SHA256; unique files_size; ordered expected entries such as elf:50; output directory; --load also requires expected L40 SM\n"
+        "fatbin_library_load_probe_hint=problem=One library may contain many same-sized fatbins, so files_size cannot identify the Runtime wrapper that reached cuLibraryLoadData\n"
+        "fatbin_library_load_probe_hint=question=Does the real L40 Driver accept the exact declared wrapper, and after acceptance what does cuLibraryGetModule return?\n"
+        "fatbin_library_load_probe_hint=mental_model=Library SHA256 plus explicit fatbin offset, header hash, full-region hash and ordered entries identify one wrapper. The tool copies only that header and files region into a fresh process-local 24-byte wrapper and keeps both buffers alive through cuLibraryUnload.\n"
+        "fatbin_library_load_probe_hint=inputs=library path; expected SHA256; explicit fatbin offset; files_size; header and full-region SHA256; ordered entries; output directory; --load also requires expected L40 SM\n"
         "fatbin_library_load_probe_hint=outputs=fatbin-library-load.json and fatbin-library-load.transcript.txt; JSON carries library/fatbin hashes, entry sequence, reconstructed wrapper, option 1 value 0x1, Driver load/get-module results, handles and unload result\n"
         "fatbin_library_load_probe_hint=interpret=driver-accepted means the Driver accepted this full library container; an optional get-module result is recorded without being rewritten as a library-load result\n"
         "fatbin_library_load_probe_hint=proves=One native Driver answer for this exact reconstructed wrapper only\n"
         "fatbin_library_load_probe_hint=does_not_prove=Guest shim behavior, BAR2, QEMU, HetGPU, Kimi correctness or TPS\n"
         "fatbin_library_load_probe_hint=next=accepted constrains guest library registration and lifetime semantics; rejected constrains why the guest reached this legacy submodule\n"
     )
+
+
+def locate_fatbin_at_offset(blob: mmap.mmap, expected_offset: int, expected_files_size: int) -> tuple[int, list[FatbinFile]]:
+    if expected_offset > len(blob) - FATBIN_HEADER.size:
+        raise ProbeFailure(f"fatbin offset 0x{expected_offset:x} cannot contain a complete header")
+    magic, version, header_size, files_size = FATBIN_HEADER.unpack_from(blob, expected_offset)
+    if (magic, version, header_size) != (0xBA55ED50, 1, FATBIN_HEADER.size):
+        raise ProbeFailure(f"fatbin offset 0x{expected_offset:x} does not contain the declared fatbin header")
+    if files_size != expected_files_size:
+        raise ProbeFailure(
+            f"fatbin offset 0x{expected_offset:x} files_size differs: "
+            f"expected {expected_files_size}, got {files_size}"
+        )
+    if files_size > len(blob) - expected_offset - header_size:
+        raise ProbeFailure(f"fatbin offset 0x{expected_offset:x} files region exceeds the exact library")
+    return expected_offset, parse_fatbin_files(blob, expected_offset, files_size)
 
 
 def parse_expected_entry(value: str) -> tuple[str, int]:
@@ -191,7 +207,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--hint", action="store_true", help="print stable agent-oriented context and exit")
     parser.add_argument("--library", type=Path, help="exact CUDA shared library containing the target fatbin")
     parser.add_argument("--expected-sha256", type=parse_sha256, metavar="SHA256", help="required library SHA256")
-    parser.add_argument("--fatbin-files-size", type=parse_nonnegative, help="required unique fatbin files_size")
+    parser.add_argument("--fatbin-offset", type=parse_nonnegative, help="required exact fatbin offset in the library")
+    parser.add_argument("--fatbin-files-size", type=parse_nonnegative, help="required fatbin files_size at the declared offset")
+    parser.add_argument("--expected-header-sha256", type=parse_sha256, metavar="SHA256", help="required SHA256 of the 16-byte fatbin header")
+    parser.add_argument("--expected-bytes-sha256", type=parse_sha256, metavar="SHA256", help="required SHA256 of the header and full files region")
     parser.add_argument("--expected-entry", type=parse_expected_entry, action="append", help="one ordered exact entry, formatted elf:SM or ptx:SM; repeat for the full fatbin sequence")
     parser.add_argument("--output-dir", type=Path, help="new directory for JSON and transcript")
     parser.add_argument("--load", action="store_true", help="create a real CUDA context and call cuLibraryLoadData")
@@ -200,7 +219,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.hint:
         return args
-    required = ("library", "expected_sha256", "fatbin_files_size", "expected_entry", "output_dir")
+    required = (
+        "library", "expected_sha256", "fatbin_offset", "fatbin_files_size", "expected_header_sha256",
+        "expected_bytes_sha256", "expected_entry", "output_dir",
+    )
     missing = [name.replace("_", "-") for name in required if getattr(args, name) is None]
     if missing:
         parser.error("missing required arguments: " + ", ".join("--" + name for name in missing))
@@ -222,7 +244,11 @@ def main(argv: list[str]) -> int:
     if args.output_dir.exists():
         print(f"output directory already exists: {args.output_dir}", file=sys.stderr)
         return 2
-    transcript = [f"library={args.library}", f"expected_sha256={args.expected_sha256}"]
+    transcript = [
+        f"library={args.library}",
+        f"expected_sha256={args.expected_sha256}",
+        f"expected_fatbin_offset=0x{args.fatbin_offset:x}",
+    ]
     result: dict[str, Any] = {
         "schema_version": 1,
         "classification": "cuda-fatbin-library-load-probe",
@@ -239,7 +265,7 @@ def main(argv: list[str]) -> int:
         with library.open("rb") as source:
             blob = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
             try:
-                fatbin_offset, entries = locate_unique_fatbin(blob, args.fatbin_files_size)
+                fatbin_offset, entries = locate_fatbin_at_offset(blob, args.fatbin_offset, args.fatbin_files_size)
                 observed_shape = entry_shape(entries)
                 if observed_shape != args.expected_entry:
                     raise ProbeFailure(f"fatbin entry sequence differs: expected {args.expected_entry}, got {observed_shape}")
@@ -251,6 +277,16 @@ def main(argv: list[str]) -> int:
         magic, version, header_size, files_size = FATBIN_HEADER.unpack_from(fatbin_bytes)
         if (magic, version, header_size, files_size) != (0xBA55ED50, 1, FATBIN_HEADER.size, args.fatbin_files_size):
             raise ProbeFailure("copied fatbin header differs from its validated library form")
+        header_sha256 = hashlib.sha256(fatbin_bytes[: FATBIN_HEADER.size]).hexdigest()
+        bytes_sha256 = hashlib.sha256(fatbin_bytes).hexdigest()
+        if header_sha256 != args.expected_header_sha256:
+            raise ProbeFailure(
+                f"fatbin header SHA256 mismatch: expected {args.expected_header_sha256}, got {header_sha256}"
+            )
+        if bytes_sha256 != args.expected_bytes_sha256:
+            raise ProbeFailure(
+                f"fatbin header-plus-files SHA256 mismatch: expected {args.expected_bytes_sha256}, got {bytes_sha256}"
+            )
         fatbin_buffer = ctypes.create_string_buffer(fatbin_bytes, len(fatbin_bytes))
         wrapper = CudartFatbincWrapper(
             CUDART_FATBINC_MAGIC, CUDART_FATBINC_VERSION,
@@ -258,8 +294,8 @@ def main(argv: list[str]) -> int:
         )
         fatbin = {
             "offset": f"0x{fatbin_offset:x}",
-            "header_sha256": hashlib.sha256(fatbin_bytes[: FATBIN_HEADER.size]).hexdigest(),
-            "bytes_sha256": hashlib.sha256(fatbin_bytes).hexdigest(),
+            "header_sha256": header_sha256,
+            "bytes_sha256": bytes_sha256,
             "files_size": args.fatbin_files_size,
             "entries": [entry.as_json() for entry in entries],
         }

@@ -119,6 +119,11 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   ELF CUBIN，并可用当前真实 CUDA Driver 执行一次`cuModuleLoadData`。它用于先回答“这份低架构 CUBIN 是否被
   目标 L40 接受”；它不启动 guest、BAR2、QEMU、HetGPU或Kimi。必须同时传入 library SHA256、fatbin shape、
   CUBIN SM 和`--load --expected-device-sm`，使输入或 GPU 身份漂移显式失败。
+- `probe_cuda_fatbin_library_load.py`复原 Runtime 实际传给`cuLibraryLoadData`的完整 library wrapper，并在真实
+  Driver 上按`LoadData → GetModule → Unload`观察三个返回值。它以 library SHA256、明确 fatbin offset、16-byte
+  header SHA256、header/files region SHA256 和有序 entry 序列共同定位输入；`files_size`在一个大 DSO 中可以重复，
+  不能单独充当 wrapper 身份。它不启动 guest、BAR2、QEMU、HetGPU 或 Kimi。成功的 library load 与后续 module
+  materialization 分属两个 Driver 状态，结果必须分别保存。
 
 上述直接CLI入口以及两个 GGML public trigger 都必须同时提供`--help`与`--hint`。`--help`解释参数与失败语义；`--hint`用稳定的`key=value`行给压缩恢复后的 agent 指出自身源码路径、相邻工具、主要输出、证明边界与下一条证据边界。新增可直接调用的CUDA诊断入口也遵守此合同；`libcublas_create_probe.so`这类由统一launcher加载的内部DSO、测试夹具和生成二进制不伪装成CLI。collector与cuBLAS probe的底层合同分别由`test-static-collector`和`test-cublas-create-probe`保护；cxl-lab测试只验证上层编排。
 
