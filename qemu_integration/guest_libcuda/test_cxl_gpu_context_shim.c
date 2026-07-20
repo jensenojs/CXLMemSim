@@ -146,6 +146,10 @@ static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
 };
 
+static const CUuuid context_local_storage_uuid = {
+    .bytes = {0xc6, 0x93, 0x33, 0x6e, 0x11, 0x21, 0xdf, 0x11, 0xa8, 0xc3, 0x68, 0xf3, 0x55, 0xd8, 0x95, 0x93},
+};
+
 typedef struct DestroyedContextThread {
     pthread_barrier_t attached;
     pthread_barrier_t destroyed;
@@ -361,6 +365,42 @@ static int test_integrity_export_table_shape(void) {
     CHECK(((integrity_check_t)slots[1])(12090, UINT64_C(1784320000), result) == CUDA_SUCCESS);
     CHECK(result[0] == UINT64_C(0x3341181c03cb675c));
     CHECK(result[1] == UINT64_C(0x8ed383aa1f4cd1e8));
+    return 0;
+}
+
+static int test_context_local_storage_keeps_managers_separate(void) {
+    typedef CUresult (*context_storage_put_t)(CUcontext context, void *state_mgr, void *ctx_state, void *dtor);
+    typedef CUresult (*context_storage_get_t)(void **ctx_state, CUcontext context, void *state_mgr);
+    const void *table = NULL;
+    void *manager_a = (void *)(uintptr_t)0xa1;
+    void *manager_b = (void *)(uintptr_t)0xb2;
+    void *state_a = (void *)(uintptr_t)0xaaa1;
+    void *state_b = (void *)(uintptr_t)0xbbb2;
+    void *replacement_a = (void *)(uintptr_t)0xaaa3;
+    void *out = NULL;
+
+    CHECK(cuGetExportTable(&table, &context_local_storage_uuid) == CUDA_SUCCESS);
+    CHECK(table != NULL);
+    const void *const *slots = table;
+    context_storage_put_t put = (context_storage_put_t)slots[0];
+    context_storage_get_t get = (context_storage_get_t)slots[2];
+    CHECK(put != NULL && get != NULL);
+
+    CHECK(put(NULL, manager_a, state_a, NULL) == CUDA_SUCCESS);
+    CHECK(put(NULL, manager_b, state_b, NULL) == CUDA_SUCCESS);
+    CHECK(get(&out, NULL, manager_a) == CUDA_SUCCESS);
+    CHECK(out == state_a);
+    out = NULL;
+    CHECK(get(&out, NULL, manager_b) == CUDA_SUCCESS);
+    CHECK(out == state_b);
+
+    CHECK(put(NULL, manager_a, replacement_a, NULL) == CUDA_SUCCESS);
+    out = NULL;
+    CHECK(get(&out, NULL, manager_a) == CUDA_SUCCESS);
+    CHECK(out == replacement_a);
+    out = NULL;
+    CHECK(get(&out, NULL, manager_b) == CUDA_SUCCESS);
+    CHECK(out == state_b);
     return 0;
 }
 
@@ -626,8 +666,9 @@ static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
-           test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
-           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
+           test_context_local_storage_keeps_managers_separate() || test_integrity_uses_runtime_device_identity() ||
+           test_occupancy_driver_api_route() || test_memcpy2d_device_route() ||
+           test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity();
 }

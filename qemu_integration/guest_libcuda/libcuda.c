@@ -305,6 +305,8 @@ static CUresult execute_cmd(uint32_t cmd) {
 }
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
+static void context_storage_test_reset(void);
+
 void cxl_cuda_test_reset(void) {
     while (g_cudart_library_records) {
         CudartLibraryRecord *record = g_cudart_library_records;
@@ -320,6 +322,7 @@ void cxl_cuda_test_reset(void) {
     g_initialized = 1;
     g_test_execute_cmd = NULL;
     cxl_cuda_context_state_reset();
+    context_storage_test_reset();
 }
 
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
@@ -518,6 +521,16 @@ static void context_storage_lock(void) {
 
 static void context_storage_unlock(void) { __sync_lock_release(&g_context_storage_lock); }
 
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+static void context_storage_test_reset(void) {
+    context_storage_lock();
+    memset(g_context_storage, 0, sizeof(g_context_storage));
+    g_context_storage_put_count = 0;
+    g_context_storage_get_count = 0;
+    context_storage_unlock();
+}
+#endif
+
 static uint64_t debug_hash_bytes(const void *ptr, size_t len) {
     const unsigned char *bytes = (const unsigned char *)ptr;
     uint64_t hash = 1469598103934665603ULL;
@@ -592,7 +605,7 @@ static CUresult context_local_storage_put(CUcontext context, void *state_mgr, vo
     int free_slot = -1;
     for (int i = 0; i < CONTEXT_STORAGE_MAX_ENTRIES; i++) {
         if (g_context_storage[i].in_use) {
-            if (g_context_storage[i].context == context) {
+            if (g_context_storage[i].context == context && g_context_storage[i].state_mgr == state_mgr) {
                 g_context_storage[i].state_mgr = state_mgr;
                 g_context_storage[i].ctx_state = ctx_state;
                 g_context_storage[i].dtor_cb = dtor_cb;
@@ -636,7 +649,8 @@ static CUresult context_local_storage_get(void **ctx_state, CUcontext context, v
 
     context_storage_lock();
     for (int i = 0; i < CONTEXT_STORAGE_MAX_ENTRIES; i++) {
-        if (g_context_storage[i].in_use && g_context_storage[i].context == context) {
+        if (g_context_storage[i].in_use && g_context_storage[i].context == context &&
+            g_context_storage[i].state_mgr == state_mgr) {
             *ctx_state = g_context_storage[i].ctx_state;
             context_storage_unlock();
             DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u -> ctx_state=%p\n", call_id, *ctx_state);
