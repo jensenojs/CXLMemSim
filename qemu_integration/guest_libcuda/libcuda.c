@@ -186,11 +186,10 @@ static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLI
 static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL; /* "CXDKERNL" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_function = 0x43584446554e4354ULL; /* "CXDFUNCT" diagnostic placeholder */
 
-#define CUDART_LIBRARY_RECORD_CAP 512
 #define CUDART_LIBRARY_RECORD_OPTION_CAP 4
 #define CUDART_LIBRARY_RECORD_MAGIC 0x43584c4942524152ULL /* "CXLIBRAR" */
 
-typedef struct {
+typedef struct CudartLibraryRecord {
     uint64_t magic;
     unsigned int id;
     int alive;
@@ -203,19 +202,27 @@ typedef struct {
     CUmodule module;
     CUlibraryOption options[CUDART_LIBRARY_RECORD_OPTION_CAP];
     void *option_values[CUDART_LIBRARY_RECORD_OPTION_CAP];
+    struct CudartLibraryRecord *next;
 } CudartLibraryRecord;
 
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
 
-static CudartLibraryRecord g_cudart_library_records[CUDART_LIBRARY_RECORD_CAP];
-static unsigned int g_cudart_library_record_count = 0;
+static CudartLibraryRecord *g_cudart_library_records = NULL;
+static unsigned int g_cudart_library_next_id = 1;
+
+/* CUlibrary is the record address.  Unload marks a record dead but keeps that
+ * address reserved until process exit, so an old opaque handle can never name
+ * a later library after allocator reuse.  The test reset frees the whole list
+ * because no handle may cross a test boundary.
+ * knockout: handle lookup is linear in registered libraries; replace the
+ * lookup index only if measured Kimi setup time shows this list on the critical
+ * path, while retaining the address-stable tombstone lifetime. */
 
 static CudartLibraryRecord *cudart_library_record_from_handle(CUlibrary library) {
     if (!library) {
         return NULL;
     }
-    for (unsigned int i = 0; i < g_cudart_library_record_count; i++) {
-        CudartLibraryRecord *record = &g_cudart_library_records[i];
+    for (CudartLibraryRecord *record = g_cudart_library_records; record; record = record->next) {
         if ((CUlibrary)record == library && record->magic == CUDART_LIBRARY_RECORD_MAGIC) {
             return record;
         }
@@ -298,6 +305,12 @@ static CUresult execute_cmd(uint32_t cmd) {
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 void cxl_cuda_test_reset(void) {
+    while (g_cudart_library_records) {
+        CudartLibraryRecord *record = g_cudart_library_records;
+        g_cudart_library_records = record->next;
+        free(record);
+    }
+    g_cudart_library_next_id = 1;
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -1979,16 +1992,14 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
-    if (g_cudart_library_record_count >= CUDART_LIBRARY_RECORD_CAP) {
-        fprintf(stderr, "[CXL-CUDA]   library_record overflow cap=%u -> CUDA_ERROR_OUT_OF_MEMORY\n",
-                CUDART_LIBRARY_RECORD_CAP);
+    CudartLibraryRecord *record = calloc(1, sizeof(*record));
+    if (!record) {
+        fprintf(stderr, "[CXL-CUDA]   library_record allocation failed -> CUDA_ERROR_OUT_OF_MEMORY\n");
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
 
-    CudartLibraryRecord *record = &g_cudart_library_records[g_cudart_library_record_count];
-    memset(record, 0, sizeof(*record));
     record->magic = CUDART_LIBRARY_RECORD_MAGIC;
-    record->id = g_cudart_library_record_count + 1;
+    record->id = g_cudart_library_next_id++;
     record->alive = 1;
     record->code = code;
     record->preserved_code = code;
@@ -2006,7 +2017,8 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         }
     }
 
-    g_cudart_library_record_count++;
+    record->next = g_cudart_library_records;
+    g_cudart_library_records = record;
 
     *library = (CUlibrary)record;
     fprintf(stderr,
@@ -2141,8 +2153,7 @@ CUresult cuKernelGetFunction(CUfunction *pFunc, CUkernel kernel) {
 
     CUfunction resolved = NULL;
     unsigned int matches = 0;
-    for (unsigned int i = 0; i < g_cudart_library_record_count; i++) {
-        CudartLibraryRecord *record = &g_cudart_library_records[i];
+    for (CudartLibraryRecord *record = g_cudart_library_records; record; record = record->next) {
         Dl_info code_info;
         if (!record->alive || !record->module || !dladdr(record->code, &code_info) ||
             code_info.dli_fbase != kernel_info.dli_fbase) {

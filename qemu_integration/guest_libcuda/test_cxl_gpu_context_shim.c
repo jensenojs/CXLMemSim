@@ -66,6 +66,7 @@ typedef struct {
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
 #define CUDA_ERROR_INVALID_CONTEXT 201
+#define CUDA_ERROR_INVALID_HANDLE 400
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
@@ -585,10 +586,42 @@ static int test_library_legacy_only_fatbin_registers_without_module_load(void) {
     return 0;
 }
 
+static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
+    enum { library_count = 513 };
+    unsigned char preserved_code[16] = {0};
+    CUlibrary libraries[library_count];
+    CUlibraryOption options[] = {CU_LIBRARY_BINARY_IS_PRESERVED};
+    void *option_values[] = {(void *)(uintptr_t)1};
+
+    cxl_cuda_test_reset();
+    for (unsigned int i = 0; i < library_count; i++) {
+        libraries[i] = NULL;
+        CHECK(cuLibraryLoadData(&libraries[i], preserved_code, NULL, NULL, 0, options, option_values, 1) ==
+              CUDA_SUCCESS);
+        CHECK(libraries[i] != NULL);
+    }
+    for (unsigned int i = 0; i < library_count; i++) {
+        CHECK(cuLibraryUnload(libraries[i]) == CUDA_SUCCESS);
+        CHECK(cuLibraryUnload(libraries[i]) == CUDA_ERROR_INVALID_HANDLE);
+        void *module = NULL;
+        CHECK(cuLibraryGetModule(&module, libraries[i]) == CUDA_ERROR_INVALID_HANDLE);
+    }
+
+    CUlibrary later_library = NULL;
+    CHECK(cuLibraryLoadData(&later_library, preserved_code, NULL, NULL, 0, options, option_values, 1) ==
+          CUDA_SUCCESS);
+    CHECK(later_library != NULL);
+    CHECK(later_library != libraries[0]);
+    CHECK(later_library != libraries[library_count - 1]);
+    CHECK(cuLibraryUnload(later_library) == CUDA_SUCCESS);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
            test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
-           test_library_legacy_only_fatbin_registers_without_module_load();
+           test_library_legacy_only_fatbin_registers_without_module_load() ||
+           test_library_registration_exceeds_the_previous_fixed_capacity();
 }
