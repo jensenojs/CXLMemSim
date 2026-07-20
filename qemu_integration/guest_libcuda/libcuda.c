@@ -183,7 +183,7 @@ static CUresult (*g_test_execute_cmd)(uint32_t cmd);
 #endif
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLIBRY" diagnostic placeholder */
-static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL;  /* "CXDKERNL" diagnostic placeholder */
+static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL; /* "CXDKERNL" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_function = 0x43584446554e4354ULL; /* "CXDFUNCT" diagnostic placeholder */
 
 #define CUDART_LIBRARY_RECORD_CAP 512
@@ -236,8 +236,7 @@ static void log_context_state(const char *api, CUresult result) {
 
     DLOG("context_state api=%s result=%d token=%" PRIuPTR " mode=%u "
          "primary_retain_count=%u current_depth=%u\n",
-         api, result, state.token, state.mode, state.primary_retain_count,
-         state.current_depth);
+         api, result, state.token, state.mode, state.primary_retain_count, state.current_depth);
 }
 
 static inline uint64_t maybe_bar4_offset(uint64_t value);
@@ -298,8 +297,7 @@ static CUresult execute_cmd(uint32_t cmd) {
 }
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
-void cxl_cuda_test_reset(void)
-{
+void cxl_cuda_test_reset(void) {
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -310,18 +308,11 @@ void cxl_cuda_test_reset(void)
     cxl_cuda_context_state_reset();
 }
 
-void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd))
-{
-    g_test_execute_cmd = executor;
-}
+void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
 
-uint64_t cxl_cuda_test_read_reg64(uint32_t offset)
-{
-    return reg_read64(offset);
-}
+uint64_t cxl_cuda_test_read_reg64(uint32_t offset) { return reg_read64(offset); }
 
-void cxl_cuda_test_write_result(unsigned int index, uint64_t value)
-{
+void cxl_cuda_test_write_result(unsigned int index, uint64_t value) {
     static const uint32_t result_offsets[] = {
         CXL_GPU_REG_RESULT0,
         CXL_GPU_REG_RESULT1,
@@ -333,22 +324,15 @@ void cxl_cuda_test_write_result(unsigned int index, uint64_t value)
         reg_write64(result_offsets[index], value);
 }
 
-void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value)
-{
-    reg_write32(offset, value);
-}
+void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value) { reg_write32(offset, value); }
 
-void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length)
-{
+void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length) {
     cxl_gpu_transport_data_read(&g_transport, offset, dst, length);
 }
 #endif
 
 /* Find and map CXL Type 2 device */
-static int find_and_map_device(void) {
-    return cxl_gpu_transport_open(&g_transport, g_debug);
-}
-
+static int find_and_map_device(void) { return cxl_gpu_transport_open(&g_transport, g_debug); }
 
 /* CUDA 12 runtime resolves most driver entry points through cuGetProcAddress.
  * Use the dynamic symbol table of this shim so missing APIs stay visible in
@@ -362,7 +346,8 @@ static void *lookup_proc_address(const char *symbol) {
          * cuLibraryLoadData from cuGetProcAddress without removing the exported
          * symbol, so we can test whether libcudart has an older fallback path.
          * Remove once the after-dlopen err=36 root cause is identified. */
-        fprintf(stderr, "[CXL-CUDA] lookup_proc_address(symbol=%s) hidden by CXL_CUDA_HIDE_LIBRARY_LOAD_DATA\n", symbol);
+        fprintf(stderr, "[CXL-CUDA] lookup_proc_address(symbol=%s) hidden by CXL_CUDA_HIDE_LIBRARY_LOAD_DATA\n",
+                symbol);
         return NULL;
     }
     void *fn = dlsym(RTLD_DEFAULT, symbol);
@@ -402,8 +387,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
     if (symbolStatus) {
         *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
     }
-    fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=%p status=SUCCESS result=CUDA_SUCCESS\n", symbol,
-            fn);
+    fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=%p status=SUCCESS result=CUDA_SUCCESS\n", symbol, fn);
     return CUDA_SUCCESS;
 }
 
@@ -440,8 +424,8 @@ static CUresult cudart_get_primary_context(CUcontext *pctx, CUdevice dev) {
     return cuDevicePrimaryCtxRetain(pctx, dev);
 }
 
-static CUresult cudart_get_module_from_cubin_ext1(CUmodule *module, const void *fatbinc_wrapper, void *arg3,
-                                                   void *arg4, uint32_t arg5) {
+static CUresult cudart_get_module_from_cubin_ext1(CUmodule *module, const void *fatbinc_wrapper, void *arg3, void *arg4,
+                                                  uint32_t arg5) {
     fprintf(stderr,
             "[CXL-CUDA] CUDART_INTERFACE.get_module_from_cubin_ext1(module=%p, fatbin=%p, arg3=%p, arg4=%p, arg5=%u)\n",
             (void *)module, fatbinc_wrapper, arg3, arg4, arg5);
@@ -457,7 +441,7 @@ static CUresult cudart_interface_fn7(size_t arg1) {
 }
 
 static CUresult cudart_get_module_from_cubin_ext2(const void *fatbin_header, CUmodule *module, void *arg3, void *arg4,
-                                                   uint32_t arg5) {
+                                                  uint32_t arg5) {
     fprintf(stderr,
             "[CXL-CUDA] CUDART_INTERFACE.get_module_from_cubin_ext2(fatbin=%p, module=%p, arg3=%p, arg4=%p, arg5=%u)\n",
             fatbin_header, (void *)module, arg3, arg4, arg5);
@@ -556,10 +540,8 @@ static void context_storage_log_entries(const char *label) {
 
     fprintf(stderr, "[CXL-CUDA] %s context_storage_entries=%d\n", label, count);
     for (int i = 0; i < count; i++) {
-        fprintf(stderr,
-                  "[CXL-CUDA] %s entry[%d] context=%p state_mgr=%p ctx_state=%p dtor=%p\n",
-                  label, i, entries[i].context, entries[i].state_mgr, entries[i].ctx_state,
-                  (void *)entries[i].dtor_cb);
+        fprintf(stderr, "[CXL-CUDA] %s entry[%d] context=%p state_mgr=%p ctx_state=%p dtor=%p\n", label, i,
+                entries[i].context, entries[i].state_mgr, entries[i].ctx_state, (void *)entries[i].dtor_cb);
         context_storage_log_bytes(label, entries[i].ctx_state);
     }
 }
@@ -567,8 +549,8 @@ static void context_storage_log_entries(const char *label) {
 static CUresult context_local_storage_put(CUcontext context, void *state_mgr, void *ctx_state,
                                           context_storage_dtor_cb_t dtor_cb) {
     unsigned int call_id = ++g_context_storage_put_count;
-    DLOG("CONTEXT_LOCAL_STORAGE.ctor_like#%u(cu_ctx=%p state_mgr=%p ctx_state=%p dtor=%p)\n", call_id,
-         context, state_mgr, ctx_state, (void *)dtor_cb);
+    DLOG("CONTEXT_LOCAL_STORAGE.ctor_like#%u(cu_ctx=%p state_mgr=%p ctx_state=%p dtor=%p)\n", call_id, context,
+         state_mgr, ctx_state, (void *)dtor_cb);
     context_storage_log_bytes("CONTEXT_LOCAL_STORAGE.ctor_like state_mgr", state_mgr);
     context_storage_log_bytes("CONTEXT_LOCAL_STORAGE.ctor_like ctx_state", ctx_state);
 
@@ -610,8 +592,8 @@ static uint32_t context_local_storage_dtor(size_t *state, void *arg) {
 
 static CUresult context_local_storage_get(void **ctx_state, CUcontext context, void *state_mgr) {
     unsigned int call_id = ++g_context_storage_get_count;
-    DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u(out=%p cu_ctx=%p state_mgr=%p)\n", call_id,
-         (void *)ctx_state, context, state_mgr);
+    DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u(out=%p cu_ctx=%p state_mgr=%p)\n", call_id, (void *)ctx_state,
+         context, state_mgr);
 
     if (!ctx_state) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -646,7 +628,7 @@ static void context_storage_clear_context(CUcontext context, int call_dtors) {
             continue;
 
         if (call_dtors && g_context_storage[i].dtor_cb && callback_count < CONTEXT_STORAGE_MAX_ENTRIES) {
-          callbacks[callback_count++] = g_context_storage[i];
+            callbacks[callback_count++] = g_context_storage[i];
         }
         memset(&g_context_storage[i], 0, sizeof(g_context_storage[i]));
     }
@@ -664,10 +646,10 @@ static CUresult context_check_result2_stub(void) {
     return CUDA_SUCCESS;
 }
 
-static CUresult context_check(CUcontext ctx_in, uint32_t *result1, const void **result2,
-                              uintptr_t arg4, uintptr_t arg5, uintptr_t arg6) {
-    DLOG("CONTEXT_CHECKS.context_check(ctx=%p result1=%p result2=%p arg4=%p arg5=0x%lx arg6=%p)\n",
-         ctx_in, (void *)result1, (void *)result2, (void *)arg4, (unsigned long)arg5, (void *)arg6);
+static CUresult context_check(CUcontext ctx_in, uint32_t *result1, const void **result2, uintptr_t arg4, uintptr_t arg5,
+                              uintptr_t arg6) {
+    DLOG("CONTEXT_CHECKS.context_check(ctx=%p result1=%p result2=%p arg4=%p arg5=0x%lx arg6=%p)\n", ctx_in,
+         (void *)result1, (void *)result2, (void *)arg4, (unsigned long)arg5, (void *)arg6);
     if (result1) {
         *result1 = 0;
     }
@@ -699,25 +681,61 @@ static CUresult context_check(CUcontext ctx_in, uint32_t *result1, const void **
     return CUDA_SUCCESS;
 }
 
-static uint32_t context_check_fn3(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
-                                  uintptr_t arg4, uintptr_t arg5, uintptr_t arg6) {
-    DLOG("CONTEXT_CHECKS.check_fn3(arg1=%p arg2=%p arg3=%p arg4=%p arg5=%p arg6=%p) -> 0\n",
-         (void *)arg1, (void *)arg2, (void *)arg3, (void *)arg4, (void *)arg5, (void *)arg6);
+static uint32_t context_check_fn3(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5,
+                                  uintptr_t arg6) {
+    DLOG("CONTEXT_CHECKS.check_fn3(arg1=%p arg2=%p arg3=%p arg4=%p arg5=%p arg6=%p) -> 0\n", (void *)arg1, (void *)arg2,
+         (void *)arg3, (void *)arg4, (void *)arg5, (void *)arg6);
     return 0;
 }
 
-static CUresult context_checks_unknown_slot1(void) { DLOG("CONTEXT_CHECKS.slot1 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot4(void) { DLOG("CONTEXT_CHECKS.slot4 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot5(void) { DLOG("CONTEXT_CHECKS.slot5 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot6(void) { DLOG("CONTEXT_CHECKS.slot6 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot7(void) { DLOG("CONTEXT_CHECKS.slot7 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot8(void) { DLOG("CONTEXT_CHECKS.slot8 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot9(void) { DLOG("CONTEXT_CHECKS.slot9 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot10(void) { DLOG("CONTEXT_CHECKS.slot10 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot11(void) { DLOG("CONTEXT_CHECKS.slot11 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot12(void) { DLOG("CONTEXT_CHECKS.slot12 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot13(void) { DLOG("CONTEXT_CHECKS.slot13 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
-static CUresult context_checks_unknown_slot14(void) { DLOG("CONTEXT_CHECKS.slot14 -> CUDA_ERROR_NOT_SUPPORTED\n"); return CUDA_ERROR_NOT_SUPPORTED; }
+static CUresult context_checks_unknown_slot1(void) {
+    DLOG("CONTEXT_CHECKS.slot1 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot4(void) {
+    DLOG("CONTEXT_CHECKS.slot4 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot5(void) {
+    DLOG("CONTEXT_CHECKS.slot5 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot6(void) {
+    DLOG("CONTEXT_CHECKS.slot6 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot7(void) {
+    DLOG("CONTEXT_CHECKS.slot7 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot8(void) {
+    DLOG("CONTEXT_CHECKS.slot8 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot9(void) {
+    DLOG("CONTEXT_CHECKS.slot9 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot10(void) {
+    DLOG("CONTEXT_CHECKS.slot10 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot11(void) {
+    DLOG("CONTEXT_CHECKS.slot11 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot12(void) {
+    DLOG("CONTEXT_CHECKS.slot12 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot13(void) {
+    DLOG("CONTEXT_CHECKS.slot13 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+static CUresult context_checks_unknown_slot14(void) {
+    DLOG("CONTEXT_CHECKS.slot14 -> CUDA_ERROR_NOT_SUPPORTED\n");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
 
 static const void *CUDART_INTERFACE_TABLE[13];
 static const void *INTEGRITY_CHECK_TABLE[3];
@@ -744,22 +762,20 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
 CUresult cuDeviceGetUuid(void *uuid, CUdevice dev);
 
 static const uint8_t INTEGRITY_MIXING_TABLE[256] = {
-    0x29, 0x2e, 0x43, 0xc9, 0xa2, 0xd8, 0x7c, 0x01, 0x3d, 0x36, 0x54, 0xa1, 0xec, 0xf0, 0x06, 0x13,
-    0x62, 0xa7, 0x05, 0xf3, 0xc0, 0xc7, 0x73, 0x8c, 0x98, 0x93, 0x2b, 0xd9, 0xbc, 0x4c, 0x82, 0xca,
-    0x1e, 0x9b, 0x57, 0x3c, 0xfd, 0xd4, 0xe0, 0x16, 0x67, 0x42, 0x6f, 0x18, 0x8a, 0x17, 0xe5, 0x12,
-    0xbe, 0x4e, 0xc4, 0xd6, 0xda, 0x9e, 0xde, 0x49, 0xa0, 0xfb, 0xf5, 0x8e, 0xbb, 0x2f, 0xee, 0x7a,
-    0xa9, 0x68, 0x79, 0x91, 0x15, 0xb2, 0x07, 0x3f, 0x94, 0xc2, 0x10, 0x89, 0x0b, 0x22, 0x5f, 0x21,
-    0x80, 0x7f, 0x5d, 0x9a, 0x5a, 0x90, 0x32, 0x27, 0x35, 0x3e, 0xcc, 0xe7, 0xbf, 0xf7, 0x97, 0x03,
-    0xff, 0x19, 0x30, 0xb3, 0x48, 0xa5, 0xb5, 0xd1, 0xd7, 0x5e, 0x92, 0x2a, 0xac, 0x56, 0xaa, 0xc6,
-    0x4f, 0xb8, 0x38, 0xd2, 0x96, 0xa4, 0x7d, 0xb6, 0x76, 0xfc, 0x6b, 0xe2, 0x9c, 0x74, 0x04, 0xf1,
-    0x45, 0x9d, 0x70, 0x59, 0x64, 0x71, 0x87, 0x20, 0x86, 0x5b, 0xcf, 0x65, 0xe6, 0x2d, 0xa8, 0x02,
-    0x1b, 0x60, 0x25, 0xad, 0xae, 0xb0, 0xb9, 0xf6, 0x1c, 0x46, 0x61, 0x69, 0x34, 0x40, 0x7e, 0x0f,
-    0x55, 0x47, 0xa3, 0x23, 0xdd, 0x51, 0xaf, 0x3a, 0xc3, 0x5c, 0xf9, 0xce, 0xba, 0xc5, 0xea, 0x26,
-    0x2c, 0x53, 0x0d, 0x6e, 0x85, 0x28, 0x84, 0x09, 0xd3, 0xdf, 0xcd, 0xf4, 0x41, 0x81, 0x4d, 0x52,
-    0x6a, 0xdc, 0x37, 0xc8, 0x6c, 0xc1, 0xab, 0xfa, 0x24, 0xe1, 0x7b, 0x08, 0x0c, 0xbd, 0xb1, 0x4a,
-    0x78, 0x88, 0x95, 0x8b, 0xe3, 0x63, 0xe8, 0x6d, 0xe9, 0xcb, 0xd5, 0xfe, 0x3b, 0x00, 0x1d, 0x39,
-    0xf2, 0xef, 0xb7, 0x0e, 0x66, 0x58, 0xd0, 0xe4, 0xa6, 0x77, 0x72, 0xf8, 0xeb, 0x75, 0x4b, 0x0a,
-    0x31, 0x44, 0x50, 0xb4, 0x8f, 0xed, 0x1f, 0x1a, 0xdb, 0x99, 0x8d, 0x33, 0x9f, 0x11, 0x83, 0x14,
+    0x29, 0x2e, 0x43, 0xc9, 0xa2, 0xd8, 0x7c, 0x01, 0x3d, 0x36, 0x54, 0xa1, 0xec, 0xf0, 0x06, 0x13, 0x62, 0xa7, 0x05,
+    0xf3, 0xc0, 0xc7, 0x73, 0x8c, 0x98, 0x93, 0x2b, 0xd9, 0xbc, 0x4c, 0x82, 0xca, 0x1e, 0x9b, 0x57, 0x3c, 0xfd, 0xd4,
+    0xe0, 0x16, 0x67, 0x42, 0x6f, 0x18, 0x8a, 0x17, 0xe5, 0x12, 0xbe, 0x4e, 0xc4, 0xd6, 0xda, 0x9e, 0xde, 0x49, 0xa0,
+    0xfb, 0xf5, 0x8e, 0xbb, 0x2f, 0xee, 0x7a, 0xa9, 0x68, 0x79, 0x91, 0x15, 0xb2, 0x07, 0x3f, 0x94, 0xc2, 0x10, 0x89,
+    0x0b, 0x22, 0x5f, 0x21, 0x80, 0x7f, 0x5d, 0x9a, 0x5a, 0x90, 0x32, 0x27, 0x35, 0x3e, 0xcc, 0xe7, 0xbf, 0xf7, 0x97,
+    0x03, 0xff, 0x19, 0x30, 0xb3, 0x48, 0xa5, 0xb5, 0xd1, 0xd7, 0x5e, 0x92, 0x2a, 0xac, 0x56, 0xaa, 0xc6, 0x4f, 0xb8,
+    0x38, 0xd2, 0x96, 0xa4, 0x7d, 0xb6, 0x76, 0xfc, 0x6b, 0xe2, 0x9c, 0x74, 0x04, 0xf1, 0x45, 0x9d, 0x70, 0x59, 0x64,
+    0x71, 0x87, 0x20, 0x86, 0x5b, 0xcf, 0x65, 0xe6, 0x2d, 0xa8, 0x02, 0x1b, 0x60, 0x25, 0xad, 0xae, 0xb0, 0xb9, 0xf6,
+    0x1c, 0x46, 0x61, 0x69, 0x34, 0x40, 0x7e, 0x0f, 0x55, 0x47, 0xa3, 0x23, 0xdd, 0x51, 0xaf, 0x3a, 0xc3, 0x5c, 0xf9,
+    0xce, 0xba, 0xc5, 0xea, 0x26, 0x2c, 0x53, 0x0d, 0x6e, 0x85, 0x28, 0x84, 0x09, 0xd3, 0xdf, 0xcd, 0xf4, 0x41, 0x81,
+    0x4d, 0x52, 0x6a, 0xdc, 0x37, 0xc8, 0x6c, 0xc1, 0xab, 0xfa, 0x24, 0xe1, 0x7b, 0x08, 0x0c, 0xbd, 0xb1, 0x4a, 0x78,
+    0x88, 0x95, 0x8b, 0xe3, 0x63, 0xe8, 0x6d, 0xe9, 0xcb, 0xd5, 0xfe, 0x3b, 0x00, 0x1d, 0x39, 0xf2, 0xef, 0xb7, 0x0e,
+    0x66, 0x58, 0xd0, 0xe4, 0xa6, 0x77, 0x72, 0xf8, 0xeb, 0x75, 0x4b, 0x0a, 0x31, 0x44, 0x50, 0xb4, 0x8f, 0xed, 0x1f,
+    0x1a, 0xdb, 0x99, 0x8d, 0x33, 0x9f, 0x11, 0x83, 0x14,
 };
 
 static void integrity_check_single_pass(uint8_t state[66], uint8_t input) {
@@ -903,12 +919,11 @@ static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_
         .unix_seconds = unix_seconds,
     };
 
-    DLOG("INTEGRITY_CHECK.input driver_version=%u version=%u unix_seconds=%llu pid=%u tid=%u\n",
-         pass3.driver_version, pass3.version, (unsigned long long)pass3.unix_seconds,
-         pass3.current_process, pass3.current_thread);
+    DLOG("INTEGRITY_CHECK.input driver_version=%u version=%u unix_seconds=%llu pid=%u tid=%u\n", pass3.driver_version,
+         pass3.version, (unsigned long long)pass3.unix_seconds, pass3.current_process, pass3.current_thread);
     DLOG("INTEGRITY_CHECK.input tables cudart=%p cudart_size=%zu integrity=%p integrity_size=%zu fn=%p\n",
-         (void *)pass3.cudart_table, sizeof(CUDART_INTERFACE_TABLE),
-         (void *)pass3.integrity_check_table, sizeof(INTEGRITY_CHECK_TABLE), pass3.fn_address);
+         (void *)pass3.cudart_table, sizeof(CUDART_INTERFACE_TABLE), (void *)pass3.integrity_check_table,
+         sizeof(INTEGRITY_CHECK_TABLE), pass3.fn_address);
     integrity_hash_pass(state, &pass3, sizeof(pass3), 0);
 
     IntegrityDeviceHashInfo device_info;
@@ -916,7 +931,8 @@ static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_
     if (device_info_err != CUDA_SUCCESS) {
         return device_info_err;
     }
-    DLOG("INTEGRITY_CHECK.input device_count=1 uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x pci=%d:%d:%d\n",
+    DLOG("INTEGRITY_CHECK.input device_count=1 "
+         "uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x pci=%d:%d:%d\n",
          device_info.guid.bytes[0], device_info.guid.bytes[1], device_info.guid.bytes[2], device_info.guid.bytes[3],
          device_info.guid.bytes[4], device_info.guid.bytes[5], device_info.guid.bytes[6], device_info.guid.bytes[7],
          device_info.guid.bytes[8], device_info.guid.bytes[9], device_info.guid.bytes[10], device_info.guid.bytes[11],
@@ -993,30 +1009,25 @@ static CUresult tools_tls_get(void **out) {
 }
 
 static const unsigned char CUDART_INTERFACE_UUID[16] = {0x6b, 0xd5, 0xfb, 0x6c, 0x5b, 0xf4, 0xe7, 0x4a,
-                                                       0x89, 0x87, 0xd9, 0x39, 0x12, 0xfd, 0x9d, 0xf9};
+                                                        0x89, 0x87, 0xd9, 0x39, 0x12, 0xfd, 0x9d, 0xf9};
 
-static const unsigned char TOOLS_RUNTIME_CALLBACK_HOOKS_UUID[16] = {0xa0, 0x94, 0x79, 0x8c, 0x2e, 0x74,
-                                                                    0x2e, 0x74, 0x93, 0xf2, 0x08, 0x00,
-                                                                    0x20, 0x0c, 0x0a, 0x66};
+static const unsigned char TOOLS_RUNTIME_CALLBACK_HOOKS_UUID[16] = {0xa0, 0x94, 0x79, 0x8c, 0x2e, 0x74, 0x2e, 0x74,
+                                                                    0x93, 0xf2, 0x08, 0x00, 0x20, 0x0c, 0x0a, 0x66};
 
 static const unsigned char TOOLS_TLS_UUID[16] = {0x42, 0xd8, 0x5a, 0x81, 0x23, 0xf6, 0xcb, 0x47,
                                                  0x82, 0x98, 0xf6, 0xe7, 0x8a, 0x3a, 0xec, 0xdc};
 
-static const unsigned char CONTEXT_LOCAL_STORAGE_UUID[16] = {0xc6, 0x93, 0x33, 0x6e, 0x11, 0x21,
-                                                             0xdf, 0x11, 0xa8, 0xc3, 0x68, 0xf3,
-                                                             0x55, 0xd8, 0x95, 0x93};
+static const unsigned char CONTEXT_LOCAL_STORAGE_UUID[16] = {0xc6, 0x93, 0x33, 0x6e, 0x11, 0x21, 0xdf, 0x11,
+                                                             0xa8, 0xc3, 0x68, 0xf3, 0x55, 0xd8, 0x95, 0x93};
 
-static const unsigned char CONTEXT_CHECKS_UUID[16] = {0x26, 0x3e, 0x88, 0x60, 0x7c, 0xd2,
-                                                       0x61, 0x43, 0x92, 0xf6, 0xbb, 0xd5,
-                                                       0x00, 0x6d, 0xfa, 0x7e};
+static const unsigned char CONTEXT_CHECKS_UUID[16] = {0x26, 0x3e, 0x88, 0x60, 0x7c, 0xd2, 0x61, 0x43,
+                                                      0x92, 0xf6, 0xbb, 0xd5, 0x00, 0x6d, 0xfa, 0x7e};
 
-static const unsigned char INTEGRITY_CHECK_UUID[16] = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6,
-                                                         0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12,
-                                                         0x3c, 0x66, 0xe1, 0xf2};
+static const unsigned char INTEGRITY_CHECK_UUID[16] = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b,
+                                                       0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2};
 
-static const unsigned char F8CFF951_EXPORT_UUID[16] = {0xf8, 0xcf, 0xf9, 0x51, 0x21, 0x46,
-                                                        0x8b, 0x4e, 0xb9, 0xe2, 0xfb, 0x46,
-                                                        0x9e, 0x7c, 0x0d, 0xd9};
+static const unsigned char F8CFF951_EXPORT_UUID[16] = {0xf8, 0xcf, 0xf9, 0x51, 0x21, 0x46, 0x8b, 0x4e,
+                                                       0xb9, 0xe2, 0xfb, 0x46, 0x9e, 0x7c, 0x0d, 0xd9};
 
 static CUresult f8cff951_export_fn1(void) {
     DLOG("F8CFF951.fn1 -> CUDA_ERROR_NOT_SUPPORTED\n");
@@ -1178,22 +1189,23 @@ CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTable
              pExportTableId->bytes[0], pExportTableId->bytes[1], pExportTableId->bytes[2], pExportTableId->bytes[3],
              pExportTableId->bytes[4], pExportTableId->bytes[5], pExportTableId->bytes[6], pExportTableId->bytes[7],
              pExportTableId->bytes[8], pExportTableId->bytes[9], pExportTableId->bytes[10], pExportTableId->bytes[11],
-             pExportTableId->bytes[12], pExportTableId->bytes[13], pExportTableId->bytes[14], pExportTableId->bytes[15]);
+             pExportTableId->bytes[12], pExportTableId->bytes[13], pExportTableId->bytes[14],
+             pExportTableId->bytes[15]);
     } else {
         DLOG("cuGetExportTable(uuid=(null))\n");
     }
 
-      if (!ppExportTable || !pExportTableId) {
-          return CUDA_ERROR_INVALID_VALUE;
-      }
+    if (!ppExportTable || !pExportTableId) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
 
-      if (uuid_equal(pExportTableId, F8CFF951_EXPORT_UUID)) {
-          *ppExportTable = F8CFF951_EXPORT_TABLE;
-          DLOG("cuGetExportTable -> F8CFF951_EXPORT_TABLE size=%zu\n", sizeof(F8CFF951_EXPORT_TABLE));
-          return CUDA_SUCCESS;
-      }
+    if (uuid_equal(pExportTableId, F8CFF951_EXPORT_UUID)) {
+        *ppExportTable = F8CFF951_EXPORT_TABLE;
+        DLOG("cuGetExportTable -> F8CFF951_EXPORT_TABLE size=%zu\n", sizeof(F8CFF951_EXPORT_TABLE));
+        return CUDA_SUCCESS;
+    }
 
-      if (uuid_equal(pExportTableId, CUDART_INTERFACE_UUID)) {
+    if (uuid_equal(pExportTableId, CUDART_INTERFACE_UUID)) {
         *ppExportTable = CUDART_INTERFACE_TABLE;
         DLOG("cuGetExportTable -> CUDART_INTERFACE_TABLE size=%zu\n", sizeof(CUDART_INTERFACE_TABLE));
         return CUDA_SUCCESS;
@@ -1500,8 +1512,7 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
 }
 
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
-    DLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount,
-         hStream);
+    DLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
     (void)hStream;
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
@@ -1547,8 +1558,7 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
 }
 
 CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
-    DLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount,
-         hStream);
+    DLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount, hStream);
     (void)hStream;
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
@@ -1574,18 +1584,17 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     }
 
     data_write(0, image, len);
-      CUresult err = execute_cmd(CXL_GPU_CMD_MODULE_LOAD_PTX);
-      if (err == CUDA_SUCCESS) {
-          *module = (CUmodule)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
-          DLOG("  module=%p\n", *module);
-      }
+    CUresult err = execute_cmd(CXL_GPU_CMD_MODULE_LOAD_PTX);
+    if (err == CUDA_SUCCESS) {
+        *module = (CUmodule)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
+        DLOG("  module=%p\n", *module);
+    }
     return err;
 }
 
-static CUresult cxl_module_load_cubin(CUmodule *module, const void *image, size_t image_size,
-                                      uint32_t encoding, size_t uncompressed_size) {
-    DLOG("cxl_module_load_cubin(size=%zu, encoding=0x%x, uncompressed=%zu)\n", image_size, encoding,
-         uncompressed_size);
+static CUresult cxl_module_load_cubin(CUmodule *module, const void *image, size_t image_size, uint32_t encoding,
+                                      size_t uncompressed_size) {
+    DLOG("cxl_module_load_cubin(size=%zu, encoding=0x%x, uncompressed=%zu)\n", image_size, encoding, uncompressed_size);
     if (!g_initialized) {
         return CUDA_ERROR_NOT_INITIALIZED;
     }
@@ -1630,8 +1639,7 @@ static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
     }
     if (header->header_size < sizeof(CudartFatbinHeader) || header->header_size > 4096 ||
         header->files_size > (256ULL * 1024ULL * 1024ULL)) {
-        fprintf(stderr,
-                "[CXL-CUDA]   fatbin files skipped: unreasonable header_size=%u files_size=%llu\n",
+        fprintf(stderr, "[CXL-CUDA]   fatbin files skipped: unreasonable header_size=%u files_size=%llu\n",
                 header->header_size, (unsigned long long)header->files_size);
         return;
     }
@@ -1640,18 +1648,16 @@ static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
     uint64_t offset = 0;
     for (unsigned int i = 0; i < 4 && offset + sizeof(CudartFatbinFileHeader) <= header->files_size; i++) {
         const CudartFatbinFileHeader *file = (const CudartFatbinFileHeader *)(const void *)(files + offset);
-          fprintf(stderr,
-                  "[CXL-CUDA]   fatbin_file[%u] offset=%llu kind=%u version=0x%x header_size=%u "
-                  "payload_size=%u compressed_size=%u flags=0x%llx sm_version=0x%x bit_width=%u "
-                  "uncompressed_payload=%llu\n",
-                  i, (unsigned long long)offset, file->kind, file->version, file->header_size,
-                  file->payload_size, file->compressed_size, (unsigned long long)file->flags,
-                  file->sm_version, file->bit_width,
-                  (unsigned long long)file->uncompressed_payload);
+        fprintf(stderr,
+                "[CXL-CUDA]   fatbin_file[%u] offset=%llu kind=%u version=0x%x header_size=%u "
+                "payload_size=%u compressed_size=%u flags=0x%llx sm_version=0x%x bit_width=%u "
+                "uncompressed_payload=%llu\n",
+                i, (unsigned long long)offset, file->kind, file->version, file->header_size, file->payload_size,
+                file->compressed_size, (unsigned long long)file->flags, file->sm_version, file->bit_width,
+                (unsigned long long)file->uncompressed_payload);
 
         if (file->header_size < sizeof(CudartFatbinFileHeader) || file->header_size > 4096) {
-            fprintf(stderr, "[CXL-CUDA]   fatbin_file[%u] stop: unreasonable header_size=%u\n", i,
-                    file->header_size);
+            fprintf(stderr, "[CXL-CUDA]   fatbin_file[%u] stop: unreasonable header_size=%u\n", i, file->header_size);
             break;
         }
         uint64_t step = (uint64_t)file->header_size + (uint64_t)file->payload_size;
@@ -1671,8 +1677,7 @@ static void cudart_log_fatbin_headers(const void *code) {
     }
 
     const CudartFatbincWrapper *wrapper = (const CudartFatbincWrapper *)code;
-    fprintf(stderr,
-            "[CXL-CUDA]   fatbinc_wrapper magic=0x%08x version=0x%08x data=%p filename_or_fatbins=%p\n",
+    fprintf(stderr, "[CXL-CUDA]   fatbinc_wrapper magic=0x%08x version=0x%08x data=%p filename_or_fatbins=%p\n",
             wrapper->magic, wrapper->version, wrapper->data, wrapper->filename_or_fatbins);
 
     const CudartFatbinHeader *header = NULL;
@@ -1681,11 +1686,11 @@ static void cudart_log_fatbin_headers(const void *code) {
         fprintf(stderr, "[CXL-CUDA]   fatbinc_wrapper recognized; using wrapper->data as fatbin header\n");
     } else {
         header = (const CudartFatbinHeader *)code;
-        fprintf(stderr, "[CXL-CUDA]   fatbinc_wrapper not recognized; also interpreting code as direct fatbin header\n");
+        fprintf(stderr,
+                "[CXL-CUDA]   fatbinc_wrapper not recognized; also interpreting code as direct fatbin header\n");
     }
 
-    fprintf(stderr,
-            "[CXL-CUDA]   fatbin_header magic=0x%08x version=0x%04x header_size=%u files_size=%llu\n",
+    fprintf(stderr, "[CXL-CUDA]   fatbin_header magic=0x%08x version=0x%04x header_size=%u files_size=%llu\n",
             header->magic, header->version, header->header_size, (unsigned long long)header->files_size);
     cudart_log_fatbin_file_headers(header);
 }
@@ -1720,8 +1725,8 @@ static CUresult cudart_decode_fatbin_file(const CudartFatbinFileHeader *file, un
         return CUDA_SUCCESS;
     }
 
-    if (!file->compressed_size || file->compressed_size > file->payload_size ||
-        !file->uncompressed_payload || file->uncompressed_payload > CXL_GPU_DATA_SIZE) {
+    if (!file->compressed_size || file->compressed_size > file->payload_size || !file->uncompressed_payload ||
+        file->uncompressed_payload > CXL_GPU_DATA_SIZE) {
         fprintf(stderr,
                 "[CXL-CUDA]   library module decode reject: compressed=%u payload=%u uncompressed=%llu "
                 "data_cap=%u\n",
@@ -1738,8 +1743,8 @@ static CUresult cudart_decode_fatbin_file(const CudartFatbinFileHeader *file, un
 
     size_t decoded_size = 0;
     if (lz4_compressed) {
-        int result = LZ4_decompress_safe((const char *)payload, (char *)decoded, (int)file->compressed_size,
-                                         (int)capacity);
+        int result =
+            LZ4_decompress_safe((const char *)payload, (char *)decoded, (int)file->compressed_size, (int)capacity);
         if (result <= 0 || (size_t)result > capacity) {
             fprintf(stderr, "[CXL-CUDA]   library module decode reject: LZ4 result=%d\n", result);
             free(decoded);
@@ -1750,8 +1755,7 @@ static CUresult cudart_decode_fatbin_file(const CudartFatbinFileHeader *file, un
         size_t result = ZSTD_decompress(decoded, capacity, payload, file->compressed_size);
         unsigned int failed = ZSTD_isError(result);
         if (failed || result > capacity) {
-            fprintf(stderr, "[CXL-CUDA]   library module decode reject: Zstd result=%zu failed=%u\n", result,
-                    failed);
+            fprintf(stderr, "[CXL-CUDA]   library module decode reject: Zstd result=%zu failed=%u\n", result, failed);
             free(decoded);
             return CUDA_ERROR_INVALID_VALUE;
         }
@@ -1793,8 +1797,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
     uint32_t target_sm = reg_read32(CXL_GPU_REG_CC_MAJOR) * 10U + reg_read32(CXL_GPU_REG_CC_MINOR);
     uint64_t offset = 0;
     while (offset + sizeof(CudartFatbinFileHeader) <= header->files_size) {
-        const CudartFatbinFileHeader *file =
-            (const CudartFatbinFileHeader *)(const void *)(files + offset);
+        const CudartFatbinFileHeader *file = (const CudartFatbinFileHeader *)(const void *)(files + offset);
         if (file->header_size < sizeof(*file) || file->header_size > 4096 ||
             file->header_size > header->files_size - offset ||
             file->payload_size > header->files_size - offset - file->header_size) {
@@ -1825,8 +1828,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
     if (elf_candidate) {
         const unsigned char *payload = (const unsigned char *)elf_candidate + elf_candidate->header_size;
         if (elf_candidate->flags & CUDART_FATBIN_FLAG_COMPRESSED_ZSTD) {
-            if (!elf_candidate->compressed_size ||
-                elf_candidate->compressed_size > elf_candidate->payload_size ||
+            if (!elf_candidate->compressed_size || elf_candidate->compressed_size > elf_candidate->payload_size ||
                 elf_candidate->compressed_size > CXL_GPU_DATA_SIZE || !elf_candidate->uncompressed_payload) {
                 return CUDA_ERROR_INVALID_VALUE;
             }
@@ -1835,8 +1837,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
                     "uncompressed_size=%llu encoding=zstd\n",
                     (unsigned long long)elf_offset, elf_candidate->sm_version, elf_candidate->compressed_size,
                     (unsigned long long)elf_candidate->uncompressed_payload);
-            return cxl_module_load_cubin(module, payload, elf_candidate->compressed_size,
-                                         CXL_GPU_MODULE_DATA_ZSTD,
+            return cxl_module_load_cubin(module, payload, elf_candidate->compressed_size, CXL_GPU_MODULE_DATA_ZSTD,
                                          (size_t)elf_candidate->uncompressed_payload);
         }
 
@@ -1846,8 +1847,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
         if (decode_result != CUDA_SUCCESS) {
             return decode_result;
         }
-        fprintf(stderr,
-                "[CXL-CUDA]   library CUBIN load selected offset=%llu sm=0x%x decoded_size=%zu\n",
+        fprintf(stderr, "[CXL-CUDA]   library CUBIN load selected offset=%llu sm=0x%x decoded_size=%zu\n",
                 (unsigned long long)elf_offset, elf_candidate->sm_version, cubin_size);
         CUresult result = cxl_module_load_cubin(module, cubin, cubin_size, 0, cubin_size);
         free(cubin);
@@ -1866,8 +1866,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
             ptx_size--;
         }
         ptx[ptx_size] = '\0';
-        fprintf(stderr,
-                "[CXL-CUDA]   library PTX load selected offset=%llu sm=0x%x decoded_size=%zu\n",
+        fprintf(stderr, "[CXL-CUDA]   library PTX load selected offset=%llu sm=0x%x decoded_size=%zu\n",
                 (unsigned long long)ptx_offset, ptx_candidate->sm_version, ptx_size);
         CUresult result = cuModuleLoadData(module, ptx);
         free(ptx);
@@ -1879,6 +1878,25 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
             "submodule\n",
             target_sm);
     return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+static CUresult cudart_library_materialize_module(CudartLibraryRecord *record) {
+    if (!record || !record->alive) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+    if (record->module) {
+        return CUDA_SUCCESS;
+    }
+
+    CUresult result = cudart_load_module_from_fatbin(record->code, &record->module);
+    if (result != CUDA_SUCCESS) {
+        fprintf(stderr, "[CXL-CUDA] library_record id=%u module materialization failed result=%d\n", record->id,
+                result);
+        return result;
+    }
+
+    fprintf(stderr, "[CXL-CUDA] library_record id=%u module materialized module=%p\n", record->id, record->module);
+    return CUDA_SUCCESS;
 }
 
 CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *jitOptions, void **jitOptionsValues,
@@ -1894,9 +1912,9 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
     context_storage_log_entries("cuLibraryLoadData:entry");
     fprintf(stderr,
             "[CXL-CUDA] cuLibraryLoadData(library=%p, code=%p, jitOptions=%p, jitOptionsValues=%p, "
-             "numJitOptions=%u, libraryOptions=%p, libraryOptionValues=%p, numLibraryOptions=%u) -> library object\n",
-             (void *)library, code, (void *)jitOptions, (void *)jitOptionsValues, numJitOptions,
-             (void *)libraryOptions, (void *)libraryOptionValues, numLibraryOptions);
+            "numJitOptions=%u, libraryOptions=%p, libraryOptionValues=%p, numLibraryOptions=%u) -> library object\n",
+            (void *)library, code, (void *)jitOptions, (void *)jitOptionsValues, numJitOptions, (void *)libraryOptions,
+            (void *)libraryOptionValues, numLibraryOptions);
     cudart_log_fatbin_headers(code);
 
     if (library) {
@@ -1910,8 +1928,7 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         }
         CUlibraryOption option = libraryOptions[i];
         void *option_value = libraryOptionValues ? libraryOptionValues[i] : NULL;
-        fprintf(stderr, "[CXL-CUDA]   libraryOptions[%u]=%d libraryOptionValues[%u]=%p\n", i, option, i,
-                option_value);
+        fprintf(stderr, "[CXL-CUDA]   libraryOptions[%u]=%d libraryOptionValues[%u]=%p\n", i, option, i, option_value);
         if (option == CU_LIBRARY_HOST_UNIVERSAL_FUNCTION_AND_DATA_TABLE && option_value) {
             CUlibraryHostUniversalFunctionAndDataTable *table =
                 (CUlibraryHostUniversalFunctionAndDataTable *)option_value;
@@ -1922,13 +1939,13 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         }
     }
     if (getenv("CXL_CUDA_LIBRARY_LOAD_DATA_NOT_SUPPORTED")) {
-          fprintf(stderr, "[CXL-CUDA]   diagnostic override -> CUDA_ERROR_NOT_SUPPORTED\n");
-          return CUDA_ERROR_NOT_SUPPORTED;
-      }
+        fprintf(stderr, "[CXL-CUDA]   diagnostic override -> CUDA_ERROR_NOT_SUPPORTED\n");
+        return CUDA_ERROR_NOT_SUPPORTED;
+    }
 
-      if (!library || !code) {
-          return CUDA_ERROR_INVALID_VALUE;
-      }
+    if (!library || !code) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
     if (numLibraryOptions && !libraryOptions) {
         fprintf(stderr, "[CXL-CUDA]   library object reject: numLibraryOptions=%u with null libraryOptions\n",
                 numLibraryOptions);
@@ -1957,59 +1974,50 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
     }
 
     if (!preserve_binary) {
-        fprintf(stderr,
-                "[CXL-CUDA]   library object reject: CU_LIBRARY_BINARY_IS_PRESERVED not asserted; "
-                "fatbin length is unknown, so this shim will not memcpy unknown code bytes\n");
+        fprintf(stderr, "[CXL-CUDA]   library object reject: CU_LIBRARY_BINARY_IS_PRESERVED not asserted; "
+                        "fatbin length is unknown, so this shim will not memcpy unknown code bytes\n");
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
-      if (g_cudart_library_record_count >= CUDART_LIBRARY_RECORD_CAP) {
-          fprintf(stderr, "[CXL-CUDA]   library_record overflow cap=%u -> CUDA_ERROR_OUT_OF_MEMORY\n",
-                  CUDART_LIBRARY_RECORD_CAP);
-          return CUDA_ERROR_OUT_OF_MEMORY;
+    if (g_cudart_library_record_count >= CUDART_LIBRARY_RECORD_CAP) {
+        fprintf(stderr, "[CXL-CUDA]   library_record overflow cap=%u -> CUDA_ERROR_OUT_OF_MEMORY\n",
+                CUDART_LIBRARY_RECORD_CAP);
+        return CUDA_ERROR_OUT_OF_MEMORY;
     }
 
-      CudartLibraryRecord *record = &g_cudart_library_records[g_cudart_library_record_count];
-      memset(record, 0, sizeof(*record));
-      record->magic = CUDART_LIBRARY_RECORD_MAGIC;
-      record->id = g_cudart_library_record_count + 1;
-      record->alive = 1;
-      record->code = code;
-      record->preserved_code = code;
-      record->num_jit_options = numJitOptions;
-      record->num_library_options = numLibraryOptions;
+    CudartLibraryRecord *record = &g_cudart_library_records[g_cudart_library_record_count];
+    memset(record, 0, sizeof(*record));
+    record->magic = CUDART_LIBRARY_RECORD_MAGIC;
+    record->id = g_cudart_library_record_count + 1;
+    record->alive = 1;
+    record->code = code;
+    record->preserved_code = code;
+    record->num_jit_options = numJitOptions;
+    record->num_library_options = numLibraryOptions;
 
-      if (libraryOptions) {
+    if (libraryOptions) {
         record->stored_library_options = numLibraryOptions;
-          for (unsigned int i = 0; i < numLibraryOptions; i++) {
-              record->options[i] = libraryOptions[i];
-              record->option_values[i] = libraryOptionValues ? libraryOptionValues[i] : NULL;
-              if (record->options[i] == CU_LIBRARY_BINARY_IS_PRESERVED && record->option_values[i]) {
-                  record->preserve_binary = 1;
+        for (unsigned int i = 0; i < numLibraryOptions; i++) {
+            record->options[i] = libraryOptions[i];
+            record->option_values[i] = libraryOptionValues ? libraryOptionValues[i] : NULL;
+            if (record->options[i] == CU_LIBRARY_BINARY_IS_PRESERVED && record->option_values[i]) {
+                record->preserve_binary = 1;
             }
-          }
-      }
+        }
+    }
 
-      CUresult module_result = cudart_load_module_from_fatbin(code, &record->module);
-      if (module_result != CUDA_SUCCESS) {
-          fprintf(stderr, "[CXL-CUDA]   library_record id=%u module load failed result=%d\n", record->id,
-                  module_result);
-          memset(record, 0, sizeof(*record));
-          return module_result;
-      }
+    g_cudart_library_record_count++;
 
-      g_cudart_library_record_count++;
-
-      *library = (CUlibrary)record;
-      fprintf(stderr,
-                "[CXL-CUDA]   library_record id=%u handle=%p code=%p numJitOptions=%u numLibraryOptions=%u "
-                "storedOptions=%u preserve_binary=%d module=%p alive=%d magic=0x%llx\n",
-                record->id, (void *)*library, record->code, record->num_jit_options, record->num_library_options,
-              record->stored_library_options, record->preserve_binary, record->module, record->alive,
-              (unsigned long long)record->magic);
-      context_storage_log_entries("cuLibraryLoadData:success_exit");
-      return CUDA_SUCCESS;
-  }
+    *library = (CUlibrary)record;
+    fprintf(stderr,
+            "[CXL-CUDA]   library_record id=%u handle=%p code=%p numJitOptions=%u numLibraryOptions=%u "
+            "storedOptions=%u preserve_binary=%d module=%p alive=%d magic=0x%llx\n",
+            record->id, (void *)*library, record->code, record->num_jit_options, record->num_library_options,
+            record->stored_library_options, record->preserve_binary, record->module, record->alive,
+            (unsigned long long)record->magic);
+    context_storage_log_entries("cuLibraryLoadData:success_exit");
+    return CUDA_SUCCESS;
+}
 
 CUresult cuLibraryUnload(CUlibrary library) {
     CudartLibraryRecord *record = cudart_library_record_from_handle(library);
@@ -2067,13 +2075,16 @@ CUresult cuLibraryGetModule(CUmodule *pMod, CUlibrary library) {
     }
     if (!record->module) {
         *pMod = NULL;
-        fprintf(stderr, "[CXL-CUDA] cuLibraryGetModule(library=%p id=%u) -> CUDA_ERROR_NOT_SUPPORTED\n", library,
-                record->id);
-        return CUDA_ERROR_NOT_SUPPORTED;
+        CUresult result = cudart_library_materialize_module(record);
+        if (result != CUDA_SUCCESS) {
+            fprintf(stderr, "[CXL-CUDA] cuLibraryGetModule(library=%p id=%u) -> error=%d\n", library, record->id,
+                    result);
+            return result;
+        }
     }
     *pMod = record->module;
-    fprintf(stderr, "[CXL-CUDA] cuLibraryGetModule(library=%p id=%u) -> module=%p CUDA_SUCCESS\n", library,
-            record->id, record->module);
+    fprintf(stderr, "[CXL-CUDA] cuLibraryGetModule(library=%p id=%u) -> module=%p CUDA_SUCCESS\n", library, record->id,
+            record->module);
     return CUDA_SUCCESS;
 }
 
@@ -2133,8 +2144,8 @@ CUresult cuKernelGetFunction(CUfunction *pFunc, CUkernel kernel) {
     for (unsigned int i = 0; i < g_cudart_library_record_count; i++) {
         CudartLibraryRecord *record = &g_cudart_library_records[i];
         Dl_info code_info;
-        if (!record->alive || !record->module ||
-            !dladdr(record->code, &code_info) || code_info.dli_fbase != kernel_info.dli_fbase) {
+        if (!record->alive || !record->module || !dladdr(record->code, &code_info) ||
+            code_info.dli_fbase != kernel_info.dli_fbase) {
             continue;
         }
 
@@ -2158,16 +2169,13 @@ CUresult cuKernelGetFunction(CUfunction *pFunc, CUkernel kernel) {
         fprintf(stderr,
                 "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s owner=%s) -> "
                 "CUDA_ERROR_NOT_SUPPORTED reason=module-match-count count=%u\n",
-                kernel, kernel_info.dli_sname,
-                kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", matches);
+                kernel, kernel_info.dli_sname, kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", matches);
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
     *pFunc = resolved;
-    fprintf(stderr,
-            "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s owner=%s) -> function=%p CUDA_SUCCESS\n",
-            kernel, kernel_info.dli_sname,
-            kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", resolved);
+    fprintf(stderr, "[CXL-CUDA] cuKernelGetFunction(kernel=%p symbol=%s owner=%s) -> function=%p CUDA_SUCCESS\n",
+            kernel, kernel_info.dli_sname, kernel_info.dli_fname ? kernel_info.dli_fname : "(unknown)", resolved);
     return CUDA_SUCCESS;
 }
 
@@ -2191,8 +2199,8 @@ CUresult cuKernelSetAttribute(CUfunction_attribute attrib, int val, CUkernel ker
 }
 
 CUresult cuKernelSetCacheConfig(CUkernel kernel, CUfunc_cache config) {
-    fprintf(stderr, "[CXL-CUDA] cuKernelSetCacheConfig(kernel=%p, config=%d) -> CUDA_ERROR_NOT_SUPPORTED\n",
-            kernel, config);
+    fprintf(stderr, "[CXL-CUDA] cuKernelSetCacheConfig(kernel=%p, config=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", kernel,
+            config);
     if (!kernel) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -2209,9 +2217,8 @@ CUresult cuKernelGetName(const char **name, CUkernel kernel) {
 }
 
 CUresult cuKernelGetParamInfo(CUkernel kernel, size_t paramIndex, size_t *paramOffset, size_t *paramSize) {
-    fprintf(stderr,
-            "[CXL-CUDA] cuKernelGetParamInfo(kernel=%p, index=%zu) -> CUDA_ERROR_NOT_SUPPORTED\n",
-            kernel, paramIndex);
+    fprintf(stderr, "[CXL-CUDA] cuKernelGetParamInfo(kernel=%p, index=%zu) -> CUDA_ERROR_NOT_SUPPORTED\n", kernel,
+            paramIndex);
     if (!kernel || !paramOffset || !paramSize) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -2221,8 +2228,7 @@ CUresult cuKernelGetParamInfo(CUkernel kernel, size_t paramIndex, size_t *paramO
 }
 
 CUresult cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config) {
-    fprintf(stderr, "[CXL-CUDA] cuFuncSetCacheConfig(func=%p, config=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", hfunc,
-            config);
+    fprintf(stderr, "[CXL-CUDA] cuFuncSetCacheConfig(func=%p, config=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", hfunc, config);
     if (!hfunc) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -2239,8 +2245,7 @@ CUresult cuFuncSetSharedMemConfig(CUfunction hfunc, CUsharedconfig config) {
 }
 
 CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute attrib, CUfunction hfunc) {
-    fprintf(stderr, "[CXL-CUDA] cuFuncGetAttribute(func=%p, attrib=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", hfunc,
-            attrib);
+    fprintf(stderr, "[CXL-CUDA] cuFuncGetAttribute(func=%p, attrib=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", hfunc, attrib);
     if (!pi || !hfunc) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -2266,7 +2271,7 @@ CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int v
 }
 
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CUfunction hfunc, int blockSize,
-                                                               size_t dynamicSMemSize, unsigned int flags) {
+                                                              size_t dynamicSMemSize, unsigned int flags) {
     DLOG("cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(numBlocks=%p, func=%p, blockSize=%d, "
          "dynamicSMemSize=%zu, flags=%u)\n",
          (void *)numBlocks, hfunc, blockSize, dynamicSMemSize, flags);
@@ -2288,7 +2293,7 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CU
 }
 
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction hfunc, int blockSize,
-                                                      size_t dynamicSMemSize) {
+                                                     size_t dynamicSMemSize) {
     return cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(numBlocks, hfunc, blockSize, dynamicSMemSize, 0);
 }
 
@@ -2329,9 +2334,9 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
     if (!hfunc || !name)
         return CUDA_ERROR_INVALID_VALUE;
 
-      if (!hmod) {
-          return CUDA_ERROR_INVALID_HANDLE;
-      }
+    if (!hmod) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
     size_t len = strlen(name) + 1;
     if (len > CXL_GPU_DATA_SIZE) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -2397,12 +2402,12 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     DLOG("cuLaunchKernel(f=%p, grid=(%u,%u,%u), block=(%u,%u,%u), shared=%u)\n", f, gridDimX, gridDimY, gridDimZ,
          blockDimX, blockDimY, blockDimZ, sharedMemBytes);
 
-      if (!g_initialized)
-          return CUDA_ERROR_NOT_INITIALIZED;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
 
-      if (!f) {
-          return CUDA_ERROR_INVALID_HANDLE;
-      }
+    if (!f) {
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
 
     if (!kernelParams && extra) {
         return CUDA_ERROR_NOT_SUPPORTED;
@@ -2423,8 +2428,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
         if (query != CUDA_SUCCESS) {
             return query;
         }
-        if (!kernelParams || !kernelParams[num_args] ||
-            offset > CXL_GPU_DATA_SIZE || size > CXL_GPU_DATA_SIZE - offset) {
+        if (!kernelParams || !kernelParams[num_args] || offset > CXL_GPU_DATA_SIZE ||
+            size > CXL_GPU_DATA_SIZE - offset) {
             return CUDA_ERROR_INVALID_VALUE;
         }
         param_offsets[num_args] = offset;
@@ -2620,8 +2625,7 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
 
     bool needs_create = false;
     uintptr_t token = 0;
-    CUresult state_err = cxl_cuda_context_prepare_primary_retain(&needs_create,
-                                                                  &token);
+    CUresult state_err = cxl_cuda_context_prepare_primary_retain(&needs_create, &token);
     if (state_err != CUDA_SUCCESS)
         return state_err;
     if (needs_create) {
@@ -2757,19 +2761,16 @@ CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteC
     return cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount);
 }
 
-CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount,
-                              CUstream hStream) {
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
     (void)hStream;
     return cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount);
 }
 
-CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount,
-                           CUstream hStream) {
+CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
     return cuMemcpyDtoDAsync_v2(dstDevice, srcDevice, byteCount, hStream);
 }
 
-static bool cxl_memcpy2d_offset(CUdeviceptr base, size_t pitch, size_t x, size_t y, size_t width,
-                                CUdeviceptr *row) {
+static bool cxl_memcpy2d_offset(CUdeviceptr base, size_t pitch, size_t x, size_t y, size_t width, CUdeviceptr *row) {
     if (x > pitch || width > pitch - x || (y != 0 && pitch > SIZE_MAX / y)) {
         return false;
     }
@@ -2836,9 +2837,7 @@ CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     return cxl_memcpy2d_device_to_device(copy);
 }
 
-CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) {
-    return cuMemcpy2DAsync_v2(copy, hStream);
-}
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) { return cuMemcpy2DAsync_v2(copy, hStream); }
 
 CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
     DLOG("cuMemsetD8_v2(dst=0x%lx, val=0x%02x, count=%zu)\n", (unsigned long)dstDevice, uc, N);
@@ -2871,9 +2870,7 @@ CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
     return CUDA_SUCCESS;
 }
 
-CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
-    return cuMemsetD8_v2(dstDevice, uc, N);
-}
+CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) { return cuMemsetD8_v2(dstDevice, uc, N); }
 
 CUresult cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc, size_t N, CUstream hStream) {
     (void)hStream;

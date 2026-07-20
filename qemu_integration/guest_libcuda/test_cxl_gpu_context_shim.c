@@ -106,15 +106,16 @@ CUresult cuPointerGetAttribute(void *data, int attribute, uint64_t ptr);
 CUresult cuGetExportTable(const void **table, const CUuuid *uuid);
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, uint64_t flags,
                           CUdriverProcAddressQueryResult *symbolStatus);
-CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CUfunction func,
-                                                               int blockSize, size_t dynamicSMemSize,
-                                                               unsigned int flags);
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CUfunction func, int blockSize,
+                                                              size_t dynamicSMemSize, unsigned int flags);
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func, int blockSize,
-                                                      size_t dynamicSMemSize);
+                                                     size_t dynamicSMemSize);
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
 CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOptions, void **jitOptionsValues,
-                           unsigned int numJitOptions, CUlibraryOption *libraryOptions,
-                           void **libraryOptionValues, unsigned int numLibraryOptions);
+                           unsigned int numJitOptions, CUlibraryOption *libraryOptions, void **libraryOptionValues,
+                           unsigned int numLibraryOptions);
+CUresult cuLibraryUnload(CUlibrary library);
+CUresult cuLibraryGetModule(void **module, CUlibrary library);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -404,8 +405,8 @@ static int test_occupancy_driver_api_route(void) {
                            &symbol_status) == CUDA_SUCCESS);
     CHECK(resolved == (void *)cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags);
     CHECK(symbol_status == 0);
-    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(&num_blocks, (CUfunction)(uintptr_t)5, 128,
-                                                                73728, 1) == CUDA_SUCCESS);
+    CHECK(cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(&num_blocks, (CUfunction)(uintptr_t)5, 128, 73728, 1) ==
+          CUDA_SUCCESS);
     CHECK(num_blocks == 3);
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_FUNC_GET_OCCUPANCY);
 
@@ -523,8 +524,64 @@ static int test_library_fatbin_prefers_highest_compatible_cubin(void) {
 
     CHECK(cuLibraryLoadData(&library, fatbin, NULL, NULL, 0, options, option_values, 1) == CUDA_SUCCESS);
     CHECK(library != NULL);
+    CHECK(cubin_load_count == 0);
+    CHECK(command_count == 0);
+    void *module = NULL;
+    CHECK(cuLibraryGetModule(&module, library) == CUDA_SUCCESS);
+    CHECK(module != NULL);
     CHECK(cubin_load_count == 1);
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_MODULE_LOAD_CUBIN);
+    CHECK(cuLibraryUnload(library) == CUDA_SUCCESS);
+    return 0;
+}
+
+static int test_library_legacy_only_fatbin_registers_without_module_load(void) {
+    unsigned char fatbin[sizeof(CudartFatbinHeader) + 3 * (sizeof(CudartFatbinFileHeader) + 8)] = {0};
+    CudartFatbinHeader header = {
+        .magic = CUDART_FATBIN_MAGIC,
+        .version = CUDART_FATBIN_VERSION,
+        .header_size = sizeof(CudartFatbinHeader),
+        .files_size = sizeof(fatbin) - sizeof(CudartFatbinHeader),
+    };
+    CudartFatbinFileHeader sm50 = {
+        .kind = CUDART_FATBIN_KIND_ELF,
+        .version = 0x101,
+        .header_size = sizeof(CudartFatbinFileHeader),
+        .payload_size = 8,
+        .sm_version = 50,
+        .uncompressed_payload = 8,
+    };
+    CudartFatbinFileHeader sm60 = sm50;
+    CudartFatbinFileHeader sm61 = sm50;
+    CUlibrary library = NULL;
+    CUlibraryOption options[] = {CU_LIBRARY_BINARY_IS_PRESERVED};
+    void *option_values[] = {(void *)(uintptr_t)1};
+    size_t offset = sizeof(header);
+
+    sm60.sm_version = 60;
+    sm61.sm_version = 61;
+    memcpy(fatbin, &header, sizeof(header));
+    memcpy(fatbin + offset, &sm50, sizeof(sm50));
+    fatbin[offset + sizeof(sm50)] = 0x50;
+    offset += sizeof(sm50) + 8;
+    memcpy(fatbin + offset, &sm60, sizeof(sm60));
+    fatbin[offset + sizeof(sm60)] = 0x60;
+    offset += sizeof(sm60) + 8;
+    memcpy(fatbin + offset, &sm61, sizeof(sm61));
+    fatbin[offset + sizeof(sm61)] = 0x61;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_CC_MAJOR, 8);
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_CC_MINOR, 9);
+    command_count = 0;
+    cubin_load_count = 0;
+
+    CHECK(cuLibraryLoadData(&library, fatbin, NULL, NULL, 0, options, option_values, 1) == CUDA_SUCCESS);
+    CHECK(library != NULL);
+    CHECK(cubin_load_count == 0);
+    CHECK(command_count == 0);
+    CHECK(cuLibraryUnload(library) == CUDA_SUCCESS);
     return 0;
 }
 
@@ -532,5 +589,6 @@ int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
-           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin();
+           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
+           test_library_legacy_only_fatbin_registers_without_module_load();
 }
