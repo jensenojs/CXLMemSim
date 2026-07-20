@@ -7,6 +7,89 @@ CXLMemSim is a software framework for studying CXL memory systems without requir
 
 The implementation is intended for full-system experiments where guest software talks to a realistic CXL device interface while the host side records and controls protocol-level behavior such as latency, routing, coherency state, directory pressure, and memory placement.
 
+## QEMU Camp Kimi Type-2 project context
+
+This repository is one component of the [QEMU Camp Kimi K2.6 Type-2 project](https://qemu.gevico.online/tutorial/2026/ch3/qemu-cxlemu/). The project asks whether an unmodified CUDA application inside a VM can use a CXL Type-2 accelerator boundary, preserve Kimi output semantics, and then improve throughput by changing computation, data placement, or scheduling.
+
+The complete project has two runtime branches that meet inside the QEMU Type-2 device:
+
+```text
+guest llama / GGML / CUDA Runtime
+  -> guest libcuda.so.1 shim              [this repository]
+  -> PCI resource2 / BAR2
+  -> QEMU cxl-type2
+       |-- CUDA execution
+       |     -> Concordia / HetGPU
+       |     -> NVIDIA Driver -> L40
+       |
+       `-- CXL memory and coherency
+             -> CXLMemSim server          [this repository]
+             -> device-memory/backing-store model
+```
+
+The two pieces owned here have different jobs:
+
+- `qemu_integration/guest_libcuda/` translates CUDA Driver API calls into the shared BAR2 command ABI. It carries object identifiers, sizes, payloads, return codes, and synchronization results across the guest/host boundary.
+- `cxlmemsim_server` models CXL memory capacity, topology, cache/coherency state, transport, latency, and optional backing storage.
+
+CUDA context, module, function, launch, and real GPU allocation operations primarily enter the Concordia/NVIDIA branch. CXL memory requests enter the server branch. Copy and shadow/coherency updates connect selected operations across the two branches. A run describes each active data path by naming its caller, buffer, request, and consumer.
+
+### Why CXL is a research variable here
+
+CXL contributes a Type-2 memory topology with a shared protocol-level model. `CXL.cache` gives the device cache-line-coherent access to host memory; `CXL.mem` gives the host memory-semantic access to device-attached memory. An OS and runtime can present these resources through a NUMA-like programming model: applications continue to reason about addresses, allocations, loads/stores, and coherence, while placement, capacity, bandwidth, latency, and migration policy remain non-uniform.
+
+The following chain makes that topology relevant to Kimi performance:
+
+```text
+weight / KV / workspace buffer
+  -> allocated or placed in a Type-2/CXLMemSim-managed resource
+  -> consumed during load, prompt, or decode
+  -> observable request and waiting interval
+  -> cache/prefetch/page-size/I/O change moves that interval
+  -> correctness remains equal and TPS changes
+```
+
+An SSD cache or `io_uring` change first produces a storage or model-load result. Correlating the CXL-managed data edge with its Kimi consumer and critical-path interval promotes that observation into a CXL inference result.
+
+### How this repository reaches a formal run
+
+```text
+exact cxlmemsim source
+  -> component build
+       |-- cxlmemsim_server
+       |-- guest libcuda.so.1
+       |-- cxl-gpu-case
+       `-- model-free CUDA/cuBLAS probes
+  -> immutable OCI component
+  -> type2-guest packages the guest-owned files
+  -> cxl-lab selects component digests in a run manifest
+  -> CNB starts CXLMemSim + QEMU + guest + Concordia on an L40
+  -> immutable result and evidence preserve the observed boundary
+```
+
+The project control plane, current identities, and result history live in [`cxl-lab`](https://cnb.cool/gevico.online/jensen/cxl-lab). The QEMU device side of the BAR2 ABI lives in [`qemu-cxl-type2`](https://cnb.cool/gevico.online/jensen/qemu-cxl-type2). The guest kernel and assembly boundaries live in [`linux-cxl-type2`](https://cnb.cool/gevico.online/jensen/linux-cxl-type2) and [`type2-guest`](https://cnb.cool/gevico.online/jensen/type2-guest). The real CUDA execution backend lives in [`concordia`](https://cnb.cool/gevico.online/jensen/concordia).
+
+### Evidence boundary
+
+```text
+server starts and accepts a connection
+  -> proves the CXLMemSim control/transport boundary
+
+guest shim maps BAR2
+  -> proves PCI discovery and the command transport mapping
+
+model-free result=1234
+  -> proves the covered allocation/copy/kernel/sync/DtoH path
+
+CXLMemSim request correlated with a named Kimi buffer and consumer
+  -> proves that buffer used the modeled memory path
+
+same-VM baseline/concordia output comparison
+  -> signs Kimi correctness
+```
+
+Evidence advances through layers: build success establishes the payload, device discovery establishes the kernel/device boundary, a server connection establishes the memory transport, a CUDA launch establishes backend reachability, the numerical oracle establishes the covered computation, and the same-VM comparator establishes Kimi correctness. Current source/artifact/run/result identities live in `cxl-lab/manifests/`; actual successes and failures live in `cxl-lab/docs/evidence/` and immutable run results.
+
 ## Repository Layout
 
 Important implementation paths:
