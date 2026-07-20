@@ -1,8 +1,0 @@
-{
-  "archive_sha256": "4764a965dfe5f6bb5e71aff9e9c86efce9f8642c065365561558aa70051faca8",
-  "digest": "sha256:3f0dd706164d90613963ce13247fa5192c4effd7d2965a5fd7b7337d5775e6a0",
-  "manifest_sha256": "751bde474327c03f8122d141053ea34d2e2d4fef98fe86fe474f5d7ebed1406f",
-  "profile_sha256": "418ea6fd478fea6e6f2a28128c63494e3fcafdd9960c544f3535b05f61df0aa2",
-  "repository": "docker.cnb.cool/gevico.online/jensen/cxlmemsim",
-  "source_commit": "9556f0238f687e0ba4685f09d671deee414b1ca2"
-}
