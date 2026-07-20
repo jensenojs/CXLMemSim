@@ -631,10 +631,20 @@ static CUresult context_local_storage_put(CUcontext context, void *state_mgr, vo
     return CUDA_SUCCESS;
 }
 
-static uint32_t context_local_storage_dtor(size_t *state, void *arg) {
-    (void)state;
-    (void)arg;
-    return 0;
+static CUresult context_local_storage_delete(CUcontext context, void *state_mgr) {
+    DLOG("CONTEXT_LOCAL_STORAGE.delete_like(cu_ctx=%p state_mgr=%p)\n", context, state_mgr);
+
+    context_storage_lock();
+    for (int i = 0; i < CONTEXT_STORAGE_MAX_ENTRIES; i++) {
+        if (g_context_storage[i].in_use && g_context_storage[i].context == context &&
+            g_context_storage[i].state_mgr == state_mgr) {
+            memset(&g_context_storage[i], 0, sizeof(g_context_storage[i]));
+            break;
+        }
+    }
+    context_storage_unlock();
+
+    return CUDA_ERROR_DEINITIALIZED;
 }
 
 static CUresult context_local_storage_get(void **ctx_state, CUcontext context, void *state_mgr) {
@@ -1200,7 +1210,7 @@ static const void *TOOLS_TLS_TABLE[3] = {
 
 static const void *CONTEXT_LOCAL_STORAGE_TABLE[4] = {
     (const void *)context_local_storage_put,
-    (const void *)context_local_storage_dtor,
+    (const void *)context_local_storage_delete,
     (const void *)context_local_storage_get,
     NULL,
 };

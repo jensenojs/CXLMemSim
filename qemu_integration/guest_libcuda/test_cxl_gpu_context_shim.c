@@ -65,6 +65,7 @@ typedef struct {
 
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
+#define CUDA_ERROR_DEINITIALIZED 4
 #define CUDA_ERROR_INVALID_CONTEXT 201
 #define CUDA_ERROR_NO_BINARY_FOR_GPU 209
 #define CUDA_ERROR_INVALID_HANDLE 400
@@ -370,6 +371,7 @@ static int test_integrity_export_table_shape(void) {
 
 static int test_context_local_storage_keeps_managers_separate(void) {
     typedef CUresult (*context_storage_put_t)(CUcontext context, void *state_mgr, void *ctx_state, void *dtor);
+    typedef CUresult (*context_storage_delete_t)(CUcontext context, void *state_mgr);
     typedef CUresult (*context_storage_get_t)(void **ctx_state, CUcontext context, void *state_mgr);
     const void *table = NULL;
     void *manager_a = (void *)(uintptr_t)0xa1;
@@ -379,18 +381,27 @@ static int test_context_local_storage_keeps_managers_separate(void) {
     void *replacement_a = (void *)(uintptr_t)0xaaa3;
     void *out = NULL;
 
+    cxl_cuda_test_reset();
     CHECK(cuGetExportTable(&table, &context_local_storage_uuid) == CUDA_SUCCESS);
     CHECK(table != NULL);
     const void *const *slots = table;
     context_storage_put_t put = (context_storage_put_t)slots[0];
+    context_storage_delete_t delete = (context_storage_delete_t)slots[1];
     context_storage_get_t get = (context_storage_get_t)slots[2];
-    CHECK(put != NULL && get != NULL);
+    CHECK(put != NULL && delete != NULL && get != NULL);
 
     CHECK(put(NULL, manager_a, state_a, NULL) == CUDA_SUCCESS);
     CHECK(put(NULL, manager_b, state_b, NULL) == CUDA_SUCCESS);
     CHECK(get(&out, NULL, manager_a) == CUDA_SUCCESS);
     CHECK(out == state_a);
     out = NULL;
+    CHECK(get(&out, NULL, manager_b) == CUDA_SUCCESS);
+    CHECK(out == state_b);
+
+    CHECK(delete(NULL, manager_a) == CUDA_ERROR_DEINITIALIZED);
+    out = (void *)(uintptr_t)0x1;
+    CHECK(get(&out, NULL, manager_a) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(out == NULL);
     CHECK(get(&out, NULL, manager_b) == CUDA_SUCCESS);
     CHECK(out == state_b);
 
