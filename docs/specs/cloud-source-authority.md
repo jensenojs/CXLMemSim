@@ -57,6 +57,12 @@ refs/tags/main
 refs/tags/memu
 ```
 
+这份列表是迁移准备时的历史快照。`refs/tags/main` 指向
+`b6ba524d69c13929ac5ec525643cc286fb8e49e6`，该 commit 已由当前 `refs/heads/main` 保留。
+2026-07-20，项目的 CNB primary 与 GitHub mirror 删除了这个同名 tag，因为裸词 `main` 会在 Git 的 source-ref
+解析中同时匹配 branch 与 tag，拒绝正常推送。SlugLab upstream 保留原始 tag 作为上游历史。后续默认分支只使用
+完整 ref `refs/heads/main`，新 tag 不得复用已有 branch 的短名。
+
 只有`refs/heads/cloud-type2-tiny-baseline`允许前进到migration commit，其他ref的object ID必须保持不变。两端必须从空目录执行非shallow mirror clone，排序比较heads/tags ref map，并运行`git fsck --full`。
 
 `.gitmodules`中的十五个外部仓库不属于本切片。真实组件构建必须在后续spec中声明实际消费的gitlink commit和恢复方式。
