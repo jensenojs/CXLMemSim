@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -171,6 +172,19 @@ int main(int argc, char **argv) {
     }
     ggml_backend_synchronize(backend);
     std::printf("ggml_flash_attn_ext_trigger_synchronize=pass\n");
+    std::vector<float> output(ggml_nelements(out));
+    ggml_backend_tensor_get(out, output.data(), 0, output.size() * sizeof(float));
+    for (size_t index = 0; index < output.size(); ++index) {
+        if (!std::isfinite(output[index]) || output[index] != 0.0f) {
+            std::fprintf(stderr, "ggml_flash_attn_ext_trigger_oracle_mismatch index=%zu value=%g\n", index,
+                         static_cast<double>(output[index]));
+            ggml_backend_buffer_free(buffer);
+            ggml_backend_free(backend);
+            ggml_free(ctx);
+            return fail("numerical_oracle");
+        }
+    }
+    std::printf("ggml_flash_attn_ext_trigger_numerical_oracle=pass elements=%zu\n", output.size());
     ggml_backend_buffer_free(buffer);
     ggml_backend_free(backend);
     ggml_free(ctx);
