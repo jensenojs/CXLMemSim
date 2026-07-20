@@ -1992,6 +1992,20 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         return CUDA_ERROR_NOT_SUPPORTED;
     }
 
+    /* The code pointer names the registration wrapper stored in the DSO that
+     * contributed this library object.  Caller attribution alone usually
+     * points at libcudart, so record dladdr(code) as the runtime corpus fact.
+     * The verifier fails if any record is unmapped or comes from a DSO absent
+     * from the exact per-ELF prediction; this exposes an unexpected fifth
+     * contributor without imposing a process-global library ceiling. */
+    Dl_info code_info = {0};
+    const char *code_file = "(unmapped)";
+    unsigned long code_offset = 0;
+    if (dladdr(code, &code_info) && code_info.dli_fbase) {
+        code_file = code_info.dli_fname ? code_info.dli_fname : "(unknown)";
+        code_offset = (unsigned long)((uintptr_t)code - (uintptr_t)code_info.dli_fbase);
+    }
+
     CudartLibraryRecord *record = calloc(1, sizeof(*record));
     if (!record) {
         fprintf(stderr, "[CXL-CUDA]   library_record allocation failed -> CUDA_ERROR_OUT_OF_MEMORY\n");
@@ -2022,11 +2036,12 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
 
     *library = (CUlibrary)record;
     fprintf(stderr,
-            "[CXL-CUDA]   library_record id=%u handle=%p code=%p numJitOptions=%u numLibraryOptions=%u "
+            "[CXL-CUDA]   library_record id=%u handle=%p code=%p code_file=%s code_offset=0x%lx "
+            "numJitOptions=%u numLibraryOptions=%u "
             "storedOptions=%u preserve_binary=%d module=%p alive=%d magic=0x%llx\n",
-            record->id, (void *)*library, record->code, record->num_jit_options, record->num_library_options,
-            record->stored_library_options, record->preserve_binary, record->module, record->alive,
-            (unsigned long long)record->magic);
+            record->id, (void *)*library, record->code, code_file, code_offset, record->num_jit_options,
+            record->num_library_options, record->stored_library_options, record->preserve_binary, record->module,
+            record->alive, (unsigned long long)record->magic);
     context_storage_log_entries("cuLibraryLoadData:success_exit");
     return CUDA_SUCCESS;
 }

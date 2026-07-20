@@ -7,6 +7,12 @@ of those full transcripts; they never replace the raw evidence.  A caller may
 require a named query or disassembly text predicate to be unique/present for a
 specific experiment, while other cores can reuse the same collector with
 different selectors.
+
+The .nvFatBinSegment calculation is deliberately per ELF.  Summing several
+results predicts only that declared corpus; it does not prove that a dynamic
+CUDA initialization loaded no additional registration-contributing DSO.  A
+runtime probe must enumerate the actual cuLibraryLoadData code origins and
+compare that observed DSO set with these exact ELF identities.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ HELP_EPILOG = """
   选出本轮关心的符号。ELF section 会进入 static-evidence.json；若存在
   .nvFatBinSegment，还会按 64 位 CUDA fatbin registration descriptor 的 24 字节
   形状输出 descriptor_count，不能整除时 fail closed。
+  descriptor_count只覆盖当前一个ELF。多个结果求和是声明集合的预运行预测；运行时是否
+  出现额外DSO，必须由guest shim记录每次registration的code归属，再与静态集合核对。
   所有匹配数、匹配内容、执行 argv、退出码、ELF SHA256、Build ID 与失败原因写入
   static-evidence.json。output-dir 必须是新目录，旧 core/ELF 与既有证据不会被覆盖。
 
@@ -68,7 +76,7 @@ cuda_elf_static_evidence_hint=inputs=exact regular ELF path; expected SHA256 whe
 cuda_elf_static_evidence_hint=outputs=static-evidence.json with complete ELF section facts and optional .nvFatBinSegment size,24-byte descriptor count,remainder plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
 cuda_elf_static_evidence_hint=interpret=status pass means the exact ELF and every requested selector/predicate were satisfied; fail_closed still preserves all raw transcripts and identifies the first missing or ambiguous static fact
 cuda_elf_static_evidence_hint=proves=exact ELF identity, Build ID and the static symbol/segment/relocation/disassembly facts directly present in the saved tool output
-cuda_elf_static_evidence_hint=does_not_prove=that CUDA loads the ELF, a host stub is registered, a private table slot is called, the inferred function signature is correct, guest Type-2 works, Kimi is correct or TPS changes
+cuda_elf_static_evidence_hint=does_not_prove=that CUDA loads the ELF, that the caller selected every runtime registration-contributing DSO, a host stub is registered, a private table slot is called, the inferred function signature is correct, guest Type-2 works, Kimi is correct or TPS changes
 cuda_elf_static_evidence_hint=next=use verified static addresses and call shape to configure one public Runtime trigger or read-only core/debugger capture; preserve the evidence directory with the immutable diagnostic result
 """
 
@@ -214,6 +222,10 @@ def parse_readelf_sections(text: str) -> list[ElfSection]:
 
 
 def fatbin_registration_facts(sections: list[ElfSection]) -> dict[str, Any] | None:
+    # This count is exact for one hashed ELF and intentionally says nothing
+    # about the completeness of a process-wide DSO set.  The Type-2 cuBLAS
+    # probe closes that separate boundary by grouping observed library records
+    # by dladdr(code), then comparing each group with per-ELF facts like this.
     matches = [section for section in sections if section.name == ".nvFatBinSegment"]
     if not matches:
         return None
