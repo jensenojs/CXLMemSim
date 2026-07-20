@@ -22,6 +22,7 @@
     "make_targets": [
       "libcuda.so.1",
       "libcuda.so",
+      "libcxl-loader-audit.so",
       "cxl-gpu-case",
       "integrity-export-oracle",
       "test",
@@ -64,6 +65,11 @@
     },
     {
       "path": "guest/libcuda.so.1",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/libcxl-loader-audit.so",
       "type": "file",
       "mode": "0755"
     },

@@ -17,6 +17,8 @@ TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 CUBLAS_CREATE_PROBE := libcublas_create_probe.so
 CUBLAS_CREATE_FAKE := libcublas_create_probe_fake.so
+LOADER_AUDIT := libcxl-loader-audit.so
+LOADER_AUDIT_CLIENT := test-loader-audit-client
 INTEGRITY_EXPORT_ORACLE := cuda-integrity-export-oracle
 GGML_CUDA_ATTRIBUTE_TRIGGER := ggml-cuda-attribute-trigger
 GGML_FLASH_ATTN_EXT_TRIGGER := ggml-flash-attn-ext-trigger
@@ -26,13 +28,14 @@ CUDA_FATBIN_CUBIN_LOAD_PROBE := probe_cuda_fatbin_cubin_load.py
 CUDA_FATBIN_LIBRARY_LOAD_PROBE := probe_cuda_fatbin_library_load.py
 PRIVATE_EXPORT_PROBE := private_export_probe.py
 PRIVATE_EXPORT_RUNNER := run_private_export_probe.sh
+CUDA_SHIM_OBJECTS := libcuda.instrumented.o cuda_api_provenance.o cxl_gpu_context_state.o cxl_gpu_transport.o
 
 CUDA_TESTS := cuda_test cuda_advanced_test
 BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe private-export-table-probe integrity-export-oracle \
+.PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe test-loader-audit test-api-provenance private-export-table-probe integrity-export-oracle \
 	fatbin-cubin-load-probe fatbin-library-load-probe \
 	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-static-collector test-context-state test-context-shim
 
@@ -94,10 +97,22 @@ fatbin-cubin-load-probe: $(CUDA_FATBIN_CUBIN_LOAD_PROBE)
 fatbin-library-load-probe: $(CUDA_FATBIN_LIBRARY_LOAD_PROBE)
 	python3 -m py_compile $(CUDA_FATBIN_LIBRARY_LOAD_PROBE)
 
-$(CUDA_SHIM): libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
+$(CUDA_SHIM): $(CUDA_SHIM_OBJECTS)
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $(CUDA_SHIM_OBJECTS) -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
+
+libcuda.instrumented.o: libcuda.c cxl_gpu_context_state.h cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -fPIC -finstrument-functions -c -o $@ $<
+
+cuda_api_provenance.o: cuda_api_provenance.c
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
+
+cxl_gpu_context_state.o: cxl_gpu_context_state.c cxl_gpu_context_state.h
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
+
+cxl_gpu_transport.o: cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
 
 $(CUDA_LINK): $(CUDA_SHIM)
 	ln -sf $(CUDA_SHIM) $@
@@ -114,13 +129,36 @@ $(CONTEXT_STATE_TEST): test_cxl_gpu_context_state.c cxl_gpu_context_state.c cxl_
 test-context-state: $(CONTEXT_STATE_TEST)
 	./$(CONTEXT_STATE_TEST)
 
-$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -Wl,--export-dynamic -o $@ test_cxl_gpu_context_shim.c libcuda.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
+$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -Wl,--export-dynamic -o $@ test_cxl_gpu_context_shim.c \
+		libcuda.c -finstrument-functions cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
 
 test-context-shim: $(CONTEXT_SHIM_TEST)
 	./$(CONTEXT_SHIM_TEST)
+
+$(LOADER_AUDIT): loader_audit.c
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
+
+$(LOADER_AUDIT_CLIENT): test_loader_audit_client.c $(CUDA_LINK)
+	$(CC) $(CFLAGS) -o $@ $< -L. -lcuda -Wl,-rpath,'$$ORIGIN' $(LDFLAGS) $(LDLIBS)
+
+test-loader-audit: $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT)
+	@directory="$$(mktemp -d)"; \
+	trap 'rm -rf "$$directory"' EXIT; \
+	LD_AUDIT="$(CURDIR)/$(LOADER_AUDIT)" CXL_LOADER_AUDIT_DIR="$$directory" ./$(LOADER_AUDIT_CLIENT); \
+	logs="$$(find "$$directory" -type f -name '*.jsonl')"; \
+	test -n "$$logs"; \
+	grep -F '"event":"process-start"' $$logs >/dev/null; \
+	grep -F '"event":"open"' $$logs >/dev/null; \
+	grep -F '"event":"symbol-bind"' $$logs | grep -F '"symbol":"cuInit"' >/dev/null
+
+test-api-provenance: $(CONTEXT_SHIM_TEST)
+	@output="$$(CXL_CUDA_API_PROVENANCE=1 ./$(CONTEXT_SHIM_TEST) 2>&1)"; \
+	printf '%s\n' "$$output"; \
+	printf '%s\n' "$$output" | grep -F 'api_provenance event=natural' | grep -F 'symbol=cuGetProcAddress' >/dev/null; \
+	printf '%s\n' "$$output" | grep -F 'caller_status=resolved' >/dev/null
 
 $(TINY_CUDA_LIBRARY): tiny_cuda_fatbin.cu
 	$(NVCC) -ccbin $(NVCC_HOST_CXX) -O2 -arch=$(CUDA_ARCH) -cudart=shared -shared -Xcompiler=-fPIC -o $@ $<
@@ -168,4 +206,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)

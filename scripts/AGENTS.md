@@ -19,7 +19,7 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | 入口 | 读取什么 | 写出什么 | 用来回答的问题 |
 | --- | --- | --- | --- |
 | `verify_source_checkout.sh` | expected source SHA 与当前 Git checkout | exit status | 当前 checkout 是否可作为声明的构建输入 |
-| `build_component.sh` | `manifests/build-profile.json`、`manifests/artifact-contract.json`、当前 source | `.work/component/payload/` 与构建/测试日志 | 本仓声明的 server、shim、case CLI 是否可由精确源码构建 |
+| `build_component.sh` | `manifests/build-profile.json`、`manifests/artifact-contract.json`、当前 source | `.work/component/payload/` 与构建/测试日志 | 本仓声明的 server、shim、loader audit、case CLI 是否可由精确源码构建 |
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |
 | `publish_component.sh PAYLOAD_DIR` | 已闭合 payload、profile、contract、CNB registry身份 | OCI双 blob 与 `component-candidate` 输出 | 该 payload 是否已被不可变 digest 发布 |
 | `pull_component.sh [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与 `.work/component/fresh-pull/` 验证记录 | 已发布的 exact bytes 能否独立恢复并通过本仓 runtime/ELF smoke |
@@ -31,6 +31,9 @@ exact CXLMemSim checkout + manifests/build-profile.json
 `.work/`、build目录、下载的 archive、恢复 payload 和日志都是一次执行现场，不进入 Git。candidate 的传递、official artifact manifest 的更新、fresh-pull event 的触发和正式 run 的输入选择只通过 [cxl-lab artifact contract](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/scripts/artifacts/AGENTS.md) 执行。
 
 这个目录能证明：源码、profile 和工具链构造了指定文件；OCI 归档经 digest 与逐文件 manifest 复原后仍满足本仓的 server/shim/CLI 基础检查。
+
+guest payload中的`libcxl-loader-audit.so`是只读loader observer。`pull_component.sh`对它保存独立的`ldd`和
+`readelf`记录；type2-guest profile决定它是否进入某个guest，cxl-lab决定它的case目录、结果归档和结论。
 
 它不能证明：QEMU Type-2 已 realized、guest 已加载 shim、Concordia/NVIDIA 已执行 Kimi kernel、baseline 与 concordia 输出相同，或任何 TPS 结论。那些问题从 [cxl-lab run contract](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/scripts/run/AGENTS.md)、[source/artifact/run/result identity](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/manifests/AGENTS.md) 和 [immutable result archive](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/manifests/results/AGENTS.md) 继续追踪。
 

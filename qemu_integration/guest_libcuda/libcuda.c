@@ -368,11 +368,29 @@ static void *lookup_proc_address(const char *symbol) {
     return fn;
 }
 
+static void log_proc_address_caller(const char *event, const char *symbol, const void *caller) {
+    Dl_info info = {0};
+    if (dladdr(caller, &info) != 0 && info.dli_fbase && info.dli_fname) {
+        uintptr_t base = (uintptr_t)info.dli_fbase;
+        fprintf(stderr,
+                "[CXL-CUDA] api_provenance event=%s pid=%ld symbol=%s caller_status=resolved "
+                "caller_file=%s caller_base=0x%llx caller_offset=0x%llx\n",
+                event, (long)getpid(), symbol ? symbol : "(null)", info.dli_fname, (unsigned long long)base,
+                (unsigned long long)((uintptr_t)caller - base));
+    } else {
+        fprintf(stderr,
+                "[CXL-CUDA] api_provenance event=%s pid=%ld symbol=%s caller_status=unresolved caller_address=%p\n",
+                event, (long)getpid(), symbol ? symbol : "(null)", caller);
+    }
+}
+
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags,
                           CUdriverProcAddressQueryResult *symbolStatus) {
+    const void *caller = __builtin_return_address(0);
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
     fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(symbol=%s, version=%d, flags=0x%lx, pfn=%p, status=%p)\n",
             symbol ? symbol : "(null)", cudaVersion, (unsigned long)flags, (void *)pfn, (void *)symbolStatus);
+    log_proc_address_caller("query", symbol, caller);
     (void)cudaVersion;
     (void)flags;
 
@@ -388,6 +406,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
         }
         fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=NULL status=SYMBOL_NOT_FOUND result=CUDA_SUCCESS\n",
                 symbol ? symbol : "(null)");
+        log_proc_address_caller("unresolved", symbol, caller);
         /* CUDA's driver entry-point API reports unsupported symbols through
          * pfn=NULL and symbolStatus, while the call itself still succeeds.
          * libcudart probes large API tables during initialization and treats a
@@ -401,6 +420,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
         *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
     }
     fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=%p status=SUCCESS result=CUDA_SUCCESS\n", symbol, fn);
+    log_proc_address_caller("resolved", symbol, caller);
     return CUDA_SUCCESS;
 }
 

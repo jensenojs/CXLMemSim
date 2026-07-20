@@ -88,10 +88,12 @@ python3 "$ROOT/scripts/component_artifact.py" verify-archive \
 ldd "$OUTPUT/bin/cxlmemsim_server" >"$WORK/server-ldd.txt"
 ldd "$OUTPUT/bin/cuda-integrity-export-oracle" >"$WORK/integrity-oracle-ldd.txt"
 ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
+ldd "$OUTPUT/guest/libcxl-loader-audit.so" >"$WORK/loader-audit-ldd.txt"
 ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
 ldd "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-ldd.txt"
 ldd "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-ldd.txt"
 readelf -d "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-readelf-dynamic.txt"
+readelf -d "$OUTPUT/guest/libcxl-loader-audit.so" >"$WORK/loader-audit-readelf-dynamic.txt"
 for library in liblz4.so.1 libzstd.so.1; do
     grep -F "Shared library: [$library]" "$WORK/shim-readelf-dynamic.txt" >/dev/null
     grep -F "$library =>" "$WORK/shim-ldd.txt" >/dev/null

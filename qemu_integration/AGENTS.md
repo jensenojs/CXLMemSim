@@ -25,4 +25,11 @@ workload-inventory.md
 与Type-2 case lifecycle，但由run spec选择其一，不能在同一计数窗口内混跑后再把registration总数解释为
 单一exact DSO集合。底层测试分别使用真实tiny CUDA DSO和不依赖GPU的fake cuBLAS DSO。
 
+`guest_libcuda/loader_audit.c`构建`libcxl-loader-audit.so`。它由guest workload通过`LD_AUDIT`加载，按PID
+记录loader object open/activity/close和direct `cu*` symbol binding，原样返回loader选定的symbol value。`libcuda.c`
+的`-finstrument-functions`入口与`cuGetProcAddress`同时写出natural/query/resolved/unresolved caller provenance。
+两份记录共同回答“实际哪个guest ELF加载、哪个ELF调用了哪个CUDA API”；它们由cxl-lab的
+`verify_kimi_loader_api_closure.py`与exact initrd manifest消费。audit写目录、case生命周期、OCI result和Kimi
+结论由type2-guest/cxl-lab拥有，本目录只拥有observer二进制和shim记录格式。
+
 进入`guest_libcuda/`修改公开CUDA入口、private export-table探针或BAR2协议前，继续读取仓库根`AGENTS.md`中的ABI与验证边界。任何正式L40/exact artifact运行由cxl-lab diagnostic run spec拥有，不在本目录手工拼接CNB身份。
