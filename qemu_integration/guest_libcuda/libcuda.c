@@ -1846,17 +1846,25 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
 
     if (elf_candidate) {
         const unsigned char *payload = (const unsigned char *)elf_candidate + elf_candidate->header_size;
-        if (elf_candidate->flags & CUDART_FATBIN_FLAG_COMPRESSED_ZSTD) {
+        bool zstd_compressed = (elf_candidate->flags & CUDART_FATBIN_FLAG_COMPRESSED_ZSTD) != 0;
+        bool lz4_compressed = (elf_candidate->flags & CUDART_FATBIN_FLAG_COMPRESSED_LZ4) != 0;
+        if (zstd_compressed && lz4_compressed) {
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        if (zstd_compressed || lz4_compressed) {
             if (!elf_candidate->compressed_size || elf_candidate->compressed_size > elf_candidate->payload_size ||
                 elf_candidate->compressed_size > CXL_GPU_DATA_SIZE || !elf_candidate->uncompressed_payload) {
                 return CUDA_ERROR_INVALID_VALUE;
             }
+            uint32_t encoding =
+                zstd_compressed ? CXL_GPU_MODULE_DATA_ZSTD : CXL_GPU_MODULE_DATA_LZ4;
+            const char *encoding_name = zstd_compressed ? "zstd" : "lz4";
             fprintf(stderr,
                     "[CXL-CUDA]   library CUBIN load selected offset=%llu sm=0x%x compressed_size=%u "
-                    "uncompressed_size=%llu encoding=zstd\n",
+                    "uncompressed_size=%llu encoding=%s\n",
                     (unsigned long long)elf_offset, elf_candidate->sm_version, elf_candidate->compressed_size,
-                    (unsigned long long)elf_candidate->uncompressed_payload);
-            return cxl_module_load_cubin(module, payload, elf_candidate->compressed_size, CXL_GPU_MODULE_DATA_ZSTD,
+                    (unsigned long long)elf_candidate->uncompressed_payload, encoding_name);
+            return cxl_module_load_cubin(module, payload, elf_candidate->compressed_size, encoding,
                                          (size_t)elf_candidate->uncompressed_payload);
         }
 
