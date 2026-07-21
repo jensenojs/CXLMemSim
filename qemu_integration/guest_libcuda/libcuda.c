@@ -56,6 +56,10 @@ typedef int CUkernelNodeAttrID;
 typedef int CUfunction_attribute;
 typedef int CUfunc_cache;
 typedef int CUsharedconfig;
+typedef enum {
+    CU_MODULE_EAGER_LOADING = 0x1,
+    CU_MODULE_LAZY_LOADING = 0x2,
+} CUmoduleLoadingMode;
 typedef uint64_t CUdeviceptr;
 typedef uint64_t cuuint64_t;
 typedef int CUmemorytype;
@@ -1407,6 +1411,23 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev) {
     if (err == CUDA_SUCCESS) {
         *value = (int)(int32_t)reg_read64(CXL_GPU_REG_RESULT0);
         DLOG("  value=%d\n", *value);
+    }
+    cmd_unlock();
+    return err;
+}
+
+CUresult cuModuleGetLoadingMode(CUmoduleLoadingMode *mode) {
+    DLOG("cuModuleGetLoadingMode(mode=%p)\n", (void *)mode);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!mode)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    CUresult err = execute_cmd(CXL_GPU_CMD_MODULE_GET_LOADING_MODE);
+    if (err == CUDA_SUCCESS) {
+        *mode = (CUmoduleLoadingMode)(uint32_t)reg_read64(CXL_GPU_REG_RESULT0);
+        DLOG("  mode=%d\n", (int)*mode);
     }
     cmd_unlock();
     return err;
