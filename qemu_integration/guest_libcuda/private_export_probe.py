@@ -1042,14 +1042,18 @@ if gdb is not None:
         def registers(self) -> dict[str, str]:
             return {name: hex_address(self.register(name)) or "0x0" for name in INTEGER_REGISTERS}
 
-        def caller_mapping(self, frame: Any) -> dict[str, Any]:
+        @staticmethod
+        def caller_address(frame: Any) -> int:
             caller = frame.older()
             if caller is None:
                 raise RuntimeError("GDB frame has no caller")
             pc = int(caller.pc())
             if pc == 0:
                 raise RuntimeError("GDB caller frame has a zero PC")
-            return self.mapped_elf_identity(pc)
+            return pc
+
+        def caller_mapping(self, frame: Any) -> dict[str, Any]:
+            return self.mapped_elf_identity(self.caller_address(frame))
 
         def public_symbol(self, symbol: str) -> tuple[int, dict[str, Any]]:
             address = int(gdb.parse_and_eval(f"(void *)&{symbol}"))
@@ -1435,6 +1439,7 @@ if gdb is not None:
 
         def observe_function_entry(self, address: int) -> None:
             mappings = sorted(self.slot_by_address[address], key=lambda item: (item.uuid, item.slot))
+            frame = gdb.newest_frame()
             registers = self.registers()
             rdi = int(registers["rdi"], 16)
             selector_candidate = rdi if rdi <= self.config["selector_max"] else None
@@ -1450,7 +1455,7 @@ if gdb is not None:
                     "sequence": sequence,
                     "address": hex_address(address),
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in mappings],
-                    "caller": self.caller(),
+                    "caller": hex_address(self.caller_address(frame)),
                     "thread": None if thread is None else thread.global_num,
                     "entry_registers": registers,
                     "selector_candidate": selector_candidate,
@@ -1465,7 +1470,7 @@ if gdb is not None:
                     capture_sequence = self.capture_sequence
                 NaturalCallReturnBreakpoint(
                     self,
-                    gdb.newest_frame(),
+                    frame,
                     sequence,
                     mappings,
                     registers,
