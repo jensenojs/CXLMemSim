@@ -15,6 +15,15 @@ static const char *configured_path(const char *name, const char *fallback) {
     return value && *value ? value : fallback;
 }
 
+static void observe_module_loading_environment(const char *phase) {
+    const char *module_loading = getenv("CUDA_MODULE_LOADING");
+    const char *enable_lazy_loading = getenv("CUDA_ENABLE_MODULE_LAZY_LOADING");
+    printf("cublas_module_loading_environment phase=%s CUDA_MODULE_LOADING=%s "
+           "CUDA_ENABLE_MODULE_LAZY_LOADING=%s\n",
+           phase, module_loading ? module_loading : "<unset>",
+           enable_lazy_loading ? enable_lazy_loading : "<unset>");
+}
+
 /*
  * The cuBLAS initialization window is where libcudart invokes the guest
  * shim's cuLibraryLoadData registrations.  dladdr(code) records the
@@ -183,6 +192,7 @@ int tiny_cuda_probe_run(void) {
     }
     printf("cublas_create_probe_symbols status=pass create=%p destroy=%p\n", (void *)create, (void *)destroy);
 
+    observe_module_loading_environment("before-create");
     if (!observe_module_loading_mode("before-create", driver_path, &loading_mode_result)) {
         dlclose(cublas);
         dlclose(ggml);
@@ -192,6 +202,7 @@ int tiny_cuda_probe_run(void) {
 
     int create_result = create(&cublas_handle);
     printf("cublas_create_result=%d handle=%p\n", create_result, cublas_handle);
+    observe_module_loading_environment("after-create");
     if (create_result != 0 || !cublas_handle) {
         dlclose(cublas);
         dlclose(ggml);
