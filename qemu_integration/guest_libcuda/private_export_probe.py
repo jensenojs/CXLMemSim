@@ -15,6 +15,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -137,7 +138,7 @@ def parse_proc_maps(text: str) -> list[dict[str, Any]]:
     return mappings
 
 
-def locate_proc_mapping(address: int, mappings: list[dict[str, Any]]) -> dict[str, Any]:
+def proc_mapping_for_address(address: int, mappings: list[dict[str, Any]]) -> dict[str, Any]:
     matches = [mapping for mapping in mappings if mapping["start"] <= address < mapping["end"]]
     if len(matches) != 1:
         raise RuntimeError(f"address 0x{address:x} maps to {len(matches)} /proc ranges")
@@ -145,17 +146,102 @@ def locate_proc_mapping(address: int, mappings: list[dict[str, Any]]) -> dict[st
     path = mapping.get("path")
     if not isinstance(path, str) or not path.startswith("/") or path.endswith(" (deleted)"):
         raise RuntimeError(f"address 0x{address:x} is not backed by a live absolute ELF path: {path}")
-    related = [
-        item
-        for item in mappings
-        if item.get("path") == path and item.get("device") == mapping["device"] and item.get("inode") == mapping["inode"]
-    ]
-    if not related:
-        raise RuntimeError(f"address 0x{address:x} has no related file mappings")
-    load_bases = {item["start"] - item["offset"] for item in related}
-    if len(load_bases) != 1:
-        raise RuntimeError(f"ELF mappings for {path} disagree on load base: {sorted(load_bases)}")
-    load_base = next(iter(load_bases))
+    return mapping
+
+
+def elf_load_segments(path: pathlib.Path) -> list[dict[str, int]]:
+    with path.open("rb") as stream:
+        ident = stream.read(16)
+        if len(ident) != 16 or ident[:4] != b"\x7fELF":
+            raise RuntimeError(f"invalid ELF identity: {path}")
+        if ident[5] == 1:
+            endian = "<"
+        elif ident[5] == 2:
+            endian = ">"
+        else:
+            raise RuntimeError(f"unsupported ELF byte order {ident[5]}: {path}")
+        if ident[4] == 2:
+            header = struct.Struct(endian + "HHIQQQIHHHHHH")
+            program_header = struct.Struct(endian + "IIQQQQQQ")
+            program_header_offset_index = 4
+            program_header_size_index = 8
+            program_header_count_index = 9
+            is_64_bit = True
+        elif ident[4] == 1:
+            header = struct.Struct(endian + "HHIIIIIHHHHHH")
+            program_header = struct.Struct(endian + "IIIIIIII")
+            program_header_offset_index = 4
+            program_header_size_index = 8
+            program_header_count_index = 9
+            is_64_bit = False
+        else:
+            raise RuntimeError(f"unsupported ELF class {ident[4]}: {path}")
+        raw_header = stream.read(header.size)
+        if len(raw_header) != header.size:
+            raise RuntimeError(f"truncated ELF header: {path}")
+        fields = header.unpack(raw_header)
+        program_header_offset = fields[program_header_offset_index]
+        program_header_size = fields[program_header_size_index]
+        program_header_count = fields[program_header_count_index]
+        if program_header_count == 0 or program_header_count == 0xFFFF:
+            raise RuntimeError(f"unsupported ELF program header count {program_header_count}: {path}")
+        if program_header_size < program_header.size:
+            raise RuntimeError(
+                f"ELF program header entry is too small: {program_header_size} < {program_header.size}: {path}"
+            )
+        segments: list[dict[str, int]] = []
+        for index in range(program_header_count):
+            stream.seek(program_header_offset + index * program_header_size)
+            raw_program_header = stream.read(program_header.size)
+            if len(raw_program_header) != program_header.size:
+                raise RuntimeError(f"truncated ELF program header {index}: {path}")
+            values = program_header.unpack(raw_program_header)
+            if is_64_bit:
+                segment_type, flags, offset, virtual_address, _, file_size, memory_size, alignment = values
+            else:
+                segment_type, offset, virtual_address, _, file_size, memory_size, flags, alignment = values
+            if segment_type == 1:
+                segments.append(
+                    {
+                        "offset": offset,
+                        "virtual_address": virtual_address,
+                        "file_size": file_size,
+                        "memory_size": memory_size,
+                        "flags": flags,
+                        "alignment": alignment,
+                    }
+                )
+    if not segments:
+        raise RuntimeError(f"ELF has no PT_LOAD segments: {path}")
+    return segments
+
+
+def locate_proc_mapping(
+    address: int,
+    mappings: list[dict[str, Any]],
+    load_segments: list[dict[str, int]],
+) -> dict[str, Any]:
+    mapping = proc_mapping_for_address(address, mappings)
+    path = mapping["path"]
+    file_offset = mapping["offset"] + address - mapping["start"]
+    candidates = []
+    for segment in load_segments:
+        segment_end = segment["offset"] + segment["file_size"]
+        if segment["offset"] <= file_offset < segment_end:
+            image_offset = segment["virtual_address"] + file_offset - segment["offset"]
+            candidates.append((address - image_offset, image_offset, segment))
+    identities = {(load_base, image_offset) for load_base, image_offset, _ in candidates}
+    if len(identities) != 1:
+        raise RuntimeError(
+            f"address 0x{address:x} file offset 0x{file_offset:x} maps to "
+            f"{len(identities)} PT_LOAD origins in {path}"
+        )
+    load_base, image_offset = next(iter(identities))
+    segment = next(
+        segment
+        for candidate_load_base, candidate_image_offset, segment in candidates
+        if (candidate_load_base, candidate_image_offset) == (load_base, image_offset)
+    )
     return {
         "start": mapping["start"],
         "end": mapping["end"],
@@ -165,8 +251,10 @@ def locate_proc_mapping(address: int, mappings: list[dict[str, Any]]) -> dict[st
         "inode": mapping["inode"],
         "path": path,
         "load_base": load_base,
-        "file_offset": mapping["offset"] + address - mapping["start"],
-        "image_offset": address - load_base,
+        "file_offset": file_offset,
+        "image_offset": image_offset,
+        "segment_offset": segment["offset"],
+        "segment_virtual_address": segment["virtual_address"],
     }
 
 
@@ -616,6 +704,7 @@ if gdb is not None:
         driver_unreturned_sequences: set[int] = field(default_factory=set)
         driver_event_limit_exhausted: bool = False
         driver_identity_cache: dict[str, dict[str, str]] = field(default_factory=dict)
+        elf_load_segment_cache: dict[str, list[dict[str, int]]] = field(default_factory=dict)
         fatal_errors: list[str] = field(default_factory=list)
 
         def append_table(self, record: dict[str, Any]) -> None:
@@ -763,8 +852,9 @@ if gdb is not None:
             return parse_proc_maps(pathlib.Path(f"/proc/{pid}/maps").read_text(encoding="utf-8"))
 
         def mapped_elf_identity(self, address: int) -> dict[str, Any]:
-            mapping = locate_proc_mapping(address, self.read_proc_maps())
-            realpath = pathlib.Path(mapping["path"]).resolve(strict=True)
+            mappings = self.read_proc_maps()
+            address_mapping = proc_mapping_for_address(address, mappings)
+            realpath = pathlib.Path(address_mapping["path"]).resolve(strict=True)
             cache_key = str(realpath)
             file_identity = self.driver_identity_cache.get(cache_key)
             if file_identity is None:
@@ -774,6 +864,11 @@ if gdb is not None:
                     "build_id": elf_build_id(realpath),
                 }
                 self.driver_identity_cache[cache_key] = file_identity
+            load_segments = self.elf_load_segment_cache.get(cache_key)
+            if load_segments is None:
+                load_segments = elf_load_segments(realpath)
+                self.elf_load_segment_cache[cache_key] = load_segments
+            mapping = locate_proc_mapping(address, mappings, load_segments)
             return {
                 "path": mapping["path"],
                 **file_identity,
@@ -784,6 +879,8 @@ if gdb is not None:
                 "load_base": hex_address(mapping["load_base"]),
                 "file_offset": hex_address(mapping["file_offset"]),
                 "image_offset": hex_address(mapping["image_offset"]),
+                "segment_offset": hex_address(mapping["segment_offset"]),
+                "segment_virtual_address": hex_address(mapping["segment_virtual_address"]),
                 "device": mapping["device"],
                 "inode": mapping["inode"],
             }

@@ -7,7 +7,14 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from private_export_probe import locate_proc_mapping, parse_driver_register, parse_driver_symbol, parse_proc_maps, verify
+from private_export_probe import (
+    elf_load_segments,
+    locate_proc_mapping,
+    parse_driver_register,
+    parse_driver_symbol,
+    parse_proc_maps,
+    verify,
+)
 
 
 class ProcMappingTests(unittest.TestCase):
@@ -22,7 +29,20 @@ class ProcMappingTests(unittest.TestCase):
             )
         )
 
-        result = locate_proc_mapping(0x70001234, mappings)
+        result = locate_proc_mapping(
+            0x70001234,
+            mappings,
+            [
+                {
+                    "offset": 0,
+                    "virtual_address": 0,
+                    "file_size": 0x5000,
+                    "memory_size": 0x5000,
+                    "flags": 5,
+                    "alignment": 0x1000,
+                }
+            ],
+        )
 
         self.assertEqual(result["path"], "/opt/libexample.so")
         self.assertEqual(result["load_base"], 0x70000000)
@@ -34,7 +54,7 @@ class ProcMappingTests(unittest.TestCase):
         mappings = parse_proc_maps("0000000071000000-0000000071001000 rw-p 00000000 00:00 0 [heap]")
 
         with self.assertRaisesRegex(RuntimeError, "live absolute ELF path"):
-            locate_proc_mapping(0x71000010, mappings)
+            locate_proc_mapping(0x71000010, mappings, [])
 
     def test_rejects_deleted_mapping(self) -> None:
         mappings = parse_proc_maps(
@@ -42,20 +62,73 @@ class ProcMappingTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "live absolute ELF path"):
-            locate_proc_mapping(0x72000010, mappings)
+            locate_proc_mapping(0x72000010, mappings, [])
 
-    def test_rejects_conflicting_load_bases(self) -> None:
+    def test_uses_pt_load_offsets_when_virtual_address_differs_by_one_page(self) -> None:
         mappings = parse_proc_maps(
             "\n".join(
                 (
                     "0000000073000000-0000000073001000 r--p 00000000 08:01 44 /opt/libtwice.so",
-                    "0000000073003000-0000000073004000 r-xp 00001000 08:01 44 /opt/libtwice.so",
+                    "0000000073004000-0000000073005000 rw-p 00003000 08:01 44 /opt/libtwice.so",
                 )
             )
         )
 
-        with self.assertRaisesRegex(RuntimeError, "disagree on load base"):
-            locate_proc_mapping(0x73003010, mappings)
+        result = locate_proc_mapping(
+            0x73004010,
+            mappings,
+            [
+                {
+                    "offset": 0,
+                    "virtual_address": 0,
+                    "file_size": 0x1000,
+                    "memory_size": 0x1000,
+                    "flags": 4,
+                    "alignment": 0x1000,
+                },
+                {
+                    "offset": 0x3010,
+                    "virtual_address": 0x4010,
+                    "file_size": 0x800,
+                    "memory_size": 0x1000,
+                    "flags": 6,
+                    "alignment": 0x1000,
+                },
+            ],
+        )
+
+        self.assertEqual(result["load_base"], 0x73000000)
+        self.assertEqual(result["file_offset"], 0x3010)
+        self.assertEqual(result["image_offset"], 0x4010)
+        self.assertEqual(result["segment_offset"], 0x3010)
+        self.assertEqual(result["segment_virtual_address"], 0x4010)
+
+    def test_rejects_file_offset_outside_pt_load_file_bytes(self) -> None:
+        mappings = parse_proc_maps(
+            "0000000074000000-0000000074001000 r-xp 00002000 08:01 45 /opt/libgap.so"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "maps to 0 PT_LOAD origins"):
+            locate_proc_mapping(
+                0x74000010,
+                mappings,
+                [
+                    {
+                        "offset": 0,
+                        "virtual_address": 0,
+                        "file_size": 0x1000,
+                        "memory_size": 0x1000,
+                        "flags": 5,
+                        "alignment": 0x1000,
+                    }
+                ],
+            )
+
+    def test_reads_pt_load_segments_from_real_elf(self) -> None:
+        segments = elf_load_segments(pathlib.Path("/bin/true").resolve(strict=True))
+
+        self.assertTrue(segments)
+        self.assertTrue(all(segment["file_size"] <= segment["memory_size"] for segment in segments))
 
 
 class DriverArgumentTests(unittest.TestCase):
