@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
 
 typedef int (*cublas_create_t)(void **handle);
 typedef int (*cublas_destroy_t)(void *handle);
@@ -142,6 +146,64 @@ static int observe_module_loading_mode(const char *phase, const char *driver_pat
     return 1;
 }
 
+/*
+ * The Type-2 GDB diagnostic preserves the RTLD_NOW load and cublasCreate
+ * call. This optional rendezvous runs after both DSOs and cublasCreate_v2 are
+ * resolved. The host uses the exact mapping identity to install guest-address
+ * breakpoints, then creates the continuation file. It cannot change CUDA
+ * arguments, loader mode, return values, BAR2, QEMU, or HetGPU behavior.
+ */
+static int wait_for_gdb_observer(cublas_create_t create) {
+    const char *directory = getenv("CUBLAS_CREATE_GDB_SYNC_DIR");
+    if (!directory || !*directory) {
+        return 0;
+    }
+
+    Dl_info info = {0};
+    if (dladdr((const void *)create, &info) == 0 || !info.dli_fname || !info.dli_fbase) {
+        printf("cublas_gdb_sync status=fail reason=dladdr-create\n");
+        return -1;
+    }
+
+    char ready[1024];
+    char proceed[1024];
+    if (snprintf(ready, sizeof(ready), "%s/ready.json", directory) >= (int)sizeof(ready) ||
+        snprintf(proceed, sizeof(proceed), "%s/continue", directory) >= (int)sizeof(proceed)) {
+        printf("cublas_gdb_sync status=fail reason=path-too-long\n");
+        return -1;
+    }
+
+    int descriptor = open(ready, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (descriptor < 0) {
+        printf("cublas_gdb_sync status=fail reason=ready-create errno=%d\n", errno);
+        return -1;
+    }
+    char record[1400];
+    int length = snprintf(record, sizeof(record),
+                          "{\"schema_version\":1,\"library\":\"%s\",\"load_base\":\"%p\","
+                          "\"cublas_create\":\"%p\"}\n",
+                          info.dli_fname, info.dli_fbase, (const void *)create);
+    if (length < 0 || length >= (int)sizeof(record) || write(descriptor, record, (size_t)length) != length ||
+        close(descriptor) != 0) {
+        printf("cublas_gdb_sync status=fail reason=ready-write errno=%d\n", errno);
+        return -1;
+    }
+    printf("cublas_gdb_sync status=ready library=%s load_base=%p\n", info.dli_fname, info.dli_fbase);
+    fflush(stdout);
+
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000000};
+    for (unsigned int attempt = 0; attempt < 1200; ++attempt) {
+        if (access(proceed, F_OK) == 0) {
+            printf("cublas_gdb_sync status=continue\n");
+            fflush(stdout);
+            return 0;
+        }
+        nanosleep(&delay, NULL);
+    }
+    printf("cublas_gdb_sync status=fail reason=continue-timeout\n");
+    return -1;
+}
+
 int tiny_cuda_probe_run(void) {
     const char *expected = getenv("CUBLAS_CREATE_EXPECTED_REGISTRATIONS");
     const char *ggml_path = configured_path("CUBLAS_CREATE_GGML_LIBRARY", "/opt/llama/bin/libggml-cuda.so.0");
@@ -191,6 +253,13 @@ int tiny_cuda_probe_run(void) {
         return 33;
     }
     printf("cublas_create_probe_symbols status=pass create=%p destroy=%p\n", (void *)create, (void *)destroy);
+
+    if (wait_for_gdb_observer(create) != 0) {
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 38;
+    }
 
     observe_module_loading_environment("before-create");
     if (!observe_module_loading_mode("before-create", driver_path, &loading_mode_result)) {
