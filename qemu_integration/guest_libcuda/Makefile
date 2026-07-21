@@ -35,7 +35,7 @@ BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
 TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
 
-.PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe test-loader-audit test-api-provenance private-export-table-probe integrity-export-oracle \
+.PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe test-loader-audit test-api-provenance private-export-table-probe test-private-export-probe integrity-export-oracle \
 	fatbin-cubin-load-probe fatbin-library-load-probe \
 	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-static-collector test-context-state test-context-shim
 
@@ -59,6 +59,12 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 private-export-table-probe: tiny-probe $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_RUNNER)
 	python3 -m py_compile $(PRIVATE_EXPORT_PROBE)
 	bash -n $(PRIVATE_EXPORT_RUNNER)
+	python3 -m unittest -v test_private_export_probe.py
+
+test-private-export-probe: $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_RUNNER) test_private_export_probe.py
+	python3 -m py_compile $(PRIVATE_EXPORT_PROBE)
+	bash -n $(PRIVATE_EXPORT_RUNNER)
+	python3 -m unittest -v test_private_export_probe.py
 
 integrity-export-oracle: $(INTEGRITY_EXPORT_ORACLE)
 
