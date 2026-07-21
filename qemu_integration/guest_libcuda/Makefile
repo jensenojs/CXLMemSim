@@ -53,7 +53,9 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 		./$(TINY_CUDA_PROBE) "$(CURDIR)/$(CUBLAS_CREATE_PROBE)")"; \
 	printf '%s\n' "$$output"; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_create_probe_registration_expected=3346' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_module_loading_mode phase=before-create status=called result=3 mode=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_create_result=0 handle=0x1' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_module_loading_mode phase=after-create status=called result=0 mode=2' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_destroy_result=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx '=== CUBLAS_CREATE_PROBE_PASS ===' >/dev/null
 
