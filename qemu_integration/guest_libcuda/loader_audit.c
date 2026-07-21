@@ -35,6 +35,8 @@ static uint64_t g_sequence;
 static LoaderObject g_objects[CXL_LOADER_AUDIT_MAX_OBJECTS];
 static size_t g_object_count;
 
+static LoaderObject *object_for_cookie(uintptr_t cookie);
+
 static size_t json_string(char *destination, size_t capacity, const char *source) {
     size_t written = 0;
     if (capacity == 0) {
@@ -138,6 +140,31 @@ static void emit_symbol_bind(const char *symbol, uintptr_t reference_cookie, uin
         "\"reference_cookie\":\"0x%llx\",\"definition_cookie\":\"0x%llx\"}\n",
         CXL_LOADER_AUDIT_SCHEMA_VERSION, (unsigned long long)++g_sequence, (long)g_pid, (long)g_ppid, escaped,
         (unsigned long long)reference_cookie, (unsigned long long)definition_cookie);
+    if (length > 0) {
+        write_line(line, (size_t)length);
+    }
+}
+
+static int is_cublas_create_boundary(const char *symbol, uintptr_t reference_cookie) {
+    LoaderObject *reference = object_for_cookie(reference_cookie);
+    if (!reference || !symbol || !strstr(reference->path, "/libcublas.so.12")) {
+        return 0;
+    }
+    return strcmp(symbol, "cublasLtCtxInit") == 0 || strcmp(symbol, "pthread_once") == 0;
+}
+
+static void emit_plt_event(const char *event, const char *symbol, uintptr_t reference_cookie, uintptr_t definition_cookie,
+                           uint64_t result) {
+    char escaped[512];
+    char line[CXL_LOADER_AUDIT_LINE_LIMIT];
+    json_string(escaped, sizeof(escaped), symbol);
+    int length = snprintf(
+        line, sizeof(line),
+        "{\"schema_version\":%d,\"kind\":\"loader-audit\",\"event\":\"%s\","
+        "\"sequence\":%llu,\"pid\":%ld,\"ppid\":%ld,\"symbol\":\"%s\","
+        "\"reference_cookie\":\"0x%llx\",\"definition_cookie\":\"0x%llx\",\"rax\":\"0x%llx\"}\n",
+        CXL_LOADER_AUDIT_SCHEMA_VERSION, event, (unsigned long long)++g_sequence, (long)g_pid, (long)g_ppid, escaped,
+        (unsigned long long)reference_cookie, (unsigned long long)definition_cookie, (unsigned long long)result);
     if (length > 0) {
         write_line(line, (size_t)length);
     }
@@ -265,4 +292,34 @@ uintptr_t la_symbind64(Elf64_Sym *symbol, unsigned int index, uintptr_t *referen
                          definition_cookie ? *definition_cookie : 0);
     }
     return symbol->st_value;
+}
+
+Elf64_Addr la_x86_64_gnu_pltenter(Elf64_Sym *symbol, unsigned int index, uintptr_t *reference_cookie,
+                                  uintptr_t *definition_cookie, La_x86_64_regs *registers, unsigned int *flags,
+                                  const char *symbol_name, long int *framesize) {
+    (void)symbol;
+    (void)index;
+    (void)registers;
+    (void)flags;
+    (void)framesize;
+    uintptr_t reference = reference_cookie ? *reference_cookie : 0;
+    uintptr_t definition = definition_cookie ? *definition_cookie : 0;
+    if (is_cublas_create_boundary(symbol_name, reference)) {
+        emit_plt_event("plt-enter", symbol_name, reference, definition, 0);
+    }
+    return symbol->st_value;
+}
+
+unsigned int la_x86_64_gnu_pltexit(Elf64_Sym *symbol, unsigned int index, uintptr_t *reference_cookie,
+                                   uintptr_t *definition_cookie, const La_x86_64_regs *registers,
+                                   La_x86_64_retval *result, const char *symbol_name) {
+    (void)symbol;
+    (void)index;
+    (void)registers;
+    uintptr_t reference = reference_cookie ? *reference_cookie : 0;
+    uintptr_t definition = definition_cookie ? *definition_cookie : 0;
+    if (is_cublas_create_boundary(symbol_name, reference)) {
+        emit_plt_event("plt-exit", symbol_name, reference, definition, result ? result->lrv_rax : 0);
+    }
+    return 0;
 }
