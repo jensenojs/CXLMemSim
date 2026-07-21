@@ -893,17 +893,7 @@ static CUresult integrity_device_hash_info(IntegrityDeviceHashInfo *info) {
 }
 
 static int cxl_cuda_effective_driver_version(void) {
-    int version = 12090; /* CUDA 12.9 */
-    const char *override = getenv("CXL_CUDA_DRIVER_VERSION_OVERRIDE");
-    if (override && *override) {
-        char *end = NULL;
-        errno = 0;
-        long parsed = strtol(override, &end, 10);
-        if (errno == 0 && end && *end == '\0' && parsed >= 1000 && parsed <= 99999) {
-            version = (int)parsed;
-        }
-    }
-    return version;
+    return 12090; /* CUDA 12.9 */
 }
 
 static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_t result[2]) {
@@ -1324,17 +1314,6 @@ CUresult cuDriverGetVersion(int *version) {
      * initialize when the Driver API reports an older version, before it calls
      * into cuDeviceGetCount. */
     *version = cxl_cuda_effective_driver_version();
-    const char *override = getenv("CXL_CUDA_DRIVER_VERSION_OVERRIDE");
-    if (override && *override) {
-        char *end = NULL;
-        errno = 0;
-        long parsed = strtol(override, &end, 10);
-        if (errno == 0 && end && *end == '\0' && parsed >= 1000 && parsed <= 99999) {
-            DLOG("  CXL_CUDA_DRIVER_VERSION_OVERRIDE=%s -> version=%d\n", override, *version);
-        } else {
-            DLOG("  ignoring invalid CXL_CUDA_DRIVER_VERSION_OVERRIDE=%s\n", override);
-        }
-    }
     DLOG("  version=%d\n", *version);
     return CUDA_SUCCESS;
 }
