@@ -303,12 +303,14 @@ Elf64_Addr la_x86_64_gnu_pltenter(Elf64_Sym *symbol, unsigned int index, uintptr
                                   const char *symbol_name, long int *framesize) {
     (void)symbol;
     (void)index;
-    (void)registers;
     (void)flags;
-    (void)framesize;
     uintptr_t reference = reference_cookie ? *reference_cookie : 0;
     uintptr_t definition = definition_cookie ? *definition_cookie : 0;
     if (is_cublas_create_boundary(symbol_name, reference)) {
+        /* glibc dispatches la_pltexit only after the observer requests a return frame. */
+        if (framesize) {
+            *framesize = (long int)sizeof(*registers);
+        }
         emit_plt_event("plt-enter", symbol_name, reference, definition, 0);
     }
     return symbol->st_value;
