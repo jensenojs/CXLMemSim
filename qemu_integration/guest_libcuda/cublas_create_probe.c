@@ -104,20 +104,31 @@ static void *load_library(const char *label, const char *path) {
     return handle;
 }
 
-static int observe_module_loading_mode(const char *phase) {
+static int observe_module_loading_mode(const char *phase, const char *driver_path) {
+    dlerror();
+    void *driver = dlopen(driver_path, RTLD_NOW | RTLD_NOLOAD);
+    const char *error = dlerror();
+    if (!driver) {
+        printf("cublas_module_loading_mode phase=%s status=driver-unavailable error=%s\n", phase,
+               error ? error : "unknown");
+        return 0;
+    }
+
     dlerror();
     cu_module_get_loading_mode_t get_mode =
-        (cu_module_get_loading_mode_t)dlsym(RTLD_DEFAULT, "cuModuleGetLoadingMode");
-    const char *error = dlerror();
+        (cu_module_get_loading_mode_t)dlsym(driver, "cuModuleGetLoadingMode");
+    error = dlerror();
     if (!get_mode) {
         printf("cublas_module_loading_mode phase=%s status=unresolved error=%s\n", phase,
                error ? error : "unknown");
+        dlclose(driver);
         return 0;
     }
 
     int mode = 0;
     int result = get_mode(&mode);
     printf("cublas_module_loading_mode phase=%s status=called result=%d mode=%d\n", phase, result, mode);
+    dlclose(driver);
     return result == 0;
 }
 
@@ -125,6 +136,7 @@ int tiny_cuda_probe_run(void) {
     const char *expected = getenv("CUBLAS_CREATE_EXPECTED_REGISTRATIONS");
     const char *ggml_path = configured_path("CUBLAS_CREATE_GGML_LIBRARY", "/opt/llama/bin/libggml-cuda.so.0");
     const char *cublas_path = configured_path("CUBLAS_CREATE_LIBRARY", "libcublas.so.12");
+    const char *driver_path = configured_path("CUBLAS_CREATE_DRIVER_LIBRARY", "libcuda.so.1");
     void *ggml = NULL;
     void *cublas = NULL;
     void *cublas_handle = NULL;
@@ -169,7 +181,7 @@ int tiny_cuda_probe_run(void) {
     }
     printf("cublas_create_probe_symbols status=pass create=%p destroy=%p\n", (void *)create, (void *)destroy);
 
-    if (!observe_module_loading_mode("before-create")) {
+    if (!observe_module_loading_mode("before-create", driver_path)) {
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
@@ -185,7 +197,7 @@ int tiny_cuda_probe_run(void) {
         return 34;
     }
 
-    if (!observe_module_loading_mode("after-create")) {
+    if (!observe_module_loading_mode("after-create", driver_path)) {
         destroy(cublas_handle);
         dlclose(cublas);
         dlclose(ggml);

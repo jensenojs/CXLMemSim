@@ -49,6 +49,7 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 	@output="$$(CUBLAS_CREATE_EXPECTED_REGISTRATIONS=3346 \
 		CUBLAS_CREATE_GGML_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
 		CUBLAS_CREATE_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
+		CUBLAS_CREATE_DRIVER_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
 		./$(TINY_CUDA_PROBE) "$(CURDIR)/$(CUBLAS_CREATE_PROBE)")"; \
 	printf '%s\n' "$$output"; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_create_probe_registration_expected=3346' >/dev/null; \
