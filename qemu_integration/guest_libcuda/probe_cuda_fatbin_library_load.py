@@ -2,13 +2,14 @@
 """在真实 CUDA Driver 上加载一份精确重建的 CUDA fatbin library wrapper。
 
 Kimi Type-2 baseline 的 guest shim 会把 Runtime 传来的 fatbin wrapper 保存为 CUlibrary record，
-随后由 cuLibraryGetModule 请求 module materialization。这个入口按 manifest 声明的精确 fatbin
-偏移，从同一份 SHA256 已冻结的 library bytes 重建 process-local CudartFatbincWrapper，再向真实
-NVIDIA Driver 询问完整 library container 的 load/get-module/unload 生命周期。
+随后由 cuLibraryGetModule 请求 module materialization，并在当前 cuBLAS 初始化窗口继续查询一个
+明确命名的 module global。这个入口按 manifest 声明的精确 fatbin 偏移，从同一份 SHA256 已冻结的
+library bytes 重建 process-local CudartFatbincWrapper，再向真实 NVIDIA Driver 询问完整 library
+container 的 load/get-module/global/unload 生命周期。
 
 它不启动 guest、BAR2、QEMU、HetGPU 或 Kimi。`--get-module` 会在成功注册后调用真实
-`cuLibraryGetModule`，复原本轮 cuBLAS 初始化窗口实际继续消费的 API。输入身份、fatbin layout、
-wrapper layout、library option、Driver 返回值和 handle 生命周期都会写入 output directory。
+`cuLibraryGetModule`；`--module-global` 在 module 成功后调用 `cuModuleGetGlobal_v2`。输入身份、
+fatbin layout、wrapper layout、library option、Driver 返回值和 handle 生命周期都会写入 output directory。
 """
 
 from __future__ import annotations
@@ -58,10 +59,10 @@ def hint(stream: Any) -> None:
     stream.write(
         "fatbin_library_load_probe_hint=self=qemu_integration/guest_libcuda/probe_cuda_fatbin_library_load.py\n"
         "fatbin_library_load_probe_hint=problem=One library may contain many same-sized fatbins, so files_size cannot identify the Runtime wrapper that reached cuLibraryLoadData\n"
-        "fatbin_library_load_probe_hint=question=Does the real L40 Driver accept the exact declared wrapper, and after acceptance what does cuLibraryGetModule return?\n"
+        "fatbin_library_load_probe_hint=question=Does the real L40 Driver accept the exact declared wrapper, and after acceptance what do cuLibraryGetModule and the named cuModuleGetGlobal return?\n"
         "fatbin_library_load_probe_hint=mental_model=Library SHA256 plus explicit fatbin offset, header hash, full-region hash and ordered entries identify one wrapper. The tool copies only that header and files region into a fresh process-local 24-byte wrapper and keeps both buffers alive through cuLibraryUnload.\n"
         "fatbin_library_load_probe_hint=inputs=library path; expected SHA256; explicit fatbin offset; files_size; header and full-region SHA256; ordered entries; output directory; --load also requires expected L40 SM\n"
-        "fatbin_library_load_probe_hint=outputs=fatbin-library-load.json and fatbin-library-load.transcript.txt; JSON carries library/fatbin hashes, entry sequence, reconstructed wrapper, option 1 value 0x1, Driver load/get-module results, handles and unload result\n"
+        "fatbin_library_load_probe_hint=outputs=fatbin-library-load.json and fatbin-library-load.transcript.txt; JSON carries library/fatbin hashes, entry sequence, reconstructed wrapper, option 1 value 0x1, Driver load/get-module/global results, handles and unload result\n"
         "fatbin_library_load_probe_hint=interpret=driver-accepted means the Driver accepted this full library container; an optional get-module result is recorded without being rewritten as a library-load result\n"
         "fatbin_library_load_probe_hint=proves=One native Driver answer for this exact reconstructed wrapper only\n"
         "fatbin_library_load_probe_hint=does_not_prove=Guest shim behavior, BAR2, QEMU, HetGPU, Kimi correctness or TPS\n"
@@ -129,13 +130,21 @@ def configure_driver() -> Any:
     cuda.cuLibraryLoadData.restype = ctypes.c_int
     cuda.cuLibraryGetModule.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
     cuda.cuLibraryGetModule.restype = ctypes.c_int
+    cuda.cuModuleGetGlobal_v2.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_char_p,
+    ]
+    cuda.cuModuleGetGlobal_v2.restype = ctypes.c_int
     cuda.cuLibraryUnload.argtypes = [ctypes.c_void_p]
     cuda.cuLibraryUnload.restype = ctypes.c_int
     return cuda
 
 
-def driver_load_wrapper(wrapper: CudartFatbincWrapper, expected_device_sm: int,
-                        get_module: bool) -> dict[str, int | str | bool | None]:
+def driver_load_wrapper(
+    wrapper: CudartFatbincWrapper,
+    expected_device_sm: int,
+    get_module: bool,
+    module_global: str | None,
+) -> dict[str, int | str | bool | None]:
     cuda = configure_driver()
     if (init_result := cuda.cuInit(0)) != CUDA_SUCCESS:
         raise ProbeFailure(f"cuInit returned {init_result}")
@@ -165,6 +174,10 @@ def driver_load_wrapper(wrapper: CudartFatbincWrapper, expected_device_sm: int,
         )
         module_result: int | None = None
         module_called = False
+        global_result: int | None = None
+        global_called = False
+        global_address = ctypes.c_uint64()
+        global_size = ctypes.c_size_t()
         unload_result: int | None = None
         if load_result == CUDA_SUCCESS:
             if not library.value:
@@ -172,6 +185,11 @@ def driver_load_wrapper(wrapper: CudartFatbincWrapper, expected_device_sm: int,
             if get_module:
                 module_called = True
                 module_result = cuda.cuLibraryGetModule(ctypes.byref(module), library)
+                if module_result == CUDA_SUCCESS and module_global is not None:
+                    global_called = True
+                    global_result = cuda.cuModuleGetGlobal_v2(
+                        ctypes.byref(global_address), ctypes.byref(global_size), module, module_global.encode("ascii"),
+                    )
             unload_result = cuda.cuLibraryUnload(library)
             if unload_result != CUDA_SUCCESS:
                 raise ProbeFailure(f"cuLibraryUnload returned {unload_result}")
@@ -188,6 +206,12 @@ def driver_load_wrapper(wrapper: CudartFatbincWrapper, expected_device_sm: int,
             "library_get_module_result": module_result,
             "library_module_handle": display_handle(module),
             "library_module_handle_nonnull": bool(module.value),
+            "module_global_name": module_global,
+            "module_global_called": global_called,
+            "module_global_result": global_result,
+            "module_global_address": f"0x{global_address.value:x}",
+            "module_global_address_nonzero": bool(global_address.value),
+            "module_global_size": global_size.value,
             "library_unload_called": load_result == CUDA_SUCCESS,
             "library_unload_result": unload_result,
         }
@@ -215,6 +239,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, help="new directory for JSON and transcript")
     parser.add_argument("--load", action="store_true", help="create a real CUDA context and call cuLibraryLoadData")
     parser.add_argument("--get-module", action="store_true", help="after a successful load, call cuLibraryGetModule before unload")
+    parser.add_argument("--module-global", help="after a successful module result, call cuModuleGetGlobal_v2 for this ASCII symbol")
     parser.add_argument("--expected-device-sm", type=parse_nonnegative, help="required current Driver device SM; mandatory with --load")
     args = parser.parse_args(argv)
     if args.hint:
@@ -230,6 +255,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--load requires --expected-device-sm")
     if args.get_module and not args.load:
         parser.error("--get-module requires --load")
+    if args.module_global is not None and not args.get_module:
+        parser.error("--module-global requires --get-module")
+    if args.module_global is not None:
+        try:
+            args.module_global.encode("ascii")
+        except UnicodeEncodeError:
+            parser.error("--module-global must be ASCII")
     if not args.load and args.expected_device_sm is not None:
         parser.error("--expected-device-sm is only meaningful with --load")
     return args
@@ -310,6 +342,7 @@ def main(argv: list[str]) -> int:
             "library_options": {"option": CU_LIBRARY_BINARY_IS_PRESERVED, "value": "0x1", "code_preserved_until_unload": True},
             "load_requested": args.load,
             "get_module_requested": args.get_module,
+            "module_global_requested": args.module_global,
         })
         transcript.extend((
             f"fatbin_offset=0x{fatbin_offset:x}", f"fatbin_header_sha256={fatbin['header_sha256']}",
@@ -318,7 +351,7 @@ def main(argv: list[str]) -> int:
             f"wrapper_layout_size={ctypes.sizeof(CudartFatbincWrapper)}", "library_option=1 value=0x1",
         ))
         if args.load:
-            driver = driver_load_wrapper(wrapper, args.expected_device_sm, args.get_module)
+            driver = driver_load_wrapper(wrapper, args.expected_device_sm, args.get_module, args.module_global)
             result["driver"] = driver
             transcript.extend((
                 f"driver_library_load_result={driver['library_load_result']}",
@@ -326,6 +359,11 @@ def main(argv: list[str]) -> int:
                 f"driver_library_get_module_called={driver['library_get_module_called']}",
                 f"driver_library_get_module_result={driver['library_get_module_result']}",
                 f"driver_library_module_handle={driver['library_module_handle']}",
+                f"driver_module_global_name={driver['module_global_name']}",
+                f"driver_module_global_called={driver['module_global_called']}",
+                f"driver_module_global_result={driver['module_global_result']}",
+                f"driver_module_global_address={driver['module_global_address']}",
+                f"driver_module_global_size={driver['module_global_size']}",
                 f"driver_library_unload_called={driver['library_unload_called']}",
                 f"driver_library_unload_result={driver['library_unload_result']}",
             ))
