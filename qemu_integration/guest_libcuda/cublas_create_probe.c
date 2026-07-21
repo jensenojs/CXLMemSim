@@ -8,6 +8,7 @@
 
 typedef int (*cublas_create_t)(void **handle);
 typedef int (*cublas_destroy_t)(void *handle);
+typedef int (*cu_module_get_loading_mode_t)(int *mode);
 
 static const char *configured_path(const char *name, const char *fallback) {
     const char *value = getenv(name);
@@ -103,6 +104,23 @@ static void *load_library(const char *label, const char *path) {
     return handle;
 }
 
+static int observe_module_loading_mode(const char *phase) {
+    dlerror();
+    cu_module_get_loading_mode_t get_mode =
+        (cu_module_get_loading_mode_t)dlsym(RTLD_DEFAULT, "cuModuleGetLoadingMode");
+    const char *error = dlerror();
+    if (!get_mode) {
+        printf("cublas_module_loading_mode phase=%s status=unresolved error=%s\n", phase,
+               error ? error : "unknown");
+        return 0;
+    }
+
+    int mode = 0;
+    int result = get_mode(&mode);
+    printf("cublas_module_loading_mode phase=%s status=called result=%d mode=%d\n", phase, result, mode);
+    return result == 0;
+}
+
 int tiny_cuda_probe_run(void) {
     const char *expected = getenv("CUBLAS_CREATE_EXPECTED_REGISTRATIONS");
     const char *ggml_path = configured_path("CUBLAS_CREATE_GGML_LIBRARY", "/opt/llama/bin/libggml-cuda.so.0");
@@ -151,6 +169,13 @@ int tiny_cuda_probe_run(void) {
     }
     printf("cublas_create_probe_symbols status=pass create=%p destroy=%p\n", (void *)create, (void *)destroy);
 
+    if (!observe_module_loading_mode("before-create")) {
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 36;
+    }
+
     int create_result = create(&cublas_handle);
     printf("cublas_create_result=%d handle=%p\n", create_result, cublas_handle);
     if (create_result != 0 || !cublas_handle) {
@@ -158,6 +183,14 @@ int tiny_cuda_probe_run(void) {
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
         return 34;
+    }
+
+    if (!observe_module_loading_mode("after-create")) {
+        destroy(cublas_handle);
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 37;
     }
 
     int destroy_result = destroy(cublas_handle);

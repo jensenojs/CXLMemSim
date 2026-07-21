@@ -6,3 +6,8 @@ int cublasCreate_v2(void **handle) {
 int cublasDestroy_v2(void *handle) {
     return handle == (void *)0x1 ? 0 : 1;
 }
+
+int cuModuleGetLoadingMode(int *mode) {
+    *mode = 2;
+    return 0;
+}
