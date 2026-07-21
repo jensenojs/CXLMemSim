@@ -286,7 +286,11 @@ unsigned int la_objclose(uintptr_t *cookie) {
 uintptr_t la_symbind64(Elf64_Sym *symbol, unsigned int index, uintptr_t *reference_cookie, uintptr_t *definition_cookie,
                        unsigned int *flags, const char *symbol_name) {
     (void)index;
-    (void)flags;
+    /* Keep the loader's chosen address but request PLT callbacks for the
+     * selected cuBLAS boundary after a lazy or eager symbol bind. */
+    if (flags) {
+        *flags &= ~(LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT);
+    }
     if (symbol_name && symbol_name[0] == 'c' && symbol_name[1] == 'u') {
         emit_symbol_bind(symbol_name, reference_cookie ? *reference_cookie : 0,
                          definition_cookie ? *definition_cookie : 0);
