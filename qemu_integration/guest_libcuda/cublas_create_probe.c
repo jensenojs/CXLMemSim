@@ -165,6 +165,17 @@ static int wait_for_gdb_observer(cublas_create_t create) {
         return -1;
     }
 
+    dlerror();
+    void *ctx_init = dlsym(RTLD_DEFAULT, "cublasLtCtxInit");
+    const char *ctx_init_error = dlerror();
+    Dl_info ctx_init_info = {0};
+    if (!ctx_init || ctx_init_error || dladdr(ctx_init, &ctx_init_info) == 0 || !ctx_init_info.dli_fname ||
+        !ctx_init_info.dli_fbase) {
+        printf("cublas_gdb_sync status=fail reason=dladdr-cublas-lt error=%s\n",
+               ctx_init_error ? ctx_init_error : "unknown");
+        return -1;
+    }
+
     char ready[1024];
     char proceed[1024];
     if (snprintf(ready, sizeof(ready), "%s/ready.json", directory) >= (int)sizeof(ready) ||
@@ -180,15 +191,18 @@ static int wait_for_gdb_observer(cublas_create_t create) {
     }
     char record[1400];
     int length = snprintf(record, sizeof(record),
-                          "{\"schema_version\":1,\"library\":\"%s\",\"load_base\":\"%p\","
-                          "\"cublas_create\":\"%p\"}\n",
-                          info.dli_fname, info.dli_fbase, (const void *)create);
+                          "{\"schema_version\":2,\"library\":\"%s\",\"load_base\":\"%p\","
+                          "\"cublas_create\":\"%p\",\"cublas_lt_library\":\"%s\","
+                          "\"cublas_lt_load_base\":\"%p\",\"cublas_lt_ctx_init\":\"%p\"}\n",
+                          info.dli_fname, info.dli_fbase, (const void *)create, ctx_init_info.dli_fname,
+                          ctx_init_info.dli_fbase, ctx_init);
     if (length < 0 || length >= (int)sizeof(record) || write(descriptor, record, (size_t)length) != length ||
         close(descriptor) != 0) {
         printf("cublas_gdb_sync status=fail reason=ready-write errno=%d\n", errno);
         return -1;
     }
-    printf("cublas_gdb_sync status=ready library=%s load_base=%p\n", info.dli_fname, info.dli_fbase);
+    printf("cublas_gdb_sync status=ready library=%s load_base=%p cublas_lt_library=%s cublas_lt_load_base=%p\n",
+           info.dli_fname, info.dli_fbase, ctx_init_info.dli_fname, ctx_init_info.dli_fbase);
     fflush(stdout);
 
     const struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000000};
