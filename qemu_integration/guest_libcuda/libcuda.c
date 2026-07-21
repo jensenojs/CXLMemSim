@@ -47,7 +47,9 @@ typedef void *CUfunction;
 typedef void *CUstream;
 typedef void *CUevent;
 typedef void *CUarray;
+typedef void *CUgraph;
 typedef void *CUgraphNode;
+typedef void *CUgraphExec;
 typedef void *CUlibrary;
 typedef void *CUkernel;
 typedef int CUjit_option;
@@ -91,6 +93,21 @@ typedef struct {
     size_t WidthInBytes;
     size_t Height;
 } CUDA_MEMCPY2D;
+
+typedef struct {
+    CUfunction func;
+    unsigned int gridDimX;
+    unsigned int gridDimY;
+    unsigned int gridDimZ;
+    unsigned int blockDimX;
+    unsigned int blockDimY;
+    unsigned int blockDimZ;
+    unsigned int sharedMemBytes;
+    void **kernelParams;
+    void **extra;
+    CUkernel kern;
+    CUcontext ctx;
+} CUDA_KERNEL_NODE_PARAMS;
 
 typedef struct {
     void *functionTable;
@@ -460,11 +477,79 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion, cu
     return cuGetProcAddress(symbol, pfn, cudaVersion, flags, symbolStatus);
 }
 
+CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex, size_t *paramOffset,
+                            size_t *paramSize);
+
 CUresult cuGraphKernelNodeGetAttribute(CUgraphNode hNode, CUkernelNodeAttrID attr, void *value_out) {
     (void)hNode;
     (void)value_out;
     DLOG("cuGraphKernelNodeGetAttribute(attr=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", attr);
     return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNode,
+                                        const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+    size_t param_offsets[CXL_MAX_KERNEL_ARGS];
+    size_t param_sizes[CXL_MAX_KERNEL_ARGS];
+    size_t param_extent = 0;
+    uint32_t num_args = 0;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!hGraphExec || !hNode || !nodeParams || !nodeParams->func)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!nodeParams->kernelParams && nodeParams->extra)
+        return CUDA_ERROR_NOT_SUPPORTED;
+
+    while (num_args < CXL_MAX_KERNEL_ARGS) {
+        size_t offset = 0;
+        size_t size = 0;
+        CUresult result = cuFuncGetParamInfo(nodeParams->func, num_args, &offset, &size);
+
+        if (result == CUDA_ERROR_INVALID_VALUE)
+            break;
+        if (result != CUDA_SUCCESS)
+            return result;
+        if (!nodeParams->kernelParams || !nodeParams->kernelParams[num_args] ||
+            offset > CXL_GPU_DATA_SIZE || size > CXL_GPU_DATA_SIZE - offset)
+            return CUDA_ERROR_INVALID_VALUE;
+        param_offsets[num_args] = offset;
+        param_sizes[num_args] = size;
+        if (offset + size > param_extent)
+            param_extent = offset + size;
+        num_args++;
+    }
+    if (num_args == CXL_MAX_KERNEL_ARGS) {
+        size_t offset = 0;
+        size_t size = 0;
+        if (cuFuncGetParamInfo(nodeParams->func, num_args, &offset, &size) == CUDA_SUCCESS)
+            return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    uint8_t *param_buffer = NULL;
+    if (param_extent) {
+        param_buffer = calloc(1, param_extent);
+        if (!param_buffer)
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        for (uint32_t i = 0; i < num_args; i++)
+            memcpy(param_buffer + param_offsets[i], nodeParams->kernelParams[i], param_sizes[i]);
+    }
+
+    cmd_lock();
+    if (param_extent)
+        data_write(0, param_buffer, param_extent);
+    free(param_buffer);
+    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hGraphExec));
+    reg_write64(CXL_GPU_REG_PARAM1, cxl_gpu_id_from_handle(hNode));
+    reg_write64(CXL_GPU_REG_PARAM2, cxl_gpu_id_from_handle(nodeParams->func));
+    reg_write64(CXL_GPU_REG_PARAM3, ((uint64_t)nodeParams->gridDimY << 32) | nodeParams->gridDimX);
+    reg_write64(CXL_GPU_REG_PARAM4, ((uint64_t)nodeParams->blockDimX << 32) | nodeParams->gridDimZ);
+    reg_write64(CXL_GPU_REG_PARAM5, ((uint64_t)nodeParams->blockDimZ << 32) | nodeParams->blockDimY);
+    reg_write64(CXL_GPU_REG_PARAM6, ((uint64_t)num_args << 32) | nodeParams->sharedMemBytes);
+    reg_write64(CXL_GPU_REG_PARAM7, param_extent);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_EXEC_KERNEL_NODE_SET_PARAMS);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev);
