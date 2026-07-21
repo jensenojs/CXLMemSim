@@ -110,8 +110,10 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
   closed；最后一项不能进入 host runtime 搜索路径。它不读写或调用 private export-table slot。
 - `run_private_export_probe.sh`在 L40 上观察真实 CUDA Runtime 自然到达的 export table。每条受明细上限接纳的
   调用以 sequence 保存 entry registers 与 return `RAX`；capture 只在显式 UUID、slot 和可选 selector 匹配时
-  读取一个或多个声明的整数参数寄存器窗口。它不主动调用未知 slot，不沿窗口内容继续解引用；负结果只表示
-  给定 trigger 没有到达该边界。
+  读取一个或多个声明的整数参数寄存器窗口。resolver 模式额外观察真实 Driver 对一个声明符号的
+  `cuGetProcAddress` 查询，保存返回函数地址相对 exact `libcuda.so.1` 的 image offset、与公开符号地址的比较、
+  caller frame 映射，以及经该地址自然发生的调用和返回。它不主动调用未知 slot 或 resolver 地址，不沿窗口内容
+  继续解引用；负结果只表示给定 trigger 没有到达该边界。
 - `run_cuda_debug_capture.sh`对程序或 exact ELF + core 保存 debugger、命令文件、输入 hash、完整 transcript
   与退出码。core 保持只读。host Runtime/Driver 调用链用 Python-enabled `gdb`；只有问题涉及 device code、
   kernel state、device memory 或 SASS PC 时才选择 `cuda-gdb`。

@@ -232,5 +232,122 @@ class DriverVerificationTests(unittest.TestCase):
             self.assertEqual(summary["driver_call_records"], 1)
 
 
+class ResolverVerificationTests(unittest.TestCase):
+    def test_accepts_resolved_pointer_and_one_natural_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            config_path = output / "probe-config.json"
+            driver_path = str(pathlib.Path("/bin/true").resolve(strict=True))
+            driver_mapping = {
+                "realpath": driver_path,
+                "sha256": "driver-sha",
+                "build_id": "driver-build",
+                "image_offset": "0x1234",
+            }
+            caller_mapping = {
+                "realpath": "/opt/libcudart.so.12",
+                "sha256": "caller-sha",
+                "build_id": "caller-build",
+                "image_offset": "0x5678",
+            }
+            code_mapping = {
+                "realpath": "/opt/libcublasLt.so.12",
+                "sha256": "code-sha",
+                "build_id": "code-build",
+                "image_offset": "0x9abc",
+            }
+            config = {
+                "output_dir": str(output),
+                "mode": "discovery",
+                "uuid": None,
+                "slot": None,
+                "selector": None,
+                "driver_observation": None,
+                "resolver_observation": {"symbol": "cuLibraryLoadData", "event_limit": 4},
+                "inferior_io": None,
+            }
+            identity = {
+                "driver": {"path": driver_path, "sha256": "driver-sha", "build_id": "driver-build"}
+            }
+            query = {
+                "kind": "resolver_query",
+                "sequence": 1,
+                "entry_point": "cuGetProcAddress",
+                "symbol": "cuLibraryLoadData",
+                "symbol_pointer": "0x70000000",
+                "pfn_output_address": "0x70001000",
+                "pfn_before": "0x0",
+                "cuda_version": 12090,
+                "flags": "0x0",
+                "function_mapping": driver_mapping,
+                "caller_mapping": caller_mapping,
+            }
+            query_return = {
+                "kind": "resolver_return",
+                "sequence": 1,
+                "entry_point": "cuGetProcAddress",
+                "symbol": "cuLibraryLoadData",
+                "return_rax": "0x0",
+                "pfn_after": "0x71001234",
+                "resolved_mapping": driver_mapping,
+                "public_symbol_address": "0x71005678",
+                "public_symbol_mapping": driver_mapping,
+                "pointer_equals_public_symbol": False,
+            }
+            call = {
+                "kind": "resolver_call",
+                "sequence": 1,
+                "symbol": "cuLibraryLoadData",
+                "function_pointer": "0x71001234",
+                "function_mapping": driver_mapping,
+                "caller_mapping": caller_mapping,
+                "code_pointer": "0x72009abc",
+                "code_mapping": code_mapping,
+                "output_pointer_address": "0x70002000",
+                "output_before": "0x0",
+            }
+            call_return = {
+                "kind": "resolver_call_return",
+                "sequence": 1,
+                "symbol": "cuLibraryLoadData",
+                "return_rax": "0x0",
+                "output_after": "0x73000000",
+            }
+            status = {
+                "exit_code": 0,
+                "fatal_errors": [],
+                "unreturned_sequences": [],
+                "driver_call_sequence": 0,
+                "driver_detailed_events": 0,
+                "driver_call_counts": [],
+                "driver_contributor_counts": [],
+                "driver_event_limit_exhausted": False,
+                "driver_unreturned_sequences": [],
+                "resolver_query_records": 1,
+                "resolver_call_records": 1,
+                "resolver_event_limit": 4,
+                "resolver_event_limit_exhausted": False,
+                "resolver_unreturned_queries": [],
+                "resolver_unreturned_calls": [],
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            (output / "identity.json").write_text(json.dumps(identity), encoding="utf-8")
+            for name in ("tables.jsonl", "calls.jsonl", "returns.jsonl", "captures.jsonl"):
+                (output / name).write_text("", encoding="utf-8")
+            (output / "resolver-queries.jsonl").write_text(json.dumps(query) + "\n", encoding="utf-8")
+            (output / "resolver-returns.jsonl").write_text(json.dumps(query_return) + "\n", encoding="utf-8")
+            (output / "resolver-calls.jsonl").write_text(json.dumps(call) + "\n", encoding="utf-8")
+            (output / "resolver-call-returns.jsonl").write_text(json.dumps(call_return) + "\n", encoding="utf-8")
+            (output / "gdb-status.json").write_text(json.dumps(status), encoding="utf-8")
+
+            result = verify(SimpleNamespace(config=str(config_path)))
+
+            self.assertEqual(result, 0)
+            summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["status"], "pass")
+            self.assertEqual(summary["resolver_query_records"], 1)
+            self.assertEqual(summary["resolver_call_records"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

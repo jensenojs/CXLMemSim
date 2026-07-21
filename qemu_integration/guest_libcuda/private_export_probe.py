@@ -31,13 +31,13 @@ INTEGER_REGISTERS = ("rdi", "rsi", "rdx", "rcx", "r8", "r9", "rsp")
 DRIVER_ARGUMENT_REGISTERS = frozenset(INTEGER_REGISTERS[:-1])
 HINT = """private_export_probe_hint=self=qemu_integration/guest_libcuda/private_export_probe.py
 private_export_probe_hint=problem=CUDA Runtime private export tables are undocumented; a NULL guest entry and a host table address reveal neither the slot signature nor the selector-specific state transition needed for a safe shim implementation
-private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; an optional declared public Driver symbol records its own complete entry/return stream and binds a code pointer to the inferior's exact mapped ELF; private captures remain a separate UUID/slot/selector stream
+private_export_probe_hint=mental_model=Python-enabled GDB observes real cuGetExportTable returns and naturally executed table-entry calls; an optional public Driver stream records direct symbol calls; an optional resolver stream records real cuGetProcAddress output and natural calls through that exact returned address; private captures remain a separate UUID/slot/selector stream
 private_export_probe_hint=role=implement the debugger-side observer and machine-readable table/call/capture event model used by multiple public CUDA triggers
 private_export_probe_hint=use_when=a public CUDA API or exact application trigger naturally reaches a private table path on the matching real NVIDIA Driver/Runtime and the unknown ABI must be constrained before changing the guest shim
-private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows, one POINTER_OUT:SIZE_OUT:MAX_BYTES output-buffer projection, private event limit, one declared public Driver symbol with code/output registers and its own event limit, and explicit inferior I/O separation
-private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,driver-calls.jsonl,driver-returns.jsonl,gdb-status.json,summary.json and GDB-visible diagnostic messages; separated runs additionally preserve inferior-run.gdb,inferior.stdout,inferior.stderr
+private_export_probe_hint=inputs=live GDB inferior running an explicit trigger; mode discovery or capture; optional UUID, slot, selector, bounded register-memory windows, one POINTER_OUT:SIZE_OUT:MAX_BYTES output-buffer projection, private event limit, one declared public Driver symbol with code/output registers, one declared cuGetProcAddress target symbol, bounded event limits, and explicit inferior I/O separation
+private_export_probe_hint=outputs=identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,optional driver and resolver JSONL streams,gdb-status.json,summary.json and GDB-visible diagnostic messages; separated runs additionally preserve inferior-run.gdb,inferior.stdout,inferior.stderr
 private_export_probe_hint=interpret=calls and returns with the same sequence are one naturally executed private call; capture reached additionally requires the declared UUID/slot/selector and bounded memory pair; not_reached supplies no target ABI authority
-private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, bounded argument-memory facts and, when declared, one public Driver call stream with exact mapped code origin and output-handle before/after
+private_export_probe_hint=proves=which private export tables and slots the real Runtime naturally reached, their observed entry registers and return RAX, bounded argument-memory facts, direct public Driver calls, and the exact Driver function address returned for one resolver query together with natural calls through it
 private_export_probe_hint=does_not_prove=the complete function signature, semantics outside observed arguments/state, safety of active fuzzing, guest shim correctness, Type-2/Kimi correctness or TPS
 private_export_probe_hint=next=union results from faithful public triggers; for a Kimi blocker use the smallest reached entry/return oracle, and keep unknown or unreached slots NULL and explicit
 """
@@ -340,6 +340,10 @@ def prepare(args: argparse.Namespace) -> int:
         raise RuntimeError("--driver-event-limit requires a public Driver observation")
     if args.driver_symbol is not None and (args.driver_event_limit is None or args.driver_event_limit == 0):
         raise RuntimeError("public Driver observation requires a positive --driver-event-limit")
+    if args.resolver_symbol is None and args.resolver_event_limit is not None:
+        raise RuntimeError("--resolver-event-limit requires --resolver-symbol")
+    if args.resolver_symbol is not None and (args.resolver_event_limit is None or args.resolver_event_limit == 0):
+        raise RuntimeError("resolver observation requires a positive --resolver-event-limit")
 
     source_root = pathlib.Path(args.source_root).resolve(strict=True)
     trigger = resolve_trigger(trigger_argv[0])
@@ -375,6 +379,7 @@ def prepare(args: argparse.Namespace) -> int:
         "selector_max": args.selector_max,
         "event_limit": args.event_limit,
         "driver_observation": None,
+        "resolver_observation": None,
         "inferior_io": None,
     }
     if args.driver_symbol is not None:
@@ -383,6 +388,11 @@ def prepare(args: argparse.Namespace) -> int:
             "code_register": args.driver_code_register,
             "output_register": args.driver_output_register,
             "event_limit": args.driver_event_limit,
+        }
+    if args.resolver_symbol is not None:
+        config["resolver_observation"] = {
+            "symbol": args.resolver_symbol,
+            "event_limit": args.resolver_event_limit,
         }
     if args.separate_inferior_io:
         stdout = output / "inferior.stdout"
@@ -437,6 +447,17 @@ def verify(args: argparse.Namespace) -> int:
     driver_calls = [record for record in driver_call_stream if record.get("kind") == "driver_call"]
     driver_call_errors = [record for record in driver_call_stream if record.get("kind") != "driver_call"]
     driver_returns = read_jsonl(output / "driver-returns.jsonl") if driver_observation is not None else []
+    resolver_observation = config.get("resolver_observation")
+    resolver_query_stream = read_jsonl(output / "resolver-queries.jsonl") if resolver_observation is not None else []
+    resolver_queries = [record for record in resolver_query_stream if record.get("kind") == "resolver_query"]
+    resolver_query_errors = [record for record in resolver_query_stream if record.get("kind") != "resolver_query"]
+    resolver_returns = read_jsonl(output / "resolver-returns.jsonl") if resolver_observation is not None else []
+    resolver_call_stream = read_jsonl(output / "resolver-calls.jsonl") if resolver_observation is not None else []
+    resolver_calls = [record for record in resolver_call_stream if record.get("kind") == "resolver_call"]
+    resolver_call_errors = [record for record in resolver_call_stream if record.get("kind") != "resolver_call"]
+    resolver_call_returns = (
+        read_jsonl(output / "resolver-call-returns.jsonl") if resolver_observation is not None else []
+    )
     gdb_status = json.loads((output / "gdb-status.json").read_text(encoding="utf-8"))
     table_errors = [record for record in tables if record.get("kind") == "table_error"]
     identity_errors = [record for record in tables if record.get("kind") == "identity_error"]
@@ -445,6 +466,7 @@ def verify(args: argparse.Namespace) -> int:
     return_sequences = {record.get("sequence") for record in returns}
     pair_errors: list[str] = []
     driver_errors: list[str] = []
+    resolver_errors: list[str] = []
     io_errors: list[str] = []
     inferior_io: dict[str, Any] | None = None
     if None in call_sequences or None in return_sequences:
@@ -519,6 +541,127 @@ def verify(args: argparse.Namespace) -> int:
             driver_errors.append("public Driver calls remained unreturned at process exit")
         if gdb_status.get("driver_event_limit_exhausted"):
             driver_errors.append("public Driver observation exceeded its declared event limit")
+    if resolver_observation is not None:
+        expected_driver = identity["driver"]
+        expected_driver_path = str(pathlib.Path(expected_driver["path"]).resolve(strict=True))
+        query_sequences = {record.get("sequence") for record in resolver_queries}
+        query_return_sequences = {record.get("sequence") for record in resolver_returns}
+        call_sequences = {record.get("sequence") for record in resolver_calls}
+        call_return_sequences = {record.get("sequence") for record in resolver_call_returns}
+        if resolver_query_errors:
+            resolver_errors.append(f"resolver observation emitted {len(resolver_query_errors)} query-error records")
+        if resolver_call_errors:
+            resolver_errors.append(f"resolver observation emitted {len(resolver_call_errors)} call-error records")
+        if not resolver_queries:
+            resolver_errors.append(f"declared resolver query was not reached: {resolver_observation['symbol']}")
+        for name, records, sequences in (
+            ("query", resolver_queries, query_sequences),
+            ("query return", resolver_returns, query_return_sequences),
+            ("natural call", resolver_calls, call_sequences),
+            ("natural call return", resolver_call_returns, call_return_sequences),
+        ):
+            if None in sequences:
+                resolver_errors.append(f"resolver {name} record lacks a sequence")
+            if len(sequences) != len(records):
+                resolver_errors.append(f"resolver {name} sequence values are not unique")
+        if query_sequences != query_return_sequences:
+            resolver_errors.append("resolver query and return sequences differ")
+        if call_sequences != call_return_sequences:
+            resolver_errors.append("resolver natural call and return sequences differ")
+        for record in resolver_queries:
+            if record.get("symbol") != resolver_observation["symbol"]:
+                resolver_errors.append(f"unexpected resolver query symbol: {record.get('symbol')}")
+            for mapping_name in ("function_mapping", "caller_mapping"):
+                mapping = record.get(mapping_name)
+                if not isinstance(mapping, dict):
+                    resolver_errors.append(f"resolver query {record.get('sequence')} lacks {mapping_name}")
+                    continue
+                if mapping_name == "function_mapping":
+                    for field, expected_value in (
+                        ("realpath", expected_driver_path),
+                        ("sha256", expected_driver["sha256"]),
+                        ("build_id", expected_driver["build_id"]),
+                    ):
+                        if mapping.get(field) != expected_value:
+                            resolver_errors.append(
+                                f"resolver query {record.get('sequence')} function {field} mismatch: "
+                                f"{mapping.get(field)} != {expected_value}"
+                            )
+            for field in ("symbol_pointer", "pfn_output_address", "pfn_before", "flags"):
+                value = record.get(field)
+                if not isinstance(value, str) or re.fullmatch(r"0x[0-9a-f]+", value) is None:
+                    resolver_errors.append(f"resolver query {record.get('sequence')} has invalid {field}")
+            if not isinstance(record.get("cuda_version"), int) or isinstance(record.get("cuda_version"), bool):
+                resolver_errors.append(f"resolver query {record.get('sequence')} has invalid cuda_version")
+        for record in resolver_returns:
+            sequence = record.get("sequence")
+            if record.get("kind") != "resolver_return" or record.get("symbol") != resolver_observation["symbol"]:
+                resolver_errors.append(f"resolver return {sequence} has an unexpected identity")
+            for field in ("return_rax", "pfn_after", "public_symbol_address"):
+                value = record.get(field)
+                if not isinstance(value, str) or re.fullmatch(r"0x[0-9a-f]+", value) is None:
+                    resolver_errors.append(f"resolver return {sequence} has invalid {field}")
+            if record.get("return_rax") == "0x0":
+                if record.get("pfn_after") == "0x0":
+                    resolver_errors.append(f"resolver return {sequence} succeeded with a NULL function pointer")
+                for mapping_name in ("resolved_mapping", "public_symbol_mapping"):
+                    mapping = record.get(mapping_name)
+                    if not isinstance(mapping, dict):
+                        resolver_errors.append(f"resolver return {sequence} lacks {mapping_name}")
+                        continue
+                    for field, expected_value in (
+                        ("realpath", expected_driver_path),
+                        ("sha256", expected_driver["sha256"]),
+                        ("build_id", expected_driver["build_id"]),
+                    ):
+                        if mapping.get(field) != expected_value:
+                            resolver_errors.append(
+                                f"resolver return {sequence} {mapping_name} {field} mismatch: "
+                                f"{mapping.get(field)} != {expected_value}"
+                            )
+                if not isinstance(record.get("pointer_equals_public_symbol"), bool):
+                    resolver_errors.append(f"resolver return {sequence} lacks pointer comparison")
+        for record in resolver_calls:
+            sequence = record.get("sequence")
+            if record.get("symbol") != resolver_observation["symbol"]:
+                resolver_errors.append(f"resolver natural call {sequence} has an unexpected symbol")
+            for mapping_name in ("function_mapping", "caller_mapping", "code_mapping"):
+                if not isinstance(record.get(mapping_name), dict):
+                    resolver_errors.append(f"resolver natural call {sequence} lacks {mapping_name}")
+            function_mapping = record.get("function_mapping")
+            if isinstance(function_mapping, dict):
+                for field, expected_value in (
+                    ("realpath", expected_driver_path),
+                    ("sha256", expected_driver["sha256"]),
+                    ("build_id", expected_driver["build_id"]),
+                ):
+                    if function_mapping.get(field) != expected_value:
+                        resolver_errors.append(
+                            f"resolver natural call {sequence} function {field} mismatch: "
+                            f"{function_mapping.get(field)} != {expected_value}"
+                        )
+            for field in ("function_pointer", "code_pointer", "output_pointer_address", "output_before"):
+                value = record.get(field)
+                if not isinstance(value, str) or re.fullmatch(r"0x[0-9a-f]+", value) is None:
+                    resolver_errors.append(f"resolver natural call {sequence} has invalid {field}")
+        for record in resolver_call_returns:
+            sequence = record.get("sequence")
+            if record.get("kind") != "resolver_call_return" or record.get("symbol") != resolver_observation["symbol"]:
+                resolver_errors.append(f"resolver natural return {sequence} has an unexpected identity")
+            for field in ("return_rax", "output_after"):
+                value = record.get(field)
+                if not isinstance(value, str) or re.fullmatch(r"0x[0-9a-f]+", value) is None:
+                    resolver_errors.append(f"resolver natural return {sequence} has invalid {field}")
+        if gdb_status.get("resolver_query_records") != len(resolver_query_stream):
+            resolver_errors.append("resolver query count differs from raw records")
+        if gdb_status.get("resolver_call_records") != len(resolver_call_stream):
+            resolver_errors.append("resolver natural call count differs from raw records")
+        if gdb_status.get("resolver_event_limit_exhausted"):
+            resolver_errors.append("resolver observation exceeded its declared event limit")
+        if gdb_status.get("resolver_unreturned_queries"):
+            resolver_errors.append("resolver queries remained unreturned at process exit")
+        if gdb_status.get("resolver_unreturned_calls"):
+            resolver_errors.append("resolved natural calls remained unreturned at process exit")
     if config.get("inferior_io") is not None:
         inferior_io = {"mode": config["inferior_io"]["mode"]}
         for stream_name in ("stdout", "stderr"):
@@ -541,7 +684,7 @@ def verify(args: argparse.Namespace) -> int:
         capture_status = "observed" if calls else "not_reached"
     else:
         capture_status = "reached" if captures else "not_reached"
-    if table_errors or identity_errors or debugger_errors or pair_errors or driver_errors or io_errors:
+    if table_errors or identity_errors or debugger_errors or pair_errors or driver_errors or resolver_errors or io_errors:
         status = "fail_closed"
     elif gdb_status.get("exit_code") != 0:
         status = "trigger_failed"
@@ -559,6 +702,13 @@ def verify(args: argparse.Namespace) -> int:
         "driver_call_error_records": driver_call_errors,
         "driver_return_records": len(driver_returns),
         "driver_observation": driver_observation,
+        "resolver_observation": resolver_observation,
+        "resolver_query_records": len(resolver_queries),
+        "resolver_query_error_records": resolver_query_errors,
+        "resolver_return_records": len(resolver_returns),
+        "resolver_call_records": len(resolver_calls),
+        "resolver_call_error_records": resolver_call_errors,
+        "resolver_call_return_records": len(resolver_call_returns),
         "gdb": gdb_status,
         "status": status,
         "capture_status": capture_status,
@@ -567,6 +717,7 @@ def verify(args: argparse.Namespace) -> int:
         "debugger_errors": debugger_errors,
         "pair_errors": pair_errors,
         "driver_errors": driver_errors,
+        "resolver_errors": resolver_errors,
         "io_errors": io_errors,
         "inferior_io": inferior_io,
     }
@@ -585,6 +736,14 @@ def debugger_failure(args: argparse.Namespace) -> int:
     if config.get("driver_observation") is not None:
         for name in ("driver-calls.jsonl", "driver-returns.jsonl"):
             (output / name).touch(exist_ok=True)
+    if config.get("resolver_observation") is not None:
+        for name in (
+            "resolver-queries.jsonl",
+            "resolver-returns.jsonl",
+            "resolver-calls.jsonl",
+            "resolver-call-returns.jsonl",
+        ):
+            (output / name).touch(exist_ok=True)
     json_dump(
         output / "gdb-status.json",
         {
@@ -599,9 +758,17 @@ def debugger_failure(args: argparse.Namespace) -> int:
             "driver_call_counts": [],
             "driver_contributor_counts": [],
             "driver_event_limit": None if config.get("driver_observation") is None else config["driver_observation"]["event_limit"],
-            "driver_event_limit_exhausted": False,
-            "driver_unreturned_sequences": [],
-        },
+                "driver_event_limit_exhausted": False,
+                "driver_unreturned_sequences": [],
+                "resolver_query_records": 0,
+                "resolver_call_records": 0,
+                "resolver_event_limit": None
+                if config.get("resolver_observation") is None
+                else config["resolver_observation"]["event_limit"],
+                "resolver_event_limit_exhausted": False,
+                "resolver_unreturned_queries": [],
+                "resolver_unreturned_calls": [],
+            },
     )
     return 0
 
@@ -648,6 +815,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     prepare_parser.add_argument("--driver-code-register", type=parse_driver_register)
     prepare_parser.add_argument("--driver-output-register", type=parse_driver_register)
     prepare_parser.add_argument("--driver-event-limit", type=parse_nonnegative)
+    prepare_parser.add_argument("--resolver-symbol", type=parse_driver_symbol)
+    prepare_parser.add_argument("--resolver-event-limit", type=parse_nonnegative)
     prepare_parser.add_argument("--separate-inferior-io", action="store_true")
     prepare_parser.add_argument("trigger", nargs=argparse.REMAINDER)
     prepare_parser.set_defaults(handler=prepare)
@@ -703,6 +872,14 @@ if gdb is not None:
         driver_contributor_counts: dict[tuple[str, str, str], int] = field(default_factory=dict)
         driver_unreturned_sequences: set[int] = field(default_factory=set)
         driver_event_limit_exhausted: bool = False
+        resolver_query_sequence: int = 0
+        resolver_call_sequence: int = 0
+        resolver_query_records: int = 0
+        resolver_call_records: int = 0
+        resolver_event_limit_exhausted: bool = False
+        resolver_unreturned_queries: set[int] = field(default_factory=set)
+        resolver_unreturned_calls: set[int] = field(default_factory=set)
+        resolver_breakpoints: dict[int, Any] = field(default_factory=dict)
         driver_identity_cache: dict[str, dict[str, str]] = field(default_factory=dict)
         elf_load_segment_cache: dict[str, list[dict[str, int]]] = field(default_factory=dict)
         fatal_errors: list[str] = field(default_factory=list)
@@ -728,6 +905,20 @@ if gdb is not None:
 
         def append_driver_return(self, record: dict[str, Any]) -> None:
             append_jsonl(self.output / "driver-returns.jsonl", record)
+
+        def append_resolver_query(self, record: dict[str, Any]) -> None:
+            append_jsonl(self.output / "resolver-queries.jsonl", record)
+            self.resolver_query_records += 1
+
+        def append_resolver_return(self, record: dict[str, Any]) -> None:
+            append_jsonl(self.output / "resolver-returns.jsonl", record)
+
+        def append_resolver_call(self, record: dict[str, Any]) -> None:
+            append_jsonl(self.output / "resolver-calls.jsonl", record)
+            self.resolver_call_records += 1
+
+        def append_resolver_call_return(self, record: dict[str, Any]) -> None:
+            append_jsonl(self.output / "resolver-call-returns.jsonl", record)
 
         def register_table(self, uuid: str, table: int) -> None:
             try:
@@ -792,6 +983,18 @@ if gdb is not None:
         def read_word(self, address: int) -> int:
             return int.from_bytes(self.inferior().read_memory(address, POINTER_BYTES).tobytes(), "little")
 
+        def read_u32(self, address: int) -> int:
+            return int.from_bytes(self.inferior().read_memory(address, 4).tobytes(), "little")
+
+        def read_c_string(self, address: int, maximum: int = 256) -> str:
+            if address == 0:
+                raise RuntimeError("NULL C string")
+            raw = self.inferior().read_memory(address, maximum).tobytes()
+            terminator = raw.find(b"\0")
+            if terminator < 0:
+                raise RuntimeError(f"C string terminator missing within {maximum} bytes")
+            return raw[:terminator].decode("utf-8")
+
         def read_bytes(self, address: int, count: int) -> dict[str, Any]:
             if address == 0:
                 return {"status": "unavailable", "reason": "null"}
@@ -839,11 +1042,22 @@ if gdb is not None:
         def registers(self) -> dict[str, str]:
             return {name: hex_address(self.register(name)) or "0x0" for name in INTEGER_REGISTERS}
 
-        def caller(self) -> str | None:
-            try:
-                return hex_address(self.read_word(self.register("rsp")))
-            except Exception:
-                return None
+        def caller_mapping(self, frame: Any) -> dict[str, Any]:
+            caller = frame.older()
+            if caller is None:
+                raise RuntimeError("GDB frame has no caller")
+            pc = int(caller.pc())
+            if pc == 0:
+                raise RuntimeError("GDB caller frame has a zero PC")
+            return self.mapped_elf_identity(pc)
+
+        def public_symbol(self, symbol: str) -> tuple[int, dict[str, Any]]:
+            address = int(gdb.parse_and_eval(f"(void *)&{symbol}"))
+            if address == 0:
+                raise RuntimeError(f"public Driver symbol resolved to NULL: {symbol}")
+            mapping = self.mapped_elf_identity(address)
+            self.validate_driver_function_mapping(mapping)
+            return address, mapping
 
         def read_proc_maps(self) -> list[dict[str, Any]]:
             pid = self.inferior().pid
@@ -911,11 +1125,13 @@ if gdb is not None:
 
             self.driver_detailed_events += 1
             registers = self.registers()
+            frame = gdb.newest_frame()
             code_pointer = int(registers[declaration["code_register"]], 16)
             output_pointer_address = int(registers[declaration["output_register"]], 16)
             try:
                 function_mapping = self.mapped_elf_identity(self.register("pc"))
                 self.validate_driver_function_mapping(function_mapping)
+                caller_mapping = self.caller_mapping(frame)
                 code_mapping = self.mapped_elf_identity(code_pointer)
                 output_before = self.read_word(output_pointer_address)
                 contributor_key = (
@@ -933,7 +1149,7 @@ if gdb is not None:
                         "sequence": sequence,
                         "symbol": symbol,
                         "thread": None if thread is None else thread.global_num,
-                        "caller": self.caller(),
+                        "caller_mapping": caller_mapping,
                         "entry_registers": registers,
                         "code_pointer": hex_address(code_pointer),
                         "output_pointer_address": hex_address(output_pointer_address),
@@ -945,7 +1161,7 @@ if gdb is not None:
                 self.driver_unreturned_sequences.add(sequence)
                 PublicDriverReturnBreakpoint(
                     self,
-                    gdb.newest_frame(),
+                    frame,
                     sequence,
                     symbol,
                     output_pointer_address,
@@ -958,7 +1174,6 @@ if gdb is not None:
                         "kind": "driver_call_error",
                         "sequence": sequence,
                         "symbol": symbol,
-                        "caller": self.caller(),
                         "entry_registers": registers,
                         "code_pointer": hex_address(code_pointer),
                         "output_pointer_address": hex_address(output_pointer_address),
@@ -983,6 +1198,212 @@ if gdb is not None:
                 }
             )
             self.driver_unreturned_sequences.discard(sequence)
+
+        def observe_resolver_entry(self, entry_point: str) -> None:
+            declaration = self.config["resolver_observation"]
+            frame = gdb.newest_frame()
+            registers = self.registers()
+            symbol_pointer = int(registers["rdi"], 16)
+            try:
+                symbol = self.read_c_string(symbol_pointer)
+            except Exception as error:
+                message = f"{entry_point} symbol observation failed: {error}"
+                self.fatal_errors.append(message)
+                self.append_resolver_query(
+                    {
+                        "kind": "resolver_query_error",
+                        "entry_point": entry_point,
+                        "symbol_pointer": hex_address(symbol_pointer),
+                        "entry_registers": registers,
+                        "error": str(error),
+                    }
+                )
+                return
+            if symbol != declaration["symbol"]:
+                return
+
+            self.resolver_query_sequence += 1
+            sequence = self.resolver_query_sequence
+            if sequence > declaration["event_limit"]:
+                self.resolver_event_limit_exhausted = True
+                return
+            pfn_output_address = int(registers["rsi"], 16)
+            symbol_status_address = int(registers["r8"], 16)
+            try:
+                function_mapping = self.mapped_elf_identity(self.register("pc"))
+                self.validate_driver_function_mapping(function_mapping)
+                caller_mapping = self.caller_mapping(frame)
+                pfn_before = self.read_word(pfn_output_address)
+                symbol_status_before = None if symbol_status_address == 0 else self.read_u32(symbol_status_address)
+                thread = gdb.selected_thread()
+                self.append_resolver_query(
+                    {
+                        "kind": "resolver_query",
+                        "sequence": sequence,
+                        "entry_point": entry_point,
+                        "symbol": symbol,
+                        "thread": None if thread is None else thread.global_num,
+                        "symbol_pointer": hex_address(symbol_pointer),
+                        "pfn_output_address": hex_address(pfn_output_address),
+                        "pfn_before": hex_address(pfn_before),
+                        "cuda_version": int(registers["rdx"], 16),
+                        "flags": registers["rcx"],
+                        "symbol_status_address": hex_address(symbol_status_address),
+                        "symbol_status_before": None
+                        if symbol_status_before is None
+                        else hex_address(symbol_status_before),
+                        "entry_registers": registers,
+                        "function_mapping": function_mapping,
+                        "caller_mapping": caller_mapping,
+                    }
+                )
+                self.resolver_unreturned_queries.add(sequence)
+                ResolverReturnBreakpoint(
+                    self,
+                    frame,
+                    sequence,
+                    entry_point,
+                    symbol,
+                    pfn_output_address,
+                    symbol_status_address,
+                )
+            except Exception as error:
+                message = f"{entry_point} target query failed at sequence {sequence}: {error}"
+                self.fatal_errors.append(message)
+                self.append_resolver_query(
+                    {
+                        "kind": "resolver_query_error",
+                        "sequence": sequence,
+                        "entry_point": entry_point,
+                        "symbol": symbol,
+                        "symbol_pointer": hex_address(symbol_pointer),
+                        "pfn_output_address": hex_address(pfn_output_address),
+                        "symbol_status_address": hex_address(symbol_status_address),
+                        "entry_registers": registers,
+                        "error": str(error),
+                    }
+                )
+
+        def observe_resolver_return(
+            self,
+            sequence: int,
+            entry_point: str,
+            symbol: str,
+            pfn_output_address: int,
+            symbol_status_address: int,
+        ) -> None:
+            try:
+                return_rax = self.register("rax")
+                pfn_after = self.read_word(pfn_output_address)
+                symbol_status_after = None if symbol_status_address == 0 else self.read_u32(symbol_status_address)
+                public_symbol_address, public_symbol_mapping = self.public_symbol(symbol)
+                resolved_mapping = None
+                pointer_equals_public_symbol = None
+                if return_rax == 0:
+                    if pfn_after == 0:
+                        raise RuntimeError("successful resolver return produced a NULL function pointer")
+                    resolved_mapping = self.mapped_elf_identity(pfn_after)
+                    self.validate_driver_function_mapping(resolved_mapping)
+                    pointer_equals_public_symbol = pfn_after == public_symbol_address
+                    if pfn_after not in self.resolver_breakpoints:
+                        self.resolver_breakpoints[pfn_after] = ResolverFunctionBreakpoint(self, pfn_after, symbol)
+                self.append_resolver_return(
+                    {
+                        "kind": "resolver_return",
+                        "sequence": sequence,
+                        "entry_point": entry_point,
+                        "symbol": symbol,
+                        "return_rax": hex_address(return_rax),
+                        "pfn_after": hex_address(pfn_after),
+                        "symbol_status_after": None
+                        if symbol_status_after is None
+                        else hex_address(symbol_status_after),
+                        "resolved_mapping": resolved_mapping,
+                        "public_symbol_address": hex_address(public_symbol_address),
+                        "public_symbol_mapping": public_symbol_mapping,
+                        "pointer_equals_public_symbol": pointer_equals_public_symbol,
+                    }
+                )
+            except Exception as error:
+                self.fatal_errors.append(f"{entry_point} return observation failed at sequence {sequence}: {error}")
+                self.append_resolver_return(
+                    {
+                        "kind": "resolver_return_error",
+                        "sequence": sequence,
+                        "entry_point": entry_point,
+                        "symbol": symbol,
+                        "error": str(error),
+                    }
+                )
+            finally:
+                self.resolver_unreturned_queries.discard(sequence)
+
+        def observe_resolved_function_entry(self, address: int, symbol: str) -> None:
+            declaration = self.config["resolver_observation"]
+            self.resolver_call_sequence += 1
+            sequence = self.resolver_call_sequence
+            if sequence > declaration["event_limit"]:
+                self.resolver_event_limit_exhausted = True
+                return
+            frame = gdb.newest_frame()
+            registers = self.registers()
+            code_pointer = int(registers["rsi"], 16)
+            output_pointer_address = int(registers["rdi"], 16)
+            try:
+                function_mapping = self.mapped_elf_identity(address)
+                self.validate_driver_function_mapping(function_mapping)
+                caller_mapping = self.caller_mapping(frame)
+                code_mapping = self.mapped_elf_identity(code_pointer)
+                output_before = self.read_word(output_pointer_address)
+                thread = gdb.selected_thread()
+                self.append_resolver_call(
+                    {
+                        "kind": "resolver_call",
+                        "sequence": sequence,
+                        "symbol": symbol,
+                        "thread": None if thread is None else thread.global_num,
+                        "function_pointer": hex_address(address),
+                        "entry_registers": registers,
+                        "function_mapping": function_mapping,
+                        "caller_mapping": caller_mapping,
+                        "code_pointer": hex_address(code_pointer),
+                        "code_mapping": code_mapping,
+                        "output_pointer_address": hex_address(output_pointer_address),
+                        "output_before": hex_address(output_before),
+                    }
+                )
+                self.resolver_unreturned_calls.add(sequence)
+                ResolverFunctionReturnBreakpoint(self, frame, sequence, symbol, output_pointer_address)
+            except Exception as error:
+                self.fatal_errors.append(f"resolved {symbol} call failed at sequence {sequence}: {error}")
+                self.append_resolver_call(
+                    {
+                        "kind": "resolver_call_error",
+                        "sequence": sequence,
+                        "symbol": symbol,
+                        "function_pointer": hex_address(address),
+                        "entry_registers": registers,
+                        "code_pointer": hex_address(code_pointer),
+                        "output_pointer_address": hex_address(output_pointer_address),
+                        "error": str(error),
+                    }
+                )
+
+        def observe_resolved_function_return(self, sequence: int, symbol: str, output_pointer_address: int) -> None:
+            try:
+                self.append_resolver_call_return(
+                    {
+                        "kind": "resolver_call_return",
+                        "sequence": sequence,
+                        "symbol": symbol,
+                        "return_rax": hex_address(self.register("rax")),
+                        "output_after": hex_address(self.read_word(output_pointer_address)),
+                    }
+                )
+            except Exception as error:
+                self.fatal_errors.append(f"resolved {symbol} return failed at sequence {sequence}: {error}")
+            finally:
+                self.resolver_unreturned_calls.discard(sequence)
 
         def observe_export_entry(self) -> None:
             try:
@@ -1096,6 +1517,14 @@ if gdb is not None:
                     "driver_event_limit": None if driver_observation is None else driver_observation["event_limit"],
                     "driver_event_limit_exhausted": self.driver_event_limit_exhausted,
                     "driver_unreturned_sequences": sorted(self.driver_unreturned_sequences),
+                    "resolver_query_records": self.resolver_query_records,
+                    "resolver_call_records": self.resolver_call_records,
+                    "resolver_event_limit": None
+                    if self.config.get("resolver_observation") is None
+                    else self.config["resolver_observation"]["event_limit"],
+                    "resolver_event_limit_exhausted": self.resolver_event_limit_exhausted,
+                    "resolver_unreturned_queries": sorted(self.resolver_unreturned_queries),
+                    "resolver_unreturned_calls": sorted(self.resolver_unreturned_calls),
                 },
             )
 
@@ -1236,6 +1665,79 @@ if gdb is not None:
             return False
 
 
+    class ResolverEntryBreakpoint(gdb.Breakpoint):
+        def __init__(self, observer: ProbeObserver, entry_point: str) -> None:
+            super().__init__(entry_point, internal=True)
+            self.observer = observer
+            self.entry_point = entry_point
+
+        def stop(self) -> bool:
+            self.observer.observe_resolver_entry(self.entry_point)
+            return False
+
+
+    class ResolverReturnBreakpoint(gdb.FinishBreakpoint):
+        def __init__(
+            self,
+            observer: ProbeObserver,
+            frame: Any,
+            sequence: int,
+            entry_point: str,
+            symbol: str,
+            pfn_output_address: int,
+            symbol_status_address: int,
+        ) -> None:
+            super().__init__(frame, internal=True)
+            self.observer = observer
+            self.sequence = sequence
+            self.entry_point = entry_point
+            self.symbol = symbol
+            self.pfn_output_address = pfn_output_address
+            self.symbol_status_address = symbol_status_address
+
+        def stop(self) -> bool:
+            self.observer.observe_resolver_return(
+                self.sequence,
+                self.entry_point,
+                self.symbol,
+                self.pfn_output_address,
+                self.symbol_status_address,
+            )
+            return False
+
+
+    class ResolverFunctionBreakpoint(gdb.Breakpoint):
+        def __init__(self, observer: ProbeObserver, address: int, symbol: str) -> None:
+            super().__init__(f"*{address:#x}", internal=True)
+            self.observer = observer
+            self.address = address
+            self.symbol = symbol
+
+        def stop(self) -> bool:
+            self.observer.observe_resolved_function_entry(self.address, self.symbol)
+            return False
+
+
+    class ResolverFunctionReturnBreakpoint(gdb.FinishBreakpoint):
+        def __init__(
+            self,
+            observer: ProbeObserver,
+            frame: Any,
+            sequence: int,
+            symbol: str,
+            output_pointer_address: int,
+        ) -> None:
+            super().__init__(frame, internal=True)
+            self.observer = observer
+            self.sequence = sequence
+            self.symbol = symbol
+            self.output_pointer_address = output_pointer_address
+
+        def stop(self) -> bool:
+            self.observer.observe_resolved_function_return(self.sequence, self.symbol, self.output_pointer_address)
+            return False
+
+
     class PrivateExportProbeCommand(gdb.Command):
         def __init__(self) -> None:
             super().__init__("private-export-probe", gdb.COMMAND_OBSCURE)
@@ -1254,15 +1756,27 @@ if gdb is not None:
             if driver_observation is not None:
                 for name in ("driver-calls.jsonl", "driver-returns.jsonl"):
                     (output / name).touch(exist_ok=False)
+            resolver_observation = config.get("resolver_observation")
+            if resolver_observation is not None:
+                for name in (
+                    "resolver-queries.jsonl",
+                    "resolver-returns.jsonl",
+                    "resolver-calls.jsonl",
+                    "resolver-call-returns.jsonl",
+                ):
+                    (output / name).touch(exist_ok=False)
             gdb.execute("set breakpoint pending on")
             observer = ProbeObserver(config=config, identity=identity, output=output)
             ExportTableEntryBreakpoint(observer)
             if driver_observation is not None:
                 PublicDriverEntryBreakpoint(observer, driver_observation["symbol"])
+            if resolver_observation is not None:
+                ResolverEntryBreakpoint(observer, "cuGetProcAddress")
             gdb.events.exited.connect(observer.on_exit)
             gdb.write(
                 f"private_export_probe_ready mode={config['mode']} "
-                f"driver_symbol={None if driver_observation is None else driver_observation['symbol']}\n"
+                f"driver_symbol={None if driver_observation is None else driver_observation['symbol']} "
+                f"resolver_symbol={None if resolver_observation is None else resolver_observation['symbol']}\n"
             )
 
 

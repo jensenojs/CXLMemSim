@@ -12,18 +12,23 @@ usage:
   run_private_export_probe.sh --mode discovery --output-dir DIR \
       [--driver-symbol SYMBOL --driver-code-register REGISTER \
        --driver-output-register REGISTER --driver-event-limit N] \
+      [--resolver-symbol SYMBOL --resolver-event-limit N] \
       [--separate-inferior-io] -- TRIGGER [ARGS...]
   run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N \
       [--selector VALUE] [--memory REGISTER:BYTES ...] \
       [--output-buffer POINTER_OUT_REGISTER:SIZE_OUT_REGISTER:MAX_BYTES] \
       [--driver-symbol SYMBOL --driver-code-register REGISTER \
        --driver-output-register REGISTER --driver-event-limit N] \
+      [--resolver-symbol SYMBOL --resolver-event-limit N] \
       [--separate-inferior-io] -- TRIGGER [ARGS...]
 
 The trigger runs once under a Python-enabled host GDB. The probe observes naturally reached
 cuGetExportTable tables and table entry calls; it does not invoke private slots.
 The optional Driver group observes one declared public cu* symbol and binds its code argument
 to an exact mapped ELF. All four --driver-* arguments must be supplied together.
+The optional resolver group observes real Driver cuGetProcAddress queries for one declared cu*
+symbol, maps the returned function pointer, and records natural calls through that exact address.
+Both --resolver-* arguments must be supplied together.
 With --separate-inferior-io, the exact trigger argv is preserved in inferior-run.gdb while
 inferior.stdout and inferior.stderr are kept separate from gdb.transcript.
 EOF
@@ -33,13 +38,13 @@ hint() {
     cat <<'EOF'
 private_export_probe_hint=self=qemu_integration/guest_libcuda/run_private_export_probe.sh
 private_export_probe_hint=problem=running isolated GDB commands by hand loses Driver, Runtime, trigger and probe identities and makes negative private-table results impossible to compare across public triggers
-private_export_probe_hint=mental_model=validate a new output directory and debugger prerequisites; generate one GDB command file loading private_export_probe.py; execute the caller-supplied trigger verbatim; preserve full transcript and identity; optionally observe one public Driver entry/return stream inside the same lifecycle; require the Python observer summary to close
+private_export_probe_hint=mental_model=validate a new output directory and debugger prerequisites; generate one GDB command file loading private_export_probe.py; execute the caller-supplied trigger verbatim; preserve full transcript and identity; optionally observe one public Driver stream and one cuGetProcAddress target with natural calls through its returned address; require the Python observer summary to close
 private_export_probe_hint=role=provide the command-line boundary for reusable discovery or bounded capture while keeping trigger selection outside the probe implementation
 private_export_probe_hint=use_when=run a low-cost public CUDA trigger on a real compatible NVIDIA environment to inventory natural private calls or capture one UUID/slot/selector already justified by discovery or a Kimi core
-private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/private-event limits, one explicit returned-buffer projection, an optional complete driver-symbol/code-register/output-register/event-limit group, optional separated inferior I/O, Python-enabled gdb and an explicit trigger command after --
-private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, identity.json,probe-config.json,tables.jsonl,calls.jsonl,returns.jsonl,captures.jsonl,optional driver-calls.jsonl and driver-returns.jsonl,gdb-status.json,summary.json; separated runs also preserve inferior-run.gdb,inferior.stdout,inferior.stderr
+private_export_probe_hint=inputs=mode, new output directory, optional UUID/slot/selector/memory/private-event limits, one explicit returned-buffer projection, optional complete public-driver and resolver groups, optional separated inferior I/O, Python-enabled gdb and an explicit trigger command after --
+private_export_probe_hint=outputs=debugger/input identity, generated command, full gdb.transcript, private table streams, optional direct Driver streams, optional resolver query/return/natural-call streams,gdb-status.json,summary.json; separated runs also preserve inferior-run.gdb,inferior.stdout,inferior.stderr
 private_export_probe_hint=interpret=matching call/return sequence values prove one natural private call returned; public Driver records additionally require the breakpoint PC to map to the declared host Driver and the code pointer to map to one live exact ELF; capture_status separately reports whether the declared private target was reached
-private_export_probe_hint=proves=the exact trigger/debugger/probe composition and naturally observed private-table events; a declared Driver stream proves its observed call count, mapped code origins, return values and output-handle transitions in this exact native window
+private_export_probe_hint=proves=the exact trigger/debugger/probe composition and naturally observed private-table events; a declared Driver stream proves direct symbol calls; a resolver stream proves the returned Driver address, its relation to the public symbol and natural calls through that address in this exact native window
 private_export_probe_hint=does_not_prove=that an unreached slot is unused by Kimi, that a non-NULL entry has a known signature, that active calling is safe, or that guest Type-2/Kimi is correct
 private_export_probe_hint=next=compare discovery sets across triggers or feed a reached bounded capture into a real-Driver oracle and minimal guest-shim repair; never replace not_reached with a guessed success stub
 EOF
@@ -64,6 +69,8 @@ driver_symbol=
 driver_code_register=
 driver_output_register=
 driver_event_limit=
+resolver_symbol=
+resolver_event_limit=
 separate_inferior_io=no
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,6 +87,8 @@ while [[ $# -gt 0 ]]; do
         --driver-code-register) driver_code_register=${2:-}; shift 2 ;;
         --driver-output-register) driver_output_register=${2:-}; shift 2 ;;
         --driver-event-limit) driver_event_limit=${2:-}; shift 2 ;;
+        --resolver-symbol) resolver_symbol=${2:-}; shift 2 ;;
+        --resolver-event-limit) resolver_event_limit=${2:-}; shift 2 ;;
         --separate-inferior-io) separate_inferior_io=yes; shift ;;
         --help|-h) usage; exit 0 ;;
         --hint) hint; exit 0 ;;
@@ -102,6 +111,11 @@ for value in "$driver_symbol" "$driver_code_register" "$driver_output_register" 
     [[ -z $value ]] || ((driver_argument_count += 1))
 done
 [[ $driver_argument_count -eq 0 || $driver_argument_count -eq 4 ]] || die "all four --driver-* arguments must be supplied together"
+resolver_argument_count=0
+for value in "$resolver_symbol" "$resolver_event_limit"; do
+    [[ -z $value ]] || ((resolver_argument_count += 1))
+done
+[[ $resolver_argument_count -eq 0 || $resolver_argument_count -eq 2 ]] || die "both --resolver-* arguments must be supplied together"
 
 prepare=(python3 "$PROBE" prepare --output-dir "$output_dir" --source-root "$ROOT" --mode "$mode")
 [[ -n $uuid ]] && prepare+=(--uuid "$uuid")
@@ -120,6 +134,9 @@ if [[ $driver_argument_count -eq 4 ]]; then
         --driver-output-register "$driver_output_register"
         --driver-event-limit "$driver_event_limit"
     )
+fi
+if [[ $resolver_argument_count -eq 2 ]]; then
+    prepare+=(--resolver-symbol "$resolver_symbol" --resolver-event-limit "$resolver_event_limit")
 fi
 [[ $separate_inferior_io == no ]] || prepare+=(--separate-inferior-io)
 prepare+=(-- "$@")
