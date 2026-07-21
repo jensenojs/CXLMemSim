@@ -301,13 +301,34 @@ static void cmd_unlock(void) {
 
 /* Execute command and wait for completion.
  * Caller MUST hold cmd_lock() if params were written before this call. */
-static CUresult execute_cmd(uint32_t cmd) {
+static uint32_t g_api_chain_sequence;
+
+static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
+    uint32_t sequence = __sync_add_and_fetch(&g_api_chain_sequence, 1);
+    uint64_t call_id = ((uint64_t)(uint32_t)getpid() << 32) | sequence;
+    reg_write64(CXL_GPU_REG_CALL_ID, call_id);
+    DLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
+         " symbol=%s command=0x%x\n",
+         call_id, symbol, cmd);
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
-    if (g_test_execute_cmd)
-        return g_test_execute_cmd(cmd);
+    if (g_test_execute_cmd) {
+        CUresult result = g_test_execute_cmd(cmd);
+        reg_write64(CXL_GPU_REG_CALL_ID, 0);
+        DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
+             " symbol=%s command=0x%x result=%d\n",
+             call_id, symbol, cmd, result);
+        return result;
+    }
 #endif
-    return (CUresult)cxl_gpu_transport_execute(&g_transport, cmd);
+    CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd);
+    reg_write64(CXL_GPU_REG_CALL_ID, 0);
+    DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
+         " symbol=%s command=0x%x result=%d\n",
+         call_id, symbol, cmd, result);
+    return result;
 }
+
+#define execute_cmd(cmd) execute_cmd_traced((cmd), __func__)
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 static void context_storage_test_reset(void);
@@ -319,6 +340,7 @@ void cxl_cuda_test_reset(void) {
         free(record);
     }
     g_cudart_library_next_id = 1;
+    g_api_chain_sequence = 0;
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
