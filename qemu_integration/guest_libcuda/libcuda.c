@@ -706,11 +706,6 @@ static void context_storage_clear_context(CUcontext context, int call_dtors) {
     }
 }
 
-static CUresult context_check_result2_stub(void) {
-    DLOG("CONTEXT_CHECKS.result2_stub -> CUDA_SUCCESS\n");
-    return CUDA_SUCCESS;
-}
-
 static CUresult context_check(CUcontext ctx_in, uint32_t *result1, const void **result2, uintptr_t arg4, uintptr_t arg5,
                               uintptr_t arg6) {
     DLOG("CONTEXT_CHECKS.context_check(ctx=%p result1=%p result2=%p arg4=%p arg5=0x%lx arg6=%p)\n", ctx_in,
@@ -719,27 +714,6 @@ static CUresult context_check(CUcontext ctx_in, uint32_t *result1, const void **
         *result1 = 0;
     }
     if (result2) {
-        *result2 = NULL;
-        if (getenv("CXL_CUDA_CONTEXT_CHECK_RESULT2_HOSTLIKE")) {
-            /* knockout: CUDA 12.9 CONTEXT_CHECKS slot2 result2 diagnostic.
-             * Host NVIDIA 580.142 returns a libcuda internal code pointer for
-             * arg5=0x32 and the context pointer for arg5=1. This local stub only
-             * tests whether libcudart requires result2 to be non-null while
-             * constructing its private C693 ctx_state. */
-            if (arg5 == 0x32) {
-                *result2 = (const void *)context_check_result2_stub;
-            } else if (arg5 == 1) {
-                *result2 = ctx_in;
-            }
-        }
-        if (getenv("CXL_CUDA_CONTEXT_CHECK_RESULT2_ARG4_STUB") && arg4 && !*result2) {
-            /* knockout: host first CONTEXT_CHECKS slot2 call has arg4=state_mgr and
-             * returns an internal libcuda code pointer. The guest CUDA 12.9 call site
-             * did not pass the same arg5 discriminator, so this probe tests the
-             * weaker observed condition: non-null state_mgr input gets a non-null
-             * result2 function pointer. */
-            *result2 = (const void *)context_check_result2_stub;
-        }
         DLOG("CONTEXT_CHECKS.context_check -> result1=%u result2=%p\n", result1 ? *result1 : 0xffffffffU,
              result2 ? *result2 : NULL);
     }

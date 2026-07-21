@@ -151,6 +151,10 @@ static const CUuuid context_local_storage_uuid = {
     .bytes = {0xc6, 0x93, 0x33, 0x6e, 0x11, 0x21, 0xdf, 0x11, 0xa8, 0xc3, 0x68, 0xf3, 0x55, 0xd8, 0x95, 0x93},
 };
 
+static const CUuuid context_checks_uuid = {
+    .bytes = {0x26, 0x3e, 0x88, 0x60, 0x7c, 0xd2, 0x61, 0x43, 0x92, 0xf6, 0xbb, 0xd5, 0x00, 0x6d, 0xfa, 0x7e},
+};
+
 typedef struct DestroyedContextThread {
     pthread_barrier_t attached;
     pthread_barrier_t destroyed;
@@ -429,6 +433,39 @@ static int test_context_local_storage_keeps_managers_separate(void) {
     return 0;
 }
 
+static int test_context_check_preserves_result2(void) {
+    typedef CUresult (*context_check_t)(CUcontext context, uint32_t *result1, const void **result2, uintptr_t arg4,
+                                        uintptr_t arg5, uintptr_t arg6);
+    struct ContextCheckCall {
+        uintptr_t arg4;
+        uintptr_t arg5;
+        const void *result2;
+    } calls[] = {
+        {0, 1, (const void *)(uintptr_t)UINT64_C(0x0000100020003000)},
+        {UINT64_C(0x0000200030004000), UINT32_MAX, (const void *)(uintptr_t)UINT64_C(0x0000400050006000)},
+        {0, 1, (const void *)(uintptr_t)UINT64_C(0x0000700080009000)},
+    };
+    const void *table = NULL;
+
+    CHECK(cuGetExportTable(&table, &context_checks_uuid) == CUDA_SUCCESS);
+    CHECK(table != NULL);
+    const void *const *slots = table;
+    CHECK((uintptr_t)slots[0] == 15 * sizeof(void *));
+    context_check_t check = (context_check_t)slots[2];
+    CHECK(check != NULL);
+
+    for (size_t index = 0; index < sizeof(calls) / sizeof(calls[0]); index++) {
+        uint32_t result1 = UINT32_MAX;
+        const void *result2 = calls[index].result2;
+
+        CHECK(check((CUcontext)(uintptr_t)1, &result1, &result2, calls[index].arg4, calls[index].arg5, 0) ==
+              CUDA_SUCCESS);
+        CHECK(result1 == 0);
+        CHECK(result2 == calls[index].result2);
+    }
+    return 0;
+}
+
 static int test_integrity_uses_runtime_device_identity(void) {
     typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
     const void *table = NULL;
@@ -691,9 +728,9 @@ static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
-           test_context_local_storage_keeps_managers_separate() || test_integrity_uses_runtime_device_identity() ||
-           test_occupancy_driver_api_route() || test_memcpy2d_device_route() ||
-           test_library_fatbin_prefers_highest_compatible_cubin() ||
+           test_context_local_storage_keeps_managers_separate() || test_context_check_preserves_result2() ||
+           test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
+           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity();
 }
