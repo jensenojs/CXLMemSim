@@ -3,6 +3,7 @@
 #endif
 
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,7 @@ static size_t g_caller_count;
 static volatile int g_lock;
 static int g_enabled = -1;
 static int g_capacity_reported;
+static volatile int g_library_load_stack_emitted;
 
 static void provenance_lock(void) NO_INSTRUMENT;
 static void provenance_unlock(void) NO_INSTRUMENT;
@@ -38,6 +40,7 @@ static int provenance_enabled(void) NO_INSTRUMENT;
 static FunctionRecord *function_record(const void *address) NO_INSTRUMENT;
 static int first_function_caller(const void *function, const void *caller) NO_INSTRUMENT;
 static void emit_natural_event(const char *symbol, const void *caller) NO_INSTRUMENT;
+void cxl_cuda_provenance_emit_first_stack(const char *symbol) NO_INSTRUMENT;
 
 static void provenance_lock(void) {
     while (__sync_lock_test_and_set(&g_lock, 1)) {
@@ -100,6 +103,37 @@ static void emit_natural_event(const char *symbol, const void *caller) {
                 "caller_address=%p\n",
                 (long)getpid(), symbol, caller);
     }
+}
+
+void cxl_cuda_provenance_emit_first_stack(const char *symbol) {
+    if (!provenance_enabled() || !symbol || strcmp(symbol, "cuLibraryLoadData") != 0 ||
+        !__sync_bool_compare_and_swap(&g_library_load_stack_emitted, 0, 1)) {
+        return;
+    }
+
+    void *frames[16] = {0};
+    const int frame_count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+    fprintf(stderr,
+            "[CXL-CUDA] api_provenance event=stack-begin pid=%ld symbol=%s frame_count=%d\n",
+            (long)getpid(), symbol, frame_count);
+    for (int index = 0; index < frame_count; index++) {
+        Dl_info info = {0};
+        if (dladdr(frames[index], &info) != 0 && info.dli_fbase && info.dli_fname) {
+            const uintptr_t base = (uintptr_t)info.dli_fbase;
+            fprintf(stderr,
+                    "[CXL-CUDA] api_provenance event=stack-frame pid=%ld symbol=%s frame=%d "
+                    "pc=0x%llx caller_status=resolved caller_file=%s caller_base=0x%llx "
+                    "caller_offset=0x%llx\n",
+                    (long)getpid(), symbol, index, (unsigned long long)(uintptr_t)frames[index], info.dli_fname,
+                    (unsigned long long)base, (unsigned long long)((uintptr_t)frames[index] - base));
+        } else {
+            fprintf(stderr,
+                    "[CXL-CUDA] api_provenance event=stack-frame pid=%ld symbol=%s frame=%d "
+                    "pc=0x%llx caller_status=unresolved\n",
+                    (long)getpid(), symbol, index, (unsigned long long)(uintptr_t)frames[index]);
+        }
+    }
+    fprintf(stderr, "[CXL-CUDA] api_provenance event=stack-end pid=%ld symbol=%s\n", (long)getpid(), symbol);
 }
 
 void __cyg_profile_func_enter(void *this_function, void *call_site) NO_INSTRUMENT;

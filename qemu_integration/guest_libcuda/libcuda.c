@@ -36,6 +36,7 @@
 extern int LZ4_decompress_safe(const char *src, char *dst, int compressed_size, int dst_capacity);
 extern size_t ZSTD_decompress(void *dst, size_t dst_capacity, const void *src, size_t compressed_size);
 extern unsigned int ZSTD_isError(size_t code);
+extern void cxl_cuda_provenance_emit_first_stack(const char *symbol);
 
 /* CUDA types */
 typedef int CUresult;
@@ -1927,6 +1928,7 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
                 caller_info.dli_fname ? caller_info.dli_fname : "(unknown)",
                 (unsigned long)((uintptr_t)caller - (uintptr_t)caller_info.dli_fbase));
     }
+    cxl_cuda_provenance_emit_first_stack("cuLibraryLoadData");
     context_storage_log_entries("cuLibraryLoadData:entry");
     fprintf(stderr,
             "[CXL-CUDA] cuLibraryLoadData(library=%p, code=%p, jitOptions=%p, jitOptionsValues=%p, "
