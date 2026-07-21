@@ -670,8 +670,15 @@ static CUresult context_local_storage_get(void **ctx_state, CUcontext context, v
     }
     context_storage_unlock();
 
-    DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u -> CUDA_ERROR_INVALID_VALUE\n", call_id);
-    return CUDA_ERROR_INVALID_VALUE;
+    uintptr_t current_context = 0;
+    CUresult current_result = cxl_cuda_context_get_current(&current_context);
+    if (current_result != CUDA_SUCCESS || current_context == 0) {
+        DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u -> CUDA_ERROR_INVALID_CONTEXT\n", call_id);
+        return CUDA_ERROR_INVALID_CONTEXT;
+    }
+
+    DLOG("CONTEXT_LOCAL_STORAGE.get_state_like#%u -> CUDA_ERROR_INVALID_HANDLE\n", call_id);
+    return CUDA_ERROR_INVALID_HANDLE;
 }
 
 static void context_storage_clear_context(CUcontext context, int call_dtors) {

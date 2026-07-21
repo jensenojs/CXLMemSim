@@ -380,8 +380,11 @@ static int test_context_local_storage_keeps_managers_separate(void) {
     void *state_b = (void *)(uintptr_t)0xbbb2;
     void *replacement_a = (void *)(uintptr_t)0xaaa3;
     void *out = NULL;
+    CUcontext current = NULL;
 
     cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
     CHECK(cuGetExportTable(&table, &context_local_storage_uuid) == CUDA_SUCCESS);
     CHECK(table != NULL);
     const void *const *slots = table;
@@ -389,6 +392,17 @@ static int test_context_local_storage_keeps_managers_separate(void) {
     context_storage_delete_t delete = (context_storage_delete_t)slots[1];
     context_storage_get_t get = (context_storage_get_t)slots[2];
     CHECK(put != NULL && delete != NULL && get != NULL);
+
+    out = (void *)(uintptr_t)0x1;
+    CHECK(get(&out, NULL, manager_a) == CUDA_ERROR_INVALID_CONTEXT);
+    CHECK(out == NULL);
+
+    CHECK(cuCtxCreate_v2(&current, 0, 0) == CUDA_SUCCESS);
+    CHECK(current == (CUcontext)(uintptr_t)issued_token);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_CTX_CREATE);
+    out = (void *)(uintptr_t)0x1;
+    CHECK(get(&out, NULL, manager_a) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(out == NULL);
 
     CHECK(put(NULL, manager_a, state_a, NULL) == CUDA_SUCCESS);
     CHECK(put(NULL, manager_b, state_b, NULL) == CUDA_SUCCESS);
@@ -400,7 +414,7 @@ static int test_context_local_storage_keeps_managers_separate(void) {
 
     CHECK(delete(NULL, manager_a) == CUDA_ERROR_DEINITIALIZED);
     out = (void *)(uintptr_t)0x1;
-    CHECK(get(&out, NULL, manager_a) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(get(&out, NULL, manager_a) == CUDA_ERROR_INVALID_HANDLE);
     CHECK(out == NULL);
     CHECK(get(&out, NULL, manager_b) == CUDA_SUCCESS);
     CHECK(out == state_b);
