@@ -1,8 +1,18 @@
+# Shared checkout and artifact environment. Events below state only their workload and resource differences.
+.cxlmemsim-source: &cxlmemsim-source
+  submodules: false
+  lfs: false
+
+.cxlmemsim-component-tools: &cxlmemsim-component-tools
+  image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+
+.cxlmemsim-docker-service: &cxlmemsim-docker-service
+  - docker
+
 $:
+  # Verify that CNB checked out the exact source shape expected by this component.
   api_trigger_source_probe:
-    - git:
-        submodules: false
-        lfs: false
+    - git: *cxlmemsim-source
       runner:
         cpus: 2
       stages:
@@ -10,32 +20,26 @@ $:
           script: |
             bash scripts/verify_source_checkout.sh 4910c7cf2c813698952857f20988ac66dae7fe9d
 
+  # Build, validate, and publish this component as an immutable OCI artifact.
   api_trigger_component_build_publish:
-    - git:
-        submodules: false
-        lfs: false
-      services:
-        - docker
+    - git: *cxlmemsim-source
+      services: *cxlmemsim-docker-service
       runner:
         cpus: 4
-      docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      docker: *cxlmemsim-component-tools
       stages:
         - name: build test and publish CXLMemSim component
           script: |
            bash scripts/build_component.sh
            bash scripts/publish_component.sh .work/component/payload
 
+  # Pull the candidate artifact by digest into an empty directory and verify every file.
   api_trigger_component_fresh_pull:
-    - git:
-        submodules: false
-        lfs: false
-      services:
-        - docker
+    - git: *cxlmemsim-source
+      services: *cxlmemsim-docker-service
       runner:
         cpus: 2
-      docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      docker: *cxlmemsim-component-tools
       stages:
         - name: verify artifact contract and fresh pull CXLMemSim component
           script: |
@@ -44,65 +48,33 @@ $:
               manifests/artifacts/cxlmemsim.candidate.json \
               .work/restored/cxlmemsim
 
+  # Observe the native L40 TOOLS_TLS private export table against the guest shim.
   api_trigger_tools_tls_export_oracle:
-    - git:
-        submodules: false
-        lfs: false
+    - git: *cxlmemsim-source
       runner:
         tags: cnb:arch:amd64:gpu:L40
-      docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      docker: *cxlmemsim-component-tools
       stages:
         - name: inspect L40 CUDA TOOLS TLS export table
           timeout: 15m
           script: |
-            set -eu
-            mkdir -p .work
-            nvidia-smi --query-gpu=uuid,driver_version,name,memory.total --format=csv,noheader
-            driver_path="$(ldconfig -p | awk '$1 == "libcuda.so.1" {print $NF; exit}')"
-            test -n "$driver_path"
-            driver_real="$(readlink -f "$driver_path")"
-            printf 'tools_tls_oracle_driver_path=%s\n' "$driver_real"
-            readelf -n "$driver_real" > .work/tools-tls-driver-notes.txt
-            awk '/Build ID/ {print "tools_tls_oracle_driver_" $0; exit}' .work/tools-tls-driver-notes.txt
-            make -C qemu_integration/guest_libcuda libcuda.so.1 integrity-export-oracle
-            qemu_integration/guest_libcuda/cuda-integrity-export-oracle \
-              --table tools-tls \
-              --driver "$driver_real" \
-              --shim "$PWD/qemu_integration/guest_libcuda/libcuda.so.1"
+            bash scripts/run_integrity_export_oracle.sh tools-tls tools_tls_oracle
 
+  # Observe the native L40 RUNTIME_CALLBACK_HOOKS export table against the guest shim.
   api_trigger_runtime_callback_hooks_export_oracle:
-    - git:
-        submodules: false
-        lfs: false
+    - git: *cxlmemsim-source
       runner:
         tags: cnb:arch:amd64:gpu:L40
-      docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:8732c435c97964f2ba95b42fbbcaf79b3c23feffc3b1f7683531917122f4f59e
+      docker: *cxlmemsim-component-tools
       stages:
         - name: inspect L40 CUDA runtime callback hooks export table
           timeout: 15m
           script: |
-            set -eu
-            mkdir -p .work
-            nvidia-smi --query-gpu=uuid,driver_version,name,memory.total --format=csv,noheader
-            driver_path="$(ldconfig -p | awk '$1 == "libcuda.so.1" {print $NF; exit}')"
-            test -n "$driver_path"
-            driver_real="$(readlink -f "$driver_path")"
-            printf 'runtime_callback_hooks_oracle_driver_path=%s\n' "$driver_real"
-            readelf -n "$driver_real" > .work/runtime-callback-hooks-driver-notes.txt
-            awk '/Build ID/ {print "runtime_callback_hooks_oracle_driver_" $0; exit}' \
-              .work/runtime-callback-hooks-driver-notes.txt
-            make -C qemu_integration/guest_libcuda libcuda.so.1 integrity-export-oracle
-            qemu_integration/guest_libcuda/cuda-integrity-export-oracle \
-              --table runtime-callback-hooks \
-              --driver "$driver_real" \
-              --shim "$PWD/qemu_integration/guest_libcuda/libcuda.so.1"
+            bash scripts/run_integrity_export_oracle.sh runtime-callback-hooks runtime_callback_hooks_oracle
 
+  # Discover and capture naturally reached private Driver export-table calls on L40.
   api_trigger_private_export_table_probe:
-    - git:
-        submodules: false
-        lfs: false
+    - git: *cxlmemsim-source
       runner:
         tags: cnb:arch:amd64:gpu:L40
       docker:
@@ -111,40 +83,4 @@ $:
         - name: observe L40 CUDA private export table calls
           timeout: 15m
           script: |
-            bash -euo pipefail <<'PRIVATE_EXPORT_PROBE_SCRIPT'
-            output_root="$PWD/.work/private-export-table-probe"
-            make -C qemu_integration/guest_libcuda private-export-table-probe
-            qemu_integration/guest_libcuda/run_private_export_probe.sh \
-              --mode discovery \
-              --output-dir "$output_root/discovery" \
-              -- qemu_integration/guest_libcuda/cuda-runtime-dlopen-kernel-probe \
-              "$PWD/qemu_integration/guest_libcuda/libtiny_cuda.so"
-            qemu_integration/guest_libcuda/run_private_export_probe.sh \
-              --mode capture \
-              --output-dir "$output_root/callback-hooks-slot1" \
-              --uuid a094798c-2e74-2e74-93f2-0800200c0a66 \
-              --slot 1 \
-              --selector 0x111 \
-              --memory rsi:64 \
-              -- qemu_integration/guest_libcuda/cuda-runtime-dlopen-kernel-probe \
-              "$PWD/qemu_integration/guest_libcuda/libtiny_cuda.so"
-            python3 qemu_integration/guest_libcuda/private_export_probe.py compare-identity \
-              --left "$output_root/discovery" \
-              --right "$output_root/callback-hooks-slot1" \
-              --output "$output_root/pair-identity.json"
-            test -f "$output_root/discovery/summary.json"
-            test -f "$output_root/callback-hooks-slot1/summary.json"
-            test -f "$output_root/pair-identity.json"
-            printf '=== PRIVATE_EXPORT_PROBE_FILE_BEGIN pair-identity.json ===\n'
-            cat "$output_root/pair-identity.json"
-            printf '\n=== PRIVATE_EXPORT_PROBE_FILE_END pair-identity.json ===\n'
-            for case_dir in "$output_root/discovery" "$output_root/callback-hooks-slot1"; do
-              for result in identity.json probe-config.json tables.jsonl calls.jsonl returns.jsonl captures.jsonl gdb-status.json \
-                  summary.json debugger-command.json gdb.transcript; do
-                printf '=== PRIVATE_EXPORT_PROBE_FILE_BEGIN %s/%s ===\n' "$(basename "$case_dir")" "$result"
-                cat "$case_dir/$result"
-                printf '\n=== PRIVATE_EXPORT_PROBE_FILE_END %s/%s ===\n' "$(basename "$case_dir")" "$result"
-              done
-            done
-            printf 'private_export_table_probe=complete\n'
-            PRIVATE_EXPORT_PROBE_SCRIPT
+            bash scripts/run_private_export_table_probe.sh

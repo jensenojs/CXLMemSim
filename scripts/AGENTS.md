@@ -23,6 +23,8 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |
 | `publish_component.sh PAYLOAD_DIR` | 已闭合 payload、profile、contract、CNB registry身份 | OCI双 blob 与 `component-candidate` 输出 | 该 payload 是否已被不可变 digest 发布 |
 | `pull_component.sh [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与 `.work/component/fresh-pull/` 验证记录 | 已发布的 exact bytes 能否独立恢复并通过本仓 runtime/ELF smoke |
+| `run_integrity_export_oracle.sh TABLE LOG_PREFIX` | L40真实Driver、当前guest shim、指定private export table | Driver identity与oracle输出 | 真实Driver和shim对该table的公开可比形状是否一致 |
+| `run_private_export_table_probe.sh [OUTPUT_DIR]` | L40真实Driver、tiny DSO、固定discovery/capture选择 | discovery/capture transcript与identity comparison | 自然到达的private table调用及slot 1输入是什么 |
 
 `pull_component.sh` 默认使用 CNB Docker service。只在本机已明确选择 rootless Podman 时传 `--container-runtime podman`；Docker 失败不会静默改用 Podman。参数形状错误以 exit 2 结束，已经通过解析后的 container、OCI、digest、archive、ELF 或运行时检查失败以非零运行错误结束。
 
