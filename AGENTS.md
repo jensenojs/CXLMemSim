@@ -89,7 +89,10 @@ state 清理；它们不进入组件 payload、OCI component artifact 或 Git in
 - `collect_cuda_elf_static_evidence.py`读取调用方给定的 exact ELF 与命名 selector，写入 SHA256、Build ID、
   完整 `nm`/`readelf`/`objdump` transcript 和 `static-evidence.json`。section facts进入结构化结果；存在
   `.nvFatBinSegment`时按64位CUDA registration descriptor的24字节形状输出count与remainder，不能整除时
-  fail closed。它用于确认符号、ELF 段、registration容量和公开调用形状；
+  fail closed。声明target SM、BAR2 payload上限和QEMU decoded上限时，它还会逐个wrapper执行与guest
+  shim同语义的ELF/PTX选择，输出codec、compressed/decoded size、transport route和预期
+  `cuLibraryGetModule`结果；任何unsupported codec或容量越界fail closed。它用于确认符号、ELF 段、
+  registration容量和每个wrapper的预运行传输结果；
   它不加载 CUDA，不能证明 Runtime private ABI、guest shim 或 Type-2。
 - `libcublas_create_probe.so`由现有`cuda-runtime-dlopen-kernel-probe`加载。它先加载调用方固定的exact
   `libggml-cuda`，再从同一guest CUDA userland解析并调用`cublasCreate_v2/cublasDestroy_v2`。两次显式

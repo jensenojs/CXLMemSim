@@ -54,6 +54,11 @@
       "mode": "0644"
     },
     {
+      "path": "evidence/cuda-api/collect_cuda_elf_static_evidence.py",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
       "path": "bin/cxlmemsim_server",
       "type": "file",
       "mode": "0755"

@@ -18,19 +18,30 @@ compare that observed DSO set with these exact ELF identities.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
+import mmap
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CUDA_FATBIN_DESCRIPTOR_SIZE_BYTES = 24
+CUDA_FATBINC_MAGIC = 0x466243B1
+CUDA_FATBINC_VERSION = 1
+CUDA_FATBIN_MAGIC = 0xBA55ED50
+CUDA_FATBIN_VERSION = 1
+CUDA_FATBIN_KIND_PTX = 1
+CUDA_FATBIN_KIND_ELF = 2
+CUDA_FATBIN_FLAG_COMPRESSED_LZ4 = 0x2000
+CUDA_FATBIN_FLAG_COMPRESSED_ZSTD = 0x8000
 
 HELP_EPILOG = """
 证据模型：
@@ -40,8 +51,12 @@ HELP_EPILOG = """
   选出本轮关心的符号。ELF section 会进入 static-evidence.json；若存在
   .nvFatBinSegment，还会按 64 位 CUDA fatbin registration descriptor 的 24 字节
   形状输出 descriptor_count，不能整除时 fail closed。
-  descriptor_count只覆盖当前一个ELF。多个结果求和是声明集合的预运行预测；运行时是否
-  出现额外DSO，必须由guest shim记录每次registration的code归属，再与静态集合核对。
+  descriptor_count只覆盖当前一个ELF。指定 --fatbin-target-sm、--bar2-data-size 和
+  --host-decoded-limit 时，工具还会逐个wrapper解析fatbin，执行与guest shim相同的
+  target-SM选择，并输出选中entry的codec、compressed/decoded size、BAR2传输路线和
+  预期cuLibraryGetModule结果。unsupported codec、transport overflow与host decode overflow
+  会fail closed。多个ELF结果求和只是声明集合的预运行预测；运行时是否出现
+  额外DSO，仍由guest shim记录每次registration的code归属，再与静态集合核对。
   所有匹配数、匹配内容、执行 argv、退出码、ELF SHA256、Build ID 与失败原因写入
   static-evidence.json。output-dir 必须是新目录，旧 core/ELF 与既有证据不会被覆盖。
 
@@ -69,11 +84,11 @@ Python-enabled gdb probe 的自然调用 capture 取得。
 
 HINT = """cuda_elf_static_evidence_hint=self=qemu_integration/guest_libcuda/collect_cuda_elf_static_evidence.py
 cuda_elf_static_evidence_hint=problem=manual nm/readelf/objdump commands used during a Kimi core investigation are easy to lose, rerun against the wrong ELF or quote only the matching line while omitting the full symbol and relocation context
-cuda_elf_static_evidence_hint=mental_model=hash one exact ELF first; save complete tool transcripts and command exit codes; parse section identity from the saved readelf transcript; derive .nvFatBinSegment registration descriptor count only when its byte size is divisible by the 24-byte 64-bit wrapper shape; apply named selectors only as views over raw files
+cuda_elf_static_evidence_hint=mental_model=hash one exact ELF first; save complete tool transcripts and command exit codes; parse every 24-byte .nvFatBinSegment wrapper when a target SM and both transport limits are declared; select the same ELF or PTX entry as the guest shim; predict which bytes cross BAR2 and which decoded size QEMU must hold; apply named selectors only as views over raw files
 cuda_elf_static_evidence_hint=role=turn one exact CUDA-related ELF or core companion into reusable static identity, symbol, segment, relocation, version and bounded disassembly evidence without executing it
 cuda_elf_static_evidence_hint=use_when=a crash or runtime observation names an exact guest or host DSO and the next dynamic probe needs verified symbol addresses, registered-stub virtual addresses, call sites or Build ID
 cuda_elf_static_evidence_hint=inputs=exact regular ELF path; expected SHA256 when frozen by a run spec; optional dynamic/local symbol regexes, uniqueness constraints, disassembly windows, required text, DWARF or SASS requests
-cuda_elf_static_evidence_hint=outputs=static-evidence.json with complete ELF section facts and optional .nvFatBinSegment size,24-byte descriptor count,remainder plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
+cuda_elf_static_evidence_hint=outputs=static-evidence.json with complete ELF section facts, optional per-wrapper target-SM transport predictions and route counts, plus complete file,nm,readelf,objdump and optional cuobjdump/DWARF transcripts and named disassembly views
 cuda_elf_static_evidence_hint=interpret=status pass means the exact ELF and every requested selector/predicate were satisfied; fail_closed still preserves all raw transcripts and identifies the first missing or ambiguous static fact
 cuda_elf_static_evidence_hint=proves=exact ELF identity, Build ID and the static symbol/segment/relocation/disassembly facts directly present in the saved tool output
 cuda_elf_static_evidence_hint=does_not_prove=that CUDA loads the ELF, that the caller selected every runtime registration-contributing DSO, a host stub is registered, a private table slot is called, the inferred function signature is correct, guest Type-2 works, Kimi is correct or TPS changes
@@ -121,6 +136,34 @@ class ElfSection:
         }
 
 
+@dataclass(frozen=True)
+class FatbinFile:
+    relative_offset: int
+    kind: int
+    header_size: int
+    payload_size: int
+    compressed_size: int
+    sm_version: int
+    bit_width: int
+    flags: int
+    uncompressed_size: int
+
+    def json(self) -> dict[str, Any]:
+        return {
+            "relative_offset": self.relative_offset,
+            "kind": {CUDA_FATBIN_KIND_ELF: "elf", CUDA_FATBIN_KIND_PTX: "ptx"}.get(self.kind, "unknown"),
+            "kind_value": self.kind,
+            "header_size": self.header_size,
+            "payload_size": self.payload_size,
+            "compressed_size": self.compressed_size,
+            "sm_version": self.sm_version,
+            "bit_width": self.bit_width,
+            "flags": f"0x{self.flags:x}",
+            "codec": fatbin_codec(self),
+            "uncompressed_size": self.uncompressed_size,
+        }
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -136,6 +179,13 @@ def parse_nonnegative(text: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid integer: {text}") from error
     if value < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
+    return value
+
+
+def parse_positive(text: str) -> int:
+    value = parse_nonnegative(text)
+    if value == 0:
+        raise argparse.ArgumentTypeError("value must be positive")
     return value
 
 
@@ -243,6 +293,228 @@ def fatbin_registration_facts(sections: list[ElfSection]) -> dict[str, Any] | No
     }
 
 
+def elf64_load_segments(blob: mmap.mmap) -> tuple[str, list[tuple[int, int, int]]]:
+    if len(blob) < 64 or blob[:4] != b"\x7fELF" or blob[4] != 2 or blob[5] not in {1, 2}:
+        raise RuntimeError("fatbin transport prediction requires an ELF64 object")
+    order = "<" if blob[5] == 1 else ">"
+    header = struct.Struct(order + "16sHHIQQQIHHHHHH").unpack_from(blob, 0)
+    program_offset = int(header[5])
+    program_entry_size = int(header[9])
+    program_count = int(header[10])
+    program = struct.Struct(order + "IIQQQQQQ")
+    if program_entry_size < program.size or program_offset + program_entry_size * program_count > len(blob):
+        raise RuntimeError("ELF64 program-header table is unavailable or truncated")
+    segments: list[tuple[int, int, int]] = []
+    for index in range(program_count):
+        fields = program.unpack_from(blob, program_offset + index * program_entry_size)
+        if fields[0] == 1:  # PT_LOAD
+            segments.append((int(fields[3]), int(fields[2]), int(fields[5])))
+    if not segments:
+        raise RuntimeError("ELF64 object contains no PT_LOAD segment")
+    return order, segments
+
+
+def vaddr_to_file_offset(vaddr: int, segments: list[tuple[int, int, int]], blob_size: int) -> int:
+    matches = [offset + (vaddr - base) for base, offset, size in segments if base <= vaddr < base + size]
+    if len(matches) != 1 or matches[0] >= blob_size:
+        raise RuntimeError(f"fatbin virtual address 0x{vaddr:x} does not map to one file byte")
+    return matches[0]
+
+
+def parse_fatbin_files(
+    blob: mmap.mmap, order: str, fatbin_offset: int, files_size: int
+) -> list[FatbinFile]:
+    file_header = struct.Struct(order + "HHIIIIIIIIIQQQ")
+    files_start = fatbin_offset + 16
+    files_end = files_start + files_size
+    if files_end > len(blob):
+        raise RuntimeError(f"fatbin at file offset 0x{fatbin_offset:x} exceeds the exact ELF")
+    offset = files_start
+    entries: list[FatbinFile] = []
+    while offset < files_end:
+        if files_end - offset < file_header.size:
+            raise RuntimeError(f"fatbin at file offset 0x{fatbin_offset:x} has a truncated entry header")
+        fields = file_header.unpack_from(blob, offset)
+        kind, _version, header_size, payload_size = fields[:4]
+        compressed_size = fields[5]
+        sm_version, bit_width = fields[8:10]
+        flags, _unknown5, uncompressed_size = fields[11:14]
+        if header_size < file_header.size or header_size > 4096:
+            raise RuntimeError(f"fatbin entry at file offset 0x{offset:x} has invalid header_size={header_size}")
+        if payload_size > files_end - offset - header_size:
+            raise RuntimeError(f"fatbin entry at file offset 0x{offset:x} exceeds files_size")
+        entries.append(
+            FatbinFile(
+                relative_offset=offset - files_start,
+                kind=kind,
+                header_size=header_size,
+                payload_size=payload_size,
+                compressed_size=compressed_size,
+                sm_version=sm_version,
+                bit_width=bit_width,
+                flags=flags,
+                uncompressed_size=uncompressed_size,
+            )
+        )
+        offset += header_size + payload_size
+    if offset != files_end:
+        raise RuntimeError(f"fatbin at file offset 0x{fatbin_offset:x} does not consume files_size")
+    return entries
+
+
+def select_fatbin_file(entries: list[FatbinFile], target_sm: int) -> FatbinFile | None:
+    elf = [
+        entry
+        for entry in entries
+        if entry.kind == CUDA_FATBIN_KIND_ELF
+        and entry.sm_version <= target_sm
+        and entry.sm_version // 10 == target_sm // 10
+    ]
+    if elf:
+        return max(elf, key=lambda entry: entry.sm_version)
+    ptx = [entry for entry in entries if entry.kind == CUDA_FATBIN_KIND_PTX and entry.sm_version <= target_sm]
+    return max(ptx, key=lambda entry: entry.sm_version) if ptx else None
+
+
+def fatbin_codec(entry: FatbinFile) -> str:
+    lz4 = bool(entry.flags & CUDA_FATBIN_FLAG_COMPRESSED_LZ4)
+    zstd = bool(entry.flags & CUDA_FATBIN_FLAG_COMPRESSED_ZSTD)
+    if lz4 and zstd:
+        return "lz4+zstd"
+    if lz4:
+        return "lz4"
+    if zstd:
+        return "zstd"
+    return "raw"
+
+
+def predict_route(entry: FatbinFile, bar2_size: int, host_decoded_limit: int) -> tuple[str, int | None]:
+    codec = fatbin_codec(entry)
+    if codec == "lz4+zstd":
+        return "unsupported-codec", None
+    if entry.kind == CUDA_FATBIN_KIND_ELF and codec in {"lz4", "zstd"}:
+        if not entry.compressed_size or entry.compressed_size > entry.payload_size or not entry.uncompressed_size:
+            return "invalid-compressed-entry", None
+        if entry.compressed_size > bar2_size:
+            return "transport-overflow", None
+        if entry.uncompressed_size > host_decoded_limit:
+            return "host-decode-overflow", None
+        return f"{codec}-bar2-host-decode", 0
+
+    transfer_size = entry.payload_size
+    if codec != "raw":
+        if not entry.compressed_size or entry.compressed_size > entry.payload_size or not entry.uncompressed_size:
+            return "invalid-compressed-entry", None
+        transfer_size = entry.uncompressed_size
+    if not transfer_size:
+        return "invalid-raw-entry", None
+    if transfer_size > bar2_size:
+        return "transport-overflow", None
+    return ("raw-elf-bar2" if entry.kind == CUDA_FATBIN_KIND_ELF else "decoded-ptx-bar2"), 0
+
+
+def fatbin_transport_facts(
+    library: pathlib.Path,
+    sections: list[ElfSection],
+    target_sm: int,
+    bar2_size: int,
+    host_decoded_limit: int,
+) -> dict[str, Any]:
+    registration_sections = [section for section in sections if section.name == ".nvFatBinSegment"]
+    if len(registration_sections) != 1:
+        raise RuntimeError("fatbin transport prediction requires one .nvFatBinSegment section")
+    section = registration_sections[0]
+    count, remainder = divmod(section.size, CUDA_FATBIN_DESCRIPTOR_SIZE_BYTES)
+    if remainder:
+        raise RuntimeError(".nvFatBinSegment is not divisible by the 24-byte wrapper shape")
+
+    wrappers: list[dict[str, Any]] = []
+    route_counts: Counter[str] = Counter()
+    with library.open("rb") as source:
+        blob = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            order, segments = elf64_load_segments(blob)
+            wrapper_struct = struct.Struct(order + "IIQQ")
+            fatbin_header = struct.Struct(order + "IHHQ")
+            for index in range(count):
+                wrapper_offset = section.offset + index * wrapper_struct.size
+                wrapper_vaddr = section.address + index * wrapper_struct.size
+                fact: dict[str, Any] = {
+                    "descriptor_index": index,
+                    "wrapper_vaddr": f"0x{wrapper_vaddr:x}",
+                    "wrapper_file_offset": wrapper_offset,
+                }
+                try:
+                    magic, version, data_vaddr, filename_or_fatbins = wrapper_struct.unpack_from(blob, wrapper_offset)
+                    fact.update(
+                        {
+                            "magic": f"0x{magic:x}",
+                            "version": version,
+                            "data_vaddr": f"0x{data_vaddr:x}",
+                            "filename_or_fatbins": f"0x{filename_or_fatbins:x}",
+                        }
+                    )
+                    if magic != CUDA_FATBINC_MAGIC or version != CUDA_FATBINC_VERSION or not data_vaddr:
+                        raise RuntimeError("descriptor is not a supported CudartFatbincWrapper")
+                    fatbin_offset = vaddr_to_file_offset(data_vaddr, segments, len(blob))
+                    fat_magic, fat_version, header_size, files_size = fatbin_header.unpack_from(blob, fatbin_offset)
+                    if (fat_magic, fat_version, header_size) != (
+                        CUDA_FATBIN_MAGIC,
+                        CUDA_FATBIN_VERSION,
+                        fatbin_header.size,
+                    ):
+                        raise RuntimeError("wrapper does not point to a supported fatbin header")
+                    entries = parse_fatbin_files(blob, order, fatbin_offset, files_size)
+                    selected = select_fatbin_file(entries, target_sm)
+                    fact.update(
+                        {
+                            "fatbin_vaddr": f"0x{data_vaddr:x}",
+                            "fatbin_file_offset": fatbin_offset,
+                            "fatbin_files_size": files_size,
+                            "entry_count": len(entries),
+                        }
+                    )
+                    if selected is None:
+                        route = "no-compatible-image"
+                        fact.update({"selected": None, "route": route, "expected_get_module_result": 209})
+                    else:
+                        route, expected_result = predict_route(selected, bar2_size, host_decoded_limit)
+                        fact.update(
+                            {
+                                "selected": selected.json(),
+                                "route": route,
+                                "expected_get_module_result": expected_result,
+                            }
+                        )
+                except (RuntimeError, struct.error) as error:
+                    route = "malformed-wrapper"
+                    fact.update({"route": route, "expected_get_module_result": None, "error": str(error)})
+                route_counts[route] += 1
+                wrappers.append(fact)
+        finally:
+            blob.close()
+
+    invalid_routes = {
+        "unsupported-codec",
+        "invalid-compressed-entry",
+        "invalid-raw-entry",
+        "transport-overflow",
+        "host-decode-overflow",
+        "malformed-wrapper",
+    }
+    invalid = [fact for fact in wrappers if fact["route"] in invalid_routes]
+    return {
+        "target_sm": target_sm,
+        "bar2_data_size": bar2_size,
+        "host_decoded_limit": host_decoded_limit,
+        "wrapper_count": len(wrappers),
+        "route_counts": dict(sorted(route_counts.items())),
+        "invalid_count": len(invalid),
+        "invalid_descriptors": [fact["descriptor_index"] for fact in invalid],
+        "wrappers": wrappers,
+    }
+
+
 class Collector:
     def __init__(self, output: pathlib.Path):
         self.output = output
@@ -319,6 +591,32 @@ def collect(args: argparse.Namespace) -> int:
         errors.append(
             ".nvFatBinSegment size is not divisible by the 24-byte CUDA fatbin registration descriptor"
         )
+
+    transport: dict[str, Any] | None = None
+    transport_args = (args.fatbin_target_sm, args.bar2_data_size, args.host_decoded_limit)
+    if any(value is not None for value in transport_args):
+        if any(value is None for value in transport_args):
+            errors.append(
+                "fatbin transport prediction requires --fatbin-target-sm, --bar2-data-size and "
+                "--host-decoded-limit together"
+            )
+        elif sections:
+            try:
+                transport = fatbin_transport_facts(
+                    library,
+                    sections,
+                    args.fatbin_target_sm,
+                    args.bar2_data_size,
+                    args.host_decoded_limit,
+                )
+                if transport["invalid_count"]:
+                    preview = ",".join(str(value) for value in transport["invalid_descriptors"][:20])
+                    errors.append(
+                        "fatbin transport prediction found "
+                        f"{transport['invalid_count']} non-runnable wrapper routes; descriptor_indices={preview}"
+                    )
+            except RuntimeError as error:
+                errors.append(str(error))
 
     cuobjdump = shutil.which("cuobjdump")
     if cuobjdump:
@@ -404,6 +702,7 @@ def collect(args: argparse.Namespace) -> int:
         "library": {"path": str(library), "sha256": actual_sha256, "build_id": build_id(notes)},
         "elf_sections": [section.json() for section in sections],
         "cuda_fatbin_registration": registration,
+        "cuda_fatbin_transport": transport,
         "queries": all_queries,
         "commands": collector.commands,
         "transcripts": collector.transcripts,
@@ -455,6 +754,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--dwarf-decoded-line",
         action="store_true",
         help="额外保存 readelf --debug-dump=decodedline；适合有 DWARF 的 source/PC 对照",
+    )
+    parser.add_argument(
+        "--fatbin-target-sm",
+        type=parse_positive,
+        help="对.nvFatBinSegment的每个wrapper执行guest同语义选择的target SM，例如89",
+    )
+    parser.add_argument(
+        "--bar2-data-size",
+        type=parse_positive,
+        help="当前exact guest/QEMU共享的BAR2 payload字节上限",
+    )
+    parser.add_argument(
+        "--host-decoded-limit",
+        type=parse_positive,
+        help="QEMU host为压缩CUBIN分配decoded buffer的字节上限",
     )
     return parser.parse_args(argv)
 

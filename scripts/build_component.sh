@@ -99,6 +99,8 @@ install -m 0755 "$GUEST_DIR/libcublas_create_probe.so" "$PAYLOAD/guest/libcublas
 # to clone a floating component repository to reconstruct its API route.
 install -m 0644 "$GUEST_DIR/libcuda.c" "$PAYLOAD/evidence/cuda-api/libcuda.c"
 install -m 0644 "$GUEST_DIR/cxl_gpu_cmd.h" "$PAYLOAD/evidence/cuda-api/cxl_gpu_cmd.h"
+install -m 0755 "$GUEST_DIR/collect_cuda_elf_static_evidence.py" \
+    "$PAYLOAD/evidence/cuda-api/collect_cuda_elf_static_evidence.py"
 ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
 
 python3 scripts/component_artifact.py verify-profile --payload "$PAYLOAD" --profile "$PROFILE"
