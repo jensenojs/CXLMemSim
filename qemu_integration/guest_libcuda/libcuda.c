@@ -357,14 +357,41 @@ static bool cxl_gpu_handle_id(const void *handle, uint64_t *id) {
     return true;
 }
 
+#define CXL_GPU_STREAM_HANDLE_TAG (UINT64_C(1) << 32)
+
+static inline CUstream cxl_gpu_stream_handle_from_id(uint64_t id) {
+    return (CUstream)(uintptr_t)(CXL_GPU_STREAM_HANDLE_TAG | id);
+}
+
+static bool cxl_gpu_stream_handle_id(CUstream stream, uint64_t *id) {
+    uint64_t value = (uint64_t)(uintptr_t)stream;
+
+    if (!id || value < CXL_GPU_STREAM_HANDLE_TAG ||
+        value > CXL_GPU_STREAM_HANDLE_TAG + UINT32_MAX)
+        return false;
+    *id = value - CXL_GPU_STREAM_HANDLE_TAG;
+    return true;
+}
+
 static bool cxl_gpu_stream_wire(CUstream stream, uint64_t *wire) {
+    uint64_t value;
+
     if (!wire)
         return false;
     if (!stream) {
-        *wire = UINT64_MAX;
+        *wire = CXL_GPU_STREAM_WIRE_NULL;
         return true;
     }
-    return cxl_gpu_handle_id(stream, wire);
+    value = (uint64_t)(uintptr_t)stream;
+    if (value == 1) {
+        *wire = CXL_GPU_STREAM_WIRE_LEGACY;
+        return true;
+    }
+    if (value == 2) {
+        *wire = CXL_GPU_STREAM_WIRE_PER_THREAD;
+        return true;
+    }
+    return cxl_gpu_stream_handle_id(stream, wire);
 }
 
 static CXLLinkOutput *link_output_get(uint64_t id, bool create) {
@@ -3347,7 +3374,7 @@ CUresult cuStreamCreate(CUstream *phStream, unsigned int Flags) {
             cmd_unlock();
             return CUDA_ERROR_INVALID_HANDLE;
         }
-        *phStream = (CUstream)cxl_gpu_handle_from_id(id);
+        *phStream = cxl_gpu_stream_handle_from_id(id);
     }
     cmd_unlock();
     return result;
@@ -3357,7 +3384,7 @@ CUresult cuStreamDestroy_v2(CUstream hStream) {
     uint64_t id;
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
-    if (!cxl_gpu_handle_id(hStream, &id))
+    if (!cxl_gpu_stream_handle_id(hStream, &id))
         return CUDA_ERROR_INVALID_HANDLE;
     cmd_lock();
     reg_write64(CXL_GPU_REG_PARAM0, id);
