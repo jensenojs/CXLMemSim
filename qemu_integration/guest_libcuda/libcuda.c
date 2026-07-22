@@ -359,6 +359,12 @@ static bool cxl_gpu_handle_id(const void *handle, uint64_t *id) {
 
 #define CXL_GPU_STREAM_HANDLE_TAG (UINT64_C(1) << 32)
 
+_Static_assert(CXL_GPU_STREAM_HANDLE_TAG > 2,
+               "owned stream handles must not overlap CUDA special streams");
+_Static_assert(CXL_GPU_STREAM_HANDLE_TAG + UINT32_MAX <
+                   CXL_GPU_STREAM_WIRE_PER_THREAD,
+               "owned stream handles must not overlap BAR2 stream sentinels");
+
 static inline CUstream cxl_gpu_stream_handle_from_id(uint64_t id) {
     return (CUstream)(uintptr_t)(CXL_GPU_STREAM_HANDLE_TAG | id);
 }
