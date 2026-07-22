@@ -2011,6 +2011,57 @@ CUresult cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice, size_t byteCoun
     return cuMemcpyDtoHAsync_v2(dstHost, srcDevice, byteCount, hStream);
 }
 
+CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                         size_t byteCount);
+
+static CUresult cxl_cuda_pointer_is_device(CUdeviceptr ptr, bool *is_device) {
+    if (!is_device)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, ptr);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MEM_GET_POINTER_MEMORY_TYPE);
+    if (result == CUDA_SUCCESS) {
+        int memory_type = (int)reg_read64(CXL_GPU_REG_RESULT0);
+        *is_device = memory_type == 2 || memory_type == 4;
+    }
+    cmd_unlock();
+
+    if (result == CUDA_ERROR_INVALID_VALUE) {
+        *is_device = false;
+        return CUDA_SUCCESS;
+    }
+    return result;
+}
+
+CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t byteCount) {
+    DLOG("cuMemcpy(dst=0x%lx, src=0x%lx, size=%zu)\n",
+         (unsigned long)dst, (unsigned long)src, byteCount);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!dst || !src)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    bool dst_is_device = false;
+    bool src_is_device = false;
+    CUresult result = cxl_cuda_pointer_is_device(dst, &dst_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+    result = cxl_cuda_pointer_is_device(src, &src_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+
+    if (dst_is_device && src_is_device)
+        return cuMemcpyDtoD_v2(dst, src, byteCount);
+    if (dst_is_device)
+        return cuMemcpyHtoD_v2(dst, (const void *)(uintptr_t)src, byteCount);
+    if (src_is_device)
+        return cuMemcpyDtoH_v2((void *)(uintptr_t)dst, src, byteCount);
+
+    memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, byteCount);
+    return CUDA_SUCCESS;
+}
+
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     DLOG("cuModuleLoadData\n");
     if (!g_initialized)
