@@ -3460,18 +3460,39 @@ CUresult cuPointerGetAttribute(void *data, int attribute, CUdeviceptr ptr) {
     if (!data)
         return CUDA_ERROR_INVALID_VALUE;
 
-    /* Minimal implementation */
     switch (attribute) {
     case 1: /* CU_POINTER_ATTRIBUTE_CONTEXT */
         /* Allocation owner is a property of ptr, not the calling thread's
          * current context.  This shim does not maintain allocation provenance. */
         return CUDA_ERROR_NOT_SUPPORTED;
     case 2: /* CU_POINTER_ATTRIBUTE_MEMORY_TYPE */
-        *(int *)data = 2; /* Device memory */
-        return CUDA_SUCCESS;
+        {
+            bool is_device = false;
+            CUresult result = cxl_cuda_pointer_is_device(ptr, &is_device);
+            if (result != CUDA_SUCCESS)
+                return result;
+            *(int *)data = is_device ? 2 : 1;
+            return CUDA_SUCCESS;
+        }
     default:
         return CUDA_ERROR_INVALID_VALUE;
     }
+}
+
+CUresult cuPointerGetAttributes(unsigned int numAttributes, int *attributes,
+                                void **data, CUdeviceptr ptr) {
+    DLOG("cuPointerGetAttributes(count=%u, ptr=0x%lx)\n", numAttributes,
+         (unsigned long)ptr);
+    if ((numAttributes != 0 && (!attributes || !data)))
+        return CUDA_ERROR_INVALID_VALUE;
+
+    for (unsigned int index = 0; index < numAttributes; index++) {
+        CUresult result = cuPointerGetAttribute(data[index], attributes[index],
+                                                ptr);
+        if (result != CUDA_SUCCESS)
+            return result;
+    }
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleUnload(CUmodule hmod) {
