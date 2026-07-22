@@ -400,6 +400,112 @@ static bool cxl_gpu_stream_wire(CUstream stream, uint64_t *wire) {
     return cxl_gpu_stream_handle_id(stream, wire);
 }
 
+static CUresult cublas_private_context_token(CUcontext context,
+                                             uintptr_t *token) {
+    uintptr_t current;
+    CUresult result;
+
+    if (!token)
+        return CUDA_ERROR_INVALID_VALUE;
+    result = cxl_cuda_context_get_current_live(&current);
+    if (result != CUDA_SUCCESS)
+        return result;
+    if ((uintptr_t)context != current)
+        return CUDA_ERROR_INVALID_CONTEXT;
+    *token = current;
+    return CUDA_SUCCESS;
+}
+
+static CUresult cublas_private_context_key(CUcontext context,
+                                           uint64_t *key) {
+    uintptr_t token;
+    CUresult result = cublas_private_context_token(context, &token);
+
+    if (result != CUDA_SUCCESS) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot4(context=%p, key=%p) -> %d\n",
+             context, (void *)key, result);
+        return result;
+    }
+    *key = (uint64_t)token;
+    DLOG("CUBLAS_CONTEXT_STREAM.slot4(context=%p) -> key=%" PRIu64
+         " CUDA_SUCCESS\n",
+         context, *key);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cublas_private_stream_from_public(CUcontext context,
+                                                  CUstream stream,
+                                                  void **private_stream,
+                                                  int per_thread) {
+    uintptr_t token;
+    uint64_t wire;
+    CUresult result;
+
+    (void)per_thread;
+    if (!private_stream) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot51(context=%p, stream=%p) -> CUDA_ERROR_INVALID_VALUE\n",
+             context, stream);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    result = cublas_private_context_token(context, &token);
+    if (result != CUDA_SUCCESS) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot51(context=%p, stream=%p) -> %d\n",
+             context, stream, result);
+        return result;
+    }
+    (void)token;
+    if (!cxl_gpu_stream_wire(stream, &wire)) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot51(context=%p, stream=%p) -> CUDA_ERROR_INVALID_HANDLE\n",
+             context, stream);
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+
+    if ((uintptr_t)stream <= 2)
+        *private_stream = (void *)(uintptr_t)wire;
+    else
+        *private_stream = stream;
+    DLOG("CUBLAS_CONTEXT_STREAM.slot51(context=%p, stream=%p, per_thread=%d) -> private_stream=%p CUDA_SUCCESS\n",
+         context, stream, per_thread, *private_stream);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cublas_private_stream_identity(CUcontext context,
+                                               const void *private_stream,
+                                               uint64_t *identity) {
+    uintptr_t token;
+    uint64_t value;
+    uint64_t id;
+    CUresult result;
+
+    if (!private_stream || !identity) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot39(context=%p, private_stream=%p, identity=%p) -> CUDA_ERROR_INVALID_VALUE\n",
+             context, private_stream, (void *)identity);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    result = cublas_private_context_token(context, &token);
+    if (result != CUDA_SUCCESS) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot39(context=%p, private_stream=%p) -> %d\n",
+             context, private_stream, result);
+        return result;
+    }
+    (void)token;
+
+    value = (uint64_t)(uintptr_t)private_stream;
+    if (value != CXL_GPU_STREAM_WIRE_NULL &&
+        value != CXL_GPU_STREAM_WIRE_LEGACY &&
+        value != CXL_GPU_STREAM_WIRE_PER_THREAD &&
+        !cxl_gpu_stream_handle_id((CUstream)private_stream, &id)) {
+        DLOG("CUBLAS_CONTEXT_STREAM.slot39(context=%p, private_stream=%p) -> CUDA_ERROR_INVALID_HANDLE\n",
+             context, private_stream);
+        return CUDA_ERROR_INVALID_HANDLE;
+    }
+    *identity = value;
+    DLOG("CUBLAS_CONTEXT_STREAM.slot39(context=%p, private_stream=%p) -> identity=%" PRIu64
+         " CUDA_SUCCESS\n",
+         context, private_stream, *identity);
+    return CUDA_SUCCESS;
+}
+
 static CXLLinkOutput *link_output_get(uint64_t id, bool create) {
     for (CXLLinkOutput *output = g_link_outputs; output; output = output->next) {
         if (output->id == id)
@@ -1596,6 +1702,11 @@ static const unsigned char CONTEXT_CHECKS_UUID[16] = {0x26, 0x3e, 0x88, 0x60, 0x
 static const unsigned char INTEGRITY_CHECK_UUID[16] = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b,
                                                        0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2};
 
+static const unsigned char CUBLAS_CONTEXT_STREAM_UUID[16] = {
+    0x21, 0x31, 0x8c, 0x60, 0x97, 0x14, 0x32, 0x48,
+    0x8c, 0xa6, 0x41, 0xff, 0x73, 0x24, 0xc8, 0xf2,
+};
+
 static const unsigned char F8CFF951_EXPORT_UUID[16] = {0xf8, 0xcf, 0xf9, 0x51, 0x21, 0x46, 0x8b, 0x4e,
                                                        0xb9, 0xe2, 0xfb, 0x46, 0x9e, 0x7c, 0x0d, 0xd9};
 
@@ -1751,6 +1862,13 @@ static const void *INTEGRITY_CHECK_TABLE[3] = {
     (const void *)integrity_check_set_enabled,
 };
 
+static const void *CUBLAS_CONTEXT_STREAM_TABLE[93] = {
+    [0] = (const void *)(uintptr_t)(sizeof(CUBLAS_CONTEXT_STREAM_TABLE)),
+    [4] = (const void *)cublas_private_context_key,
+    [39] = (const void *)cublas_private_stream_identity,
+    [51] = (const void *)cublas_private_stream_from_public,
+};
+
 CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTableId) {
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
 
@@ -1809,6 +1927,13 @@ CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTable
     if (uuid_equal(pExportTableId, INTEGRITY_CHECK_UUID)) {
         *ppExportTable = INTEGRITY_CHECK_TABLE;
         DLOG("cuGetExportTable -> INTEGRITY_CHECK_TABLE size=%zu\n", sizeof(INTEGRITY_CHECK_TABLE));
+        return CUDA_SUCCESS;
+    }
+
+    if (uuid_equal(pExportTableId, CUBLAS_CONTEXT_STREAM_UUID)) {
+        *ppExportTable = CUBLAS_CONTEXT_STREAM_TABLE;
+        DLOG("cuGetExportTable -> CUBLAS_CONTEXT_STREAM_TABLE size=%zu\n",
+             sizeof(CUBLAS_CONTEXT_STREAM_TABLE));
         return CUDA_SUCCESS;
     }
 

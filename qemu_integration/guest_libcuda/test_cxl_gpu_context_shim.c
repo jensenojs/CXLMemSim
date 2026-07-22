@@ -119,6 +119,7 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOption
                            unsigned int numLibraryOptions);
 CUresult cuLibraryUnload(CUlibrary library);
 CUresult cuLibraryGetModule(void **module, CUlibrary library);
+CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -155,6 +156,10 @@ static const CUuuid context_checks_uuid = {
     .bytes = {0x26, 0x3e, 0x88, 0x60, 0x7c, 0xd2, 0x61, 0x43, 0x92, 0xf6, 0xbb, 0xd5, 0x00, 0x6d, 0xfa, 0x7e},
 };
 
+static const CUuuid cublas_context_stream_uuid = {
+    .bytes = {0x21, 0x31, 0x8c, 0x60, 0x97, 0x14, 0x32, 0x48, 0x8c, 0xa6, 0x41, 0xff, 0x73, 0x24, 0xc8, 0xf2},
+};
+
 typedef struct DestroyedContextThread {
     pthread_barrier_t attached;
     pthread_barrier_t destroyed;
@@ -174,6 +179,9 @@ static CUresult fake_execute(uint32_t command) {
     switch (command) {
     case CXL_GPU_CMD_CTX_CREATE:
         cxl_cuda_test_write_result(0, issued_token);
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_STREAM_CREATE:
+        cxl_cuda_test_write_result(0, 7);
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MEM_GET_INFO:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
@@ -466,6 +474,59 @@ static int test_context_check_preserves_result2(void) {
     return 0;
 }
 
+static int test_cublas_context_stream_export_table(void) {
+    typedef CUresult (*context_key_t)(CUcontext context, uint64_t *key);
+    typedef CUresult (*stream_from_public_t)(CUcontext context, CUstream stream, void **private_stream,
+                                             int per_thread);
+    typedef CUresult (*stream_identity_t)(CUcontext context, const void *private_stream, uint64_t *identity);
+    const void *table = NULL;
+    CUcontext context = NULL;
+    CUstream stream = NULL;
+    void *private_stream = NULL;
+    uint64_t key = 0;
+    uint64_t identity = 0;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    CHECK(cuCtxCreate_v2(&context, 0, 0) == CUDA_SUCCESS);
+    CHECK(cuGetExportTable(&table, &cublas_context_stream_uuid) == CUDA_SUCCESS);
+    CHECK(table != NULL);
+    const void *const *slots = table;
+    CHECK((uintptr_t)slots[0] == 93 * sizeof(void *));
+    CHECK(slots[4] != NULL && slots[39] != NULL && slots[51] != NULL);
+
+    context_key_t context_key = (context_key_t)slots[4];
+    stream_identity_t stream_identity = (stream_identity_t)slots[39];
+    stream_from_public_t stream_from_public = (stream_from_public_t)slots[51];
+    CHECK(context_key(context, &key) == CUDA_SUCCESS);
+    CHECK(key == issued_token);
+    CHECK(context_key((CUcontext)(uintptr_t)(issued_token + 1), &key) == CUDA_ERROR_INVALID_CONTEXT);
+
+    CHECK(stream_from_public(context, NULL, &private_stream, 0) == CUDA_SUCCESS);
+    CHECK((uintptr_t)private_stream == CXL_GPU_STREAM_WIRE_NULL);
+    CHECK(stream_identity(context, private_stream, &identity) == CUDA_SUCCESS);
+    CHECK(identity == CXL_GPU_STREAM_WIRE_NULL);
+    CHECK(stream_from_public(context, (CUstream)(uintptr_t)1, &private_stream, 0) == CUDA_SUCCESS);
+    CHECK((uintptr_t)private_stream == CXL_GPU_STREAM_WIRE_LEGACY);
+    CHECK(stream_from_public(context, (CUstream)(uintptr_t)2, &private_stream, 1) == CUDA_SUCCESS);
+    CHECK((uintptr_t)private_stream == CXL_GPU_STREAM_WIRE_PER_THREAD);
+
+    CHECK(cuStreamCreate(&stream, 0) == CUDA_SUCCESS);
+    CHECK(stream != NULL);
+    CHECK(stream_from_public(context, stream, &private_stream, 0) == CUDA_SUCCESS);
+    CHECK(private_stream == stream);
+    CHECK(stream_identity(context, private_stream, &identity) == CUDA_SUCCESS);
+    CHECK(identity == (uint64_t)(uintptr_t)stream);
+    CHECK(stream_from_public(context, (CUstream)(uintptr_t)3, &private_stream, 0) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(stream_from_public(context, stream, NULL, 0) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(stream_identity(context, NULL, &identity) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_CTX_CREATE);
+    CHECK(commands[1] == CXL_GPU_CMD_STREAM_CREATE);
+    return 0;
+}
+
 static int test_integrity_uses_runtime_device_identity(void) {
     typedef CUresult (*integrity_check_t)(uint32_t version, uint64_t unix_seconds, uint64_t result[2]);
     const void *table = NULL;
@@ -729,6 +790,7 @@ int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
            test_context_local_storage_keeps_managers_separate() || test_context_check_preserves_result2() ||
+           test_cublas_context_stream_export_table() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
            test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
