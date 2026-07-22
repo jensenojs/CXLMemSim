@@ -2062,6 +2062,17 @@ CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t byteCount) {
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount,
+                       CUstream hStream) {
+    DLOG("cuMemcpyAsync(dst=0x%lx, src=0x%lx, size=%zu, stream=%p)\n",
+         (unsigned long)dst, (unsigned long)src, byteCount, hStream);
+    (void)hStream;
+    /* knockout: the current Type-2 command path serializes copies and kernel
+     * launches. Completing the UVA-directed copy before return preserves
+     * correctness; add stream ordering only when concurrent execution exists. */
+    return cuMemcpy(dst, src, byteCount);
+}
+
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     DLOG("cuModuleLoadData\n");
     if (!g_initialized)
