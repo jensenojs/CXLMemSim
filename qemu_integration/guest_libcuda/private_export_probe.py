@@ -473,6 +473,14 @@ def verify(args: argparse.Namespace) -> int:
         pair_errors.append("natural call or return record lacks a sequence")
     if call_sequences != return_sequences:
         pair_errors.append("natural call and return sequences differ")
+    for record in calls:
+        caller_mapping = record.get("caller_mapping")
+        if not isinstance(caller_mapping, dict):
+            pair_errors.append(f"natural call {record.get('sequence')} lacks caller_mapping")
+            continue
+        for field in ("realpath", "sha256", "build_id", "image_offset"):
+            if not caller_mapping.get(field):
+                pair_errors.append(f"natural call {record.get('sequence')} caller mapping lacks {field}")
     if gdb_status.get("unreturned_sequences"):
         pair_errors.append("natural private calls remained unreturned at process exit")
     if driver_observation is not None:
@@ -1440,6 +1448,7 @@ if gdb is not None:
         def observe_function_entry(self, address: int) -> None:
             mappings = sorted(self.slot_by_address[address], key=lambda item: (item.uuid, item.slot))
             frame = gdb.newest_frame()
+            caller_mapping = self.caller_mapping(frame)
             registers = self.registers()
             rdi = int(registers["rdi"], 16)
             selector_candidate = rdi if rdi <= self.config["selector_max"] else None
@@ -1456,6 +1465,7 @@ if gdb is not None:
                     "address": hex_address(address),
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in mappings],
                     "caller": hex_address(self.caller_address(frame)),
+                    "caller_mapping": caller_mapping,
                     "thread": None if thread is None else thread.global_num,
                     "entry_registers": registers,
                     "selector_candidate": selector_candidate,
