@@ -20,16 +20,17 @@ from private_export_probe import (
 
 class TableSlotSelectionTests(unittest.TestCase):
     def test_discovery_observes_every_callable_slot(self) -> None:
-        config = {"mode": "discovery", "uuid": None, "slot": None}
+        config = {"mode": "discovery", "uuid": None, "slots": []}
 
         self.assertTrue(observe_table_slot(config, "first", 1))
         self.assertTrue(observe_table_slot(config, "second", 99))
 
     def test_capture_observes_only_the_declared_uuid_and_slot(self) -> None:
-        config = {"mode": "capture", "uuid": "target", "slot": 39}
+        config = {"mode": "capture", "uuid": "target", "slots": [4, 39, 51]}
 
         self.assertTrue(observe_table_slot(config, "target", 39))
-        self.assertFalse(observe_table_slot(config, "target", 4))
+        self.assertTrue(observe_table_slot(config, "target", 4))
+        self.assertFalse(observe_table_slot(config, "target", 40))
         self.assertFalse(observe_table_slot(config, "other", 39))
 
 

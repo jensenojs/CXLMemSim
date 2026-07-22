@@ -14,7 +14,7 @@ usage:
        --driver-output-register REGISTER --driver-event-limit N] \
       [--resolver-symbol SYMBOL --resolver-event-limit N] \
       [--separate-inferior-io] -- TRIGGER [ARGS...]
-  run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N \
+  run_private_export_probe.sh --mode capture --output-dir DIR --uuid UUID --slot N [--slot N ...] \
       [--selector VALUE] [--memory REGISTER:BYTES ...] \
       [--output-buffer POINTER_OUT_REGISTER:SIZE_OUT_REGISTER:MAX_BYTES] \
       [--driver-symbol SYMBOL --driver-code-register REGISTER \
@@ -59,7 +59,7 @@ readonly PROBE
 mode=
 output_dir=
 uuid=
-slot=
+slots=()
 selector=
 memory=()
 output_buffer=
@@ -77,7 +77,7 @@ while [[ $# -gt 0 ]]; do
         --mode) mode=${2:-}; shift 2 ;;
         --output-dir) output_dir=${2:-}; shift 2 ;;
         --uuid) uuid=${2:-}; shift 2 ;;
-        --slot) slot=${2:-}; shift 2 ;;
+        --slot) slots+=("${2:-}"); shift 2 ;;
         --selector) selector=${2:-}; shift 2 ;;
         --memory) memory+=("${2:-}"); shift 2 ;;
         --output-buffer) output_buffer=${2:-}; shift 2 ;;
@@ -102,9 +102,9 @@ done
 [[ $# -gt 0 ]] || die "trigger argv after -- is required"
 [[ ! -e $output_dir ]] || die "output directory already exists: $output_dir"
 if [[ $mode == capture ]]; then
-    [[ -n $uuid && -n $slot ]] || die "capture requires --uuid and --slot"
+    [[ -n $uuid && ${#slots[@]} -gt 0 ]] || die "capture requires --uuid and --slot"
 else
-    [[ -z $uuid && -z $slot && -z $selector && ${#memory[@]} -eq 0 && -z $output_buffer ]] || die "discovery does not accept capture filters"
+    [[ -z $uuid && ${#slots[@]} -eq 0 && -z $selector && ${#memory[@]} -eq 0 && -z $output_buffer ]] || die "discovery does not accept capture filters"
 fi
 driver_argument_count=0
 for value in "$driver_symbol" "$driver_code_register" "$driver_output_register" "$driver_event_limit"; do
@@ -119,7 +119,9 @@ done
 
 prepare=(python3 "$PROBE" prepare --output-dir "$output_dir" --source-root "$ROOT" --mode "$mode")
 [[ -n $uuid ]] && prepare+=(--uuid "$uuid")
-[[ -n $slot ]] && prepare+=(--slot "$slot")
+for slot in "${slots[@]}"; do
+    prepare+=(--slot "$slot")
+done
 [[ -n $selector ]] && prepare+=(--selector "$selector")
 for window in "${memory[@]}"; do
     prepare+=(--memory "$window")

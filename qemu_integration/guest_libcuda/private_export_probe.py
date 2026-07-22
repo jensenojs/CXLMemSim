@@ -108,7 +108,7 @@ def parse_driver_symbol(text: str) -> str:
 def observe_table_slot(config: dict[str, Any], uuid: str, slot: int) -> bool:
     if config["mode"] == "discovery":
         return True
-    return uuid == config["uuid"] and slot == config["slot"]
+    return uuid == config["uuid"] and slot in config["slots"]
 
 
 def parse_proc_maps(text: str) -> list[dict[str, Any]]:
@@ -331,10 +331,10 @@ def prepare(args: argparse.Namespace) -> int:
     trigger_argv = args.trigger[1:] if args.trigger[:1] == ["--"] else args.trigger
     if not trigger_argv:
         raise RuntimeError("trigger argv after -- is required")
-    if args.mode == "capture" and (args.uuid is None or args.slot is None):
+    if args.mode == "capture" and (args.uuid is None or not args.slot):
         raise RuntimeError("capture mode requires --uuid and --slot")
     if args.mode == "discovery" and (
-        any(value is not None for value in (args.uuid, args.slot, args.selector)) or args.memory or args.output_buffer
+        args.uuid is not None or args.slot or args.selector is not None or args.memory or args.output_buffer
     ):
         raise RuntimeError("discovery mode does not accept capture filters")
     driver_values = (args.driver_symbol, args.driver_code_register, args.driver_output_register)
@@ -378,7 +378,7 @@ def prepare(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "output_dir": str(output),
         "uuid": args.uuid,
-        "slot": args.slot,
+        "slots": args.slot,
         "selector": args.selector,
         "memory": args.memory,
         "output_buffer": args.output_buffer,
@@ -691,7 +691,7 @@ def verify(args: argparse.Namespace) -> int:
     expected = {
         "mode": config["mode"],
         "uuid": config.get("uuid"),
-        "slot": config.get("slot"),
+        "slots": config.get("slots", []),
         "selector": config.get("selector"),
     }
     if config["mode"] == "discovery":
@@ -819,7 +819,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     prepare_parser.add_argument("--source-root", required=True)
     prepare_parser.add_argument("--mode", required=True, choices=("discovery", "capture"))
     prepare_parser.add_argument("--uuid", type=parse_uuid)
-    prepare_parser.add_argument("--slot", type=parse_nonnegative)
+    prepare_parser.add_argument("--slot", type=parse_nonnegative, action="append", default=[])
     prepare_parser.add_argument("--selector", type=parse_nonnegative)
     prepare_parser.add_argument("--memory", type=parse_memory, action="append", default=[])
     prepare_parser.add_argument("--output-buffer", type=parse_output_buffer)
@@ -1498,7 +1498,7 @@ if gdb is not None:
         def capture_matches(self, mapping: TableSlot, selector_candidate: int | None) -> bool:
             if self.config["mode"] != "capture":
                 return False
-            if mapping.uuid != self.config["uuid"] or mapping.slot != self.config["slot"]:
+            if mapping.uuid != self.config["uuid"] or mapping.slot not in self.config["slots"]:
                 return False
             selector = self.config.get("selector")
             return selector is None or selector == selector_candidate
@@ -1574,7 +1574,11 @@ if gdb is not None:
 
     class TableFunctionBreakpoint(gdb.Breakpoint):
         def __init__(self, observer: ProbeObserver, address: int) -> None:
-            super().__init__(f"*{address:#x}", internal=True)
+            super().__init__(
+                f"*{address:#x}",
+                internal=True,
+                temporary=observer.config["mode"] == "capture",
+            )
             self.observer = observer
             self.address = address
 
