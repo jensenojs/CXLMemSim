@@ -209,6 +209,17 @@ static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLI
 static uintptr_t g_cudart_placeholder_kernel = 0x4358444b45524e4cULL; /* "CXDKERNL" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_function = 0x43584446554e4354ULL; /* "CXDFUNCT" diagnostic placeholder */
 
+typedef struct CXLGraphKernelNodeSnapshot {
+    uint64_t node_id;
+    CUDA_KERNEL_NODE_PARAMS params;
+    void **kernel_params;
+    uint8_t *param_bytes;
+    struct CXLGraphKernelNodeSnapshot *next;
+} CXLGraphKernelNodeSnapshot;
+
+static CXLGraphKernelNodeSnapshot *g_graph_kernel_node_snapshots;
+static void graph_kernel_node_snapshots_clear(void);
+
 #define CUDART_LIBRARY_RECORD_OPTION_CAP 4
 #define CUDART_LIBRARY_RECORD_MAGIC 0x43584c4942524152ULL /* "CXLIBRAR" */
 
@@ -358,6 +369,7 @@ void cxl_cuda_test_reset(void) {
     }
     g_cudart_library_next_id = 1;
     g_api_chain_sequence = 0;
+    graph_kernel_node_snapshots_clear();
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -485,6 +497,113 @@ CUresult cuGraphKernelNodeGetAttribute(CUgraphNode hNode, CUkernelNodeAttrID att
     (void)value_out;
     DLOG("cuGraphKernelNodeGetAttribute(attr=%d) -> CUDA_ERROR_NOT_SUPPORTED\n", attr);
     return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+static CXLGraphKernelNodeSnapshot *graph_kernel_node_snapshot_find(uint64_t node_id) {
+    for (CXLGraphKernelNodeSnapshot *snapshot = g_graph_kernel_node_snapshots; snapshot;
+         snapshot = snapshot->next) {
+        if (snapshot->node_id == node_id)
+            return snapshot;
+    }
+    return NULL;
+}
+
+static void graph_kernel_node_snapshots_clear(void) {
+    while (g_graph_kernel_node_snapshots) {
+        CXLGraphKernelNodeSnapshot *snapshot = g_graph_kernel_node_snapshots;
+
+        g_graph_kernel_node_snapshots = snapshot->next;
+        free(snapshot->kernel_params);
+        free(snapshot->param_bytes);
+        free(snapshot);
+    }
+}
+
+CUresult cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+    CXLGraphKernelNodeParamsWire wire = {0};
+    uint64_t node_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!hNode || !nodeParams)
+        return CUDA_ERROR_INVALID_VALUE;
+    node_id = cxl_gpu_id_from_handle(hNode);
+    if (node_id > UINT32_MAX)
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    CXLGraphKernelNodeSnapshot *snapshot = graph_kernel_node_snapshot_find(node_id);
+    if (snapshot) {
+        *nodeParams = snapshot->params;
+        cmd_unlock();
+        return CUDA_SUCCESS;
+    }
+    reg_write64(CXL_GPU_REG_PARAM0, node_id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_KERNEL_NODE_GET_PARAMS);
+    if (result != CUDA_SUCCESS) {
+        cmd_unlock();
+        return result;
+    }
+    data_read(0, &wire, sizeof(wire));
+    if (wire.function_id == UINT32_MAX || wire.reserved != 0 || wire.num_args > CXL_MAX_KERNEL_ARGS ||
+        wire.num_args > (CXL_GPU_DATA_SIZE - sizeof(wire)) / sizeof(CXLGraphKernelNodeParamWire) ||
+        (wire.num_args && wire.param_extent == 0) ||
+        wire.param_extent > CXL_GPU_DATA_SIZE - sizeof(wire) -
+            wire.num_args * sizeof(CXLGraphKernelNodeParamWire)) {
+        cmd_unlock();
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    uint8_t *param_bytes = wire.param_extent ? malloc(wire.param_extent) : NULL;
+    void **kernel_params = wire.num_args ? calloc(wire.num_args, sizeof(*kernel_params)) : NULL;
+    if ((wire.param_extent && !param_bytes) || (wire.num_args && !kernel_params)) {
+        free(param_bytes);
+        free(kernel_params);
+        cmd_unlock();
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    if (wire.param_extent)
+        data_read(sizeof(wire) + wire.num_args * sizeof(CXLGraphKernelNodeParamWire),
+                  param_bytes, wire.param_extent);
+    CXLGraphKernelNodeParamWire param_wires[CXL_MAX_KERNEL_ARGS] = {0};
+    if (wire.num_args)
+        data_read(sizeof(wire), param_wires, wire.num_args * sizeof(*param_wires));
+    CUfunction function = (CUfunction)cxl_gpu_handle_from_id(wire.function_id);
+    for (uint32_t i = 0; i < wire.num_args; i++) {
+        if (param_wires[i].offset > wire.param_extent ||
+            param_wires[i].size > wire.param_extent - param_wires[i].offset) {
+            free(param_bytes);
+            free(kernel_params);
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        kernel_params[i] = param_bytes + param_wires[i].offset;
+    }
+    snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        free(param_bytes);
+        free(kernel_params);
+        cmd_unlock();
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    snapshot->node_id = node_id;
+    snapshot->kernel_params = kernel_params;
+    snapshot->param_bytes = param_bytes;
+    snapshot->params.func = function;
+    snapshot->params.gridDimX = wire.grid_dim_x;
+    snapshot->params.gridDimY = wire.grid_dim_y;
+    snapshot->params.gridDimZ = wire.grid_dim_z;
+    snapshot->params.blockDimX = wire.block_dim_x;
+    snapshot->params.blockDimY = wire.block_dim_y;
+    snapshot->params.blockDimZ = wire.block_dim_z;
+    snapshot->params.sharedMemBytes = wire.shared_mem_bytes;
+    snapshot->params.kernelParams = kernel_params;
+    snapshot->params.extra = NULL;
+    snapshot->params.kern = NULL;
+    snapshot->params.ctx = NULL;
+    snapshot->next = g_graph_kernel_node_snapshots;
+    g_graph_kernel_node_snapshots = snapshot;
+    *nodeParams = snapshot->params;
+    cmd_unlock();
+    return CUDA_SUCCESS;
 }
 
 CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNode,
@@ -3632,6 +3751,7 @@ __attribute__((constructor)) static void libcuda_init(void) { DLOG("libcuda.so l
 
 __attribute__((destructor)) static void libcuda_cleanup(void) {
     DLOG("libcuda.so unloading\n");
+    graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);
     if (g_bar4_ptr) {
         munmap((void *)g_bar4_ptr, g_bar4_size);
