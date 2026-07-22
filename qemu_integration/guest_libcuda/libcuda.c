@@ -50,6 +50,7 @@ typedef void *CUarray;
 typedef void *CUgraph;
 typedef void *CUgraphNode;
 typedef void *CUgraphExec;
+typedef int CUgraphNodeType;
 typedef void *CUlibrary;
 typedef void *CUkernel;
 typedef int CUjit_option;
@@ -304,6 +305,18 @@ static inline void reg_write64(uint32_t offset, uint64_t value) {
 static inline void *cxl_gpu_handle_from_id(uint64_t id) { return (void *)(uintptr_t)(id + 1); }
 
 static inline uint64_t cxl_gpu_id_from_handle(const void *handle) { return (uint64_t)(uintptr_t)handle - 1; }
+
+static bool cxl_gpu_handle_id(const void *handle, uint64_t *id) {
+    uint64_t value;
+
+    if (!handle || !id)
+        return false;
+    value = cxl_gpu_id_from_handle(handle);
+    if (value > UINT32_MAX)
+        return false;
+    *id = value;
+    return true;
+}
 
 static inline void data_write(size_t offset, const void *src, size_t len) {
     cxl_gpu_transport_data_write(&g_transport, offset, src, len);
@@ -667,6 +680,168 @@ CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNod
     reg_write64(CXL_GPU_REG_PARAM6, ((uint64_t)num_args << 32) | nodeParams->sharedMemBytes);
     reg_write64(CXL_GPU_REG_PARAM7, param_extent);
     CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_EXEC_KERNEL_NODE_SET_PARAMS);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
+    uint64_t graph_exec_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hGraphExec, &graph_exec_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_exec_id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_EXEC_DESTROY);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
+    uint64_t graph_exec_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hGraphExec, &graph_exec_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    if (hStream && hStream != (CUstream)(uintptr_t)1)
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_exec_id);
+    reg_write64(CXL_GPU_REG_PARAM1, hStream ? 1 : 0);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_LAUNCH);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuGraphDestroy(CUgraph hGraph) {
+    uint64_t graph_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hGraph, &graph_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_DESTROY);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
+                            CUgraphNode *phErrorNode, char *logBuffer,
+                            size_t bufferSize) {
+    uint64_t graph_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!phGraphExec || !cxl_gpu_handle_id(hGraph, &graph_id))
+        return CUDA_ERROR_INVALID_VALUE;
+    if ((!logBuffer && bufferSize) || bufferSize > CXL_GPU_DATA_SIZE)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_id);
+    reg_write64(CXL_GPU_REG_PARAM1, bufferSize);
+    reg_write64(CXL_GPU_REG_PARAM2, phErrorNode ? 1 : 0);
+    reg_write64(CXL_GPU_REG_PARAM3, logBuffer ? 1 : 0);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_INSTANTIATE);
+    uint64_t graph_exec_id = reg_read64(CXL_GPU_REG_RESULT0);
+    uint64_t error_node_id = reg_read64(CXL_GPU_REG_RESULT1);
+    if (logBuffer && bufferSize)
+        data_read(0, logBuffer, bufferSize);
+    if (phErrorNode)
+        *phErrorNode = error_node_id == UINT64_MAX ? NULL :
+                       (CUgraphNode)cxl_gpu_handle_from_id(error_node_id);
+    if (result == CUDA_SUCCESS) {
+        if (graph_exec_id == UINT64_MAX || graph_exec_id > UINT32_MAX) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_HANDLE;
+        }
+        *phGraphExec = (CUgraphExec)cxl_gpu_handle_from_id(graph_exec_id);
+    }
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
+                               CUgraphNode *phErrorNode, char *logBuffer,
+                               size_t bufferSize) {
+    return cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer,
+                              bufferSize);
+}
+
+CUresult cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes, size_t *numNodes) {
+    uint64_t graph_id;
+    size_t capacity;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!numNodes || !cxl_gpu_handle_id(hGraph, &graph_id))
+        return CUDA_ERROR_INVALID_VALUE;
+    capacity = nodes ? *numNodes : 0;
+    if (capacity > CXL_GPU_DATA_SIZE / sizeof(uint64_t))
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_id);
+    reg_write64(CXL_GPU_REG_PARAM1, capacity);
+    reg_write64(CXL_GPU_REG_PARAM2, nodes ? 1 : 0);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_GET_NODES);
+    if (result != CUDA_SUCCESS) {
+        cmd_unlock();
+        return result;
+    }
+
+    size_t count = reg_read64(CXL_GPU_REG_RESULT0);
+    if (nodes) {
+        if (count > capacity) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        uint64_t *node_ids = count ? malloc(count * sizeof(*node_ids)) : NULL;
+        if (count && !node_ids) {
+            cmd_unlock();
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
+        if (count)
+            data_read(0, node_ids, count * sizeof(*node_ids));
+        for (size_t i = 0; i < count; i++) {
+            if (node_ids[i] > UINT32_MAX) {
+                free(node_ids);
+                cmd_unlock();
+                return CUDA_ERROR_INVALID_HANDLE;
+            }
+            nodes[i] = (CUgraphNode)cxl_gpu_handle_from_id(node_ids[i]);
+        }
+        for (size_t i = count; i < capacity; i++)
+            nodes[i] = NULL;
+        free(node_ids);
+    }
+    *numNodes = count;
+    cmd_unlock();
+    return CUDA_SUCCESS;
+}
+
+CUresult cuGraphNodeGetType(CUgraphNode hNode, CUgraphNodeType *type) {
+    uint64_t node_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!type)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!cxl_gpu_handle_id(hNode, &node_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, node_id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_NODE_GET_TYPE);
+    if (result == CUDA_SUCCESS)
+        *type = (CUgraphNodeType)(int32_t)reg_read64(CXL_GPU_REG_RESULT0);
     cmd_unlock();
     return result;
 }
