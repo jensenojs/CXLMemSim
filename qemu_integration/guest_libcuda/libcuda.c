@@ -50,6 +50,7 @@ typedef void *CUarray;
 typedef void *CUgraph;
 typedef void *CUgraphNode;
 typedef void *CUgraphExec;
+typedef void *CUlinkState;
 typedef int CUgraphNodeType;
 typedef void *CUlibrary;
 typedef void *CUkernel;
@@ -65,6 +66,11 @@ typedef enum {
 } CUmoduleLoadingMode;
 typedef uint64_t CUdeviceptr;
 typedef uint64_t cuuint64_t;
+typedef uint32_t cuuint32_t;
+typedef int CUlimit;
+typedef int CUjitInputType;
+typedef int CUstreamCaptureStatus;
+typedef int CUstreamCaptureMode;
 typedef int CUmemorytype;
 typedef enum {
     CU_GET_PROC_ADDRESS_SUCCESS = 0,
@@ -109,6 +115,11 @@ typedef struct {
     CUkernel kern;
     CUcontext ctx;
 } CUDA_KERNEL_NODE_PARAMS;
+
+typedef union {
+    int operation;
+    uint64_t pad[6];
+} CUstreamBatchMemOpParams;
 
 typedef struct {
     void *functionTable;
@@ -221,6 +232,23 @@ typedef struct CXLGraphKernelNodeSnapshot {
 static CXLGraphKernelNodeSnapshot *g_graph_kernel_node_snapshots;
 static void graph_kernel_node_snapshots_clear(void);
 
+typedef struct CXLLinkOutput {
+    uint64_t id;
+    void *bytes;
+    size_t size;
+    struct CXLLinkOutput *next;
+} CXLLinkOutput;
+
+typedef struct CXLStreamCaptureSnapshot {
+    uint64_t stream_wire;
+    CUgraphNode *dependencies;
+    size_t count;
+    struct CXLStreamCaptureSnapshot *next;
+} CXLStreamCaptureSnapshot;
+
+static CXLLinkOutput *g_link_outputs;
+static CXLStreamCaptureSnapshot *g_stream_capture_snapshots;
+
 typedef struct CXLCudaErrorName {
     CUresult error;
     char *name;
@@ -228,6 +256,7 @@ typedef struct CXLCudaErrorName {
 } CXLCudaErrorName;
 
 static CXLCudaErrorName *g_cuda_error_names;
+static CXLCudaErrorName *g_cuda_error_strings;
 static pthread_mutex_t g_cuda_error_names_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #define CUDART_LIBRARY_RECORD_OPTION_CAP 4
@@ -250,6 +279,7 @@ typedef struct CudartLibraryRecord {
 } CudartLibraryRecord;
 
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
+CUresult cuCtxGetCurrent(CUcontext *pctx);
 
 static CudartLibraryRecord *g_cudart_library_records = NULL;
 static unsigned int g_cudart_library_next_id = 1;
@@ -327,6 +357,61 @@ static bool cxl_gpu_handle_id(const void *handle, uint64_t *id) {
     return true;
 }
 
+static bool cxl_gpu_stream_wire(CUstream stream, uint64_t *wire) {
+    if (!wire)
+        return false;
+    if (!stream) {
+        *wire = UINT64_MAX;
+        return true;
+    }
+    return cxl_gpu_handle_id(stream, wire);
+}
+
+static CXLLinkOutput *link_output_get(uint64_t id, bool create) {
+    for (CXLLinkOutput *output = g_link_outputs; output; output = output->next) {
+        if (output->id == id)
+            return output;
+    }
+    if (!create)
+        return NULL;
+    CXLLinkOutput *output = calloc(1, sizeof(*output));
+    if (!output)
+        return NULL;
+    output->id = id;
+    output->next = g_link_outputs;
+    g_link_outputs = output;
+    return output;
+}
+
+static void link_output_remove(uint64_t id) {
+    CXLLinkOutput **cursor = &g_link_outputs;
+    while (*cursor) {
+        if ((*cursor)->id == id) {
+            CXLLinkOutput *output = *cursor;
+            *cursor = output->next;
+            free(output->bytes);
+            free(output);
+            return;
+        }
+        cursor = &(*cursor)->next;
+    }
+}
+
+static CXLStreamCaptureSnapshot *stream_capture_snapshot_get(uint64_t wire) {
+    for (CXLStreamCaptureSnapshot *snapshot = g_stream_capture_snapshots;
+         snapshot; snapshot = snapshot->next) {
+        if (snapshot->stream_wire == wire)
+            return snapshot;
+    }
+    CXLStreamCaptureSnapshot *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot)
+        return NULL;
+    snapshot->stream_wire = wire;
+    snapshot->next = g_stream_capture_snapshots;
+    g_stream_capture_snapshots = snapshot;
+    return snapshot;
+}
+
 static inline void data_write(size_t offset, const void *src, size_t len) {
     cxl_gpu_transport_data_write(&g_transport, offset, src, len);
 }
@@ -392,6 +477,14 @@ void cxl_cuda_test_reset(void) {
     g_cudart_library_next_id = 1;
     g_api_chain_sequence = 0;
     graph_kernel_node_snapshots_clear();
+    while (g_link_outputs)
+        link_output_remove(g_link_outputs->id);
+    while (g_stream_capture_snapshots) {
+        CXLStreamCaptureSnapshot *snapshot = g_stream_capture_snapshots;
+        g_stream_capture_snapshots = snapshot->next;
+        free(snapshot->dependencies);
+        free(snapshot);
+    }
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -709,18 +802,18 @@ CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
 }
 
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
-    uint64_t graph_exec_id;
+    uint64_t graph_exec_id, stream_wire;
 
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!cxl_gpu_handle_id(hGraphExec, &graph_exec_id))
         return CUDA_ERROR_INVALID_HANDLE;
-    if (hStream && hStream != (CUstream)(uintptr_t)1)
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
         return CUDA_ERROR_INVALID_HANDLE;
 
     cmd_lock();
     reg_write64(CXL_GPU_REG_PARAM0, graph_exec_id);
-    reg_write64(CXL_GPU_REG_PARAM1, hStream ? 1 : 0);
+    reg_write64(CXL_GPU_REG_PARAM1, stream_wire);
     CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_LAUNCH);
     cmd_unlock();
     return result;
@@ -1794,6 +1887,60 @@ CUresult cuGetErrorName(CUresult error, const char **pStr) {
     g_cuda_error_names = entry;
     *pStr = name;
     DLOG("  name=%s\n", name);
+    pthread_mutex_unlock(&g_cuda_error_names_lock);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuGetErrorString(CUresult error, const char **pStr) {
+    CXLCudaErrorName *entry;
+    CUresult result;
+    uint64_t length;
+    char *string;
+
+    if (!pStr)
+        return CUDA_ERROR_INVALID_VALUE;
+    *pStr = NULL;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    pthread_mutex_lock(&g_cuda_error_names_lock);
+    for (entry = g_cuda_error_strings; entry; entry = entry->next) {
+        if (entry->error == error) {
+            *pStr = entry->name;
+            pthread_mutex_unlock(&g_cuda_error_names_lock);
+            return CUDA_SUCCESS;
+        }
+    }
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(int64_t)error);
+    result = execute_cmd(CXL_GPU_CMD_GET_ERROR_STRING);
+    length = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result != CUDA_SUCCESS || length >= CXL_GPU_DATA_SIZE) {
+        cmd_unlock();
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return result != CUDA_SUCCESS ? result : CUDA_ERROR_INVALID_VALUE;
+    }
+    string = malloc((size_t)length + 1);
+    entry = malloc(sizeof(*entry));
+    if (!string || !entry) {
+        free(string);
+        free(entry);
+        cmd_unlock();
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    data_read(0, string, (size_t)length + 1);
+    cmd_unlock();
+    if (string[length] != '\0') {
+        free(string);
+        free(entry);
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    entry->error = error;
+    entry->name = string;
+    entry->next = g_cuda_error_strings;
+    g_cuda_error_strings = entry;
+    *pStr = string;
     pthread_mutex_unlock(&g_cuda_error_names_lock);
     return CUDA_SUCCESS;
 }
@@ -2998,8 +3145,8 @@ CUresult cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod, cons
 CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,
                         unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ,
                         unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra) {
-    (void)hStream;
     (void)extra;
+    uint64_t stream_wire;
 
     DLOG("cuLaunchKernel(f=%p, grid=(%u,%u,%u), block=(%u,%u,%u), shared=%u)\n", f, gridDimX, gridDimY, gridDimZ,
          blockDimX, blockDimY, blockDimZ, sharedMemBytes);
@@ -3010,6 +3157,8 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     if (!f) {
         return CUDA_ERROR_INVALID_HANDLE;
     }
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
 
     if (!kernelParams && extra) {
         return CUDA_ERROR_NOT_SUPPORTED;
@@ -3068,32 +3217,355 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     reg_write64(CXL_GPU_REG_PARAM3, ((uint64_t)blockDimZ << 32) | blockDimY);
     reg_write64(CXL_GPU_REG_PARAM4, ((uint64_t)num_args << 32) | sharedMemBytes);
     reg_write64(CXL_GPU_REG_PARAM5, param_extent);
+    reg_write64(CXL_GPU_REG_PARAM6, stream_wire);
     CUresult err = execute_cmd(CXL_GPU_CMD_LAUNCH_KERNEL);
     cmd_unlock();
     return err;
 }
 
+CUresult cuLinkCreate_v2(unsigned int numOptions, CUjit_option *options,
+                         void **optionValues, CUlinkState *stateOut) {
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!stateOut || (numOptions && (!options || !optionValues)))
+        return CUDA_ERROR_INVALID_VALUE;
+    if (numOptions)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    cmd_lock();
+    CUresult result = execute_cmd(CXL_GPU_CMD_LINK_CREATE);
+    uint64_t id = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result == CUDA_SUCCESS) {
+        if (id > UINT32_MAX) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_HANDLE;
+        }
+        *stateOut = (CUlinkState)cxl_gpu_handle_from_id(id);
+    }
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuLinkCreate(unsigned int numOptions, CUjit_option *options,
+                      void **optionValues, CUlinkState *stateOut) {
+    return cuLinkCreate_v2(numOptions, options, optionValues, stateOut);
+}
+
+CUresult cuLinkAddData_v2(CUlinkState state, CUjitInputType type, void *data,
+                          size_t size, const char *name, unsigned int numOptions,
+                          CUjit_option *options, void **optionValues) {
+    uint64_t id;
+    size_t name_size = name ? strlen(name) + 1 : 0;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(state, &id) || !data || !size ||
+        (numOptions && (!options || !optionValues)) ||
+        size > CXL_GPU_DATA_SIZE || name_size > CXL_GPU_DATA_SIZE - size)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (numOptions)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    cmd_lock();
+    data_write(0, data, size);
+    if (name_size)
+        data_write(size, name, name_size);
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    reg_write64(CXL_GPU_REG_PARAM1, (uint64_t)(uint32_t)type);
+    reg_write64(CXL_GPU_REG_PARAM2, size);
+    reg_write64(CXL_GPU_REG_PARAM3, name_size);
+    CUresult result = execute_cmd(CXL_GPU_CMD_LINK_ADD_DATA);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuLinkAddData(CUlinkState state, CUjitInputType type, void *data,
+                       size_t size, const char *name, unsigned int numOptions,
+                       CUjit_option *options, void **optionValues) {
+    return cuLinkAddData_v2(state, type, data, size, name, numOptions, options,
+                            optionValues);
+}
+
+CUresult cuLinkComplete(CUlinkState state, void **cubinOut, size_t *sizeOut) {
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(state, &id) || !cubinOut)
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_LINK_COMPLETE);
+    size_t size = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result == CUDA_SUCCESS) {
+        if (size > CXL_GPU_DATA_SIZE) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        CXLLinkOutput *output = link_output_get(id, true);
+        void *bytes = size ? malloc(size) : NULL;
+        if (!output || (size && !bytes)) {
+            free(bytes);
+            cmd_unlock();
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
+        if (size)
+            data_read(0, bytes, size);
+        free(output->bytes);
+        output->bytes = bytes;
+        output->size = size;
+        *cubinOut = bytes;
+        if (sizeOut)
+            *sizeOut = size;
+    }
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuLinkDestroy(CUlinkState state) {
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(state, &id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_LINK_DESTROY);
+    if (result == CUDA_SUCCESS)
+        link_output_remove(id);
+    cmd_unlock();
+    return result;
+}
+
 CUresult cuStreamCreate(CUstream *phStream, unsigned int Flags) {
-    DLOG("cuStreamCreate(flags=%u)\n", Flags);
-    (void)Flags;
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!phStream)
         return CUDA_ERROR_INVALID_VALUE;
-    *phStream = (CUstream)1; /* Dummy stream */
-    return CUDA_SUCCESS;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, Flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_CREATE);
+    uint64_t id = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result == CUDA_SUCCESS) {
+        if (id > UINT32_MAX) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_HANDLE;
+        }
+        *phStream = (CUstream)cxl_gpu_handle_from_id(id);
+    }
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuStreamDestroy_v2(CUstream hStream) {
-    DLOG("cuStreamDestroy\n");
-    (void)hStream;
-    return CUDA_SUCCESS;
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hStream, &id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_DESTROY);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuStreamSynchronize(CUstream hStream) {
-    DLOG("cuStreamSynchronize\n");
-    (void)hStream;
-    return cuCtxSynchronize();
+    uint64_t wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(hStream, &wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_SYNC);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
+                           unsigned int Flags) {
+    uint64_t stream_wire, event_id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire) ||
+        !cxl_gpu_handle_id(hEvent, &event_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    reg_write64(CXL_GPU_REG_PARAM1, event_id);
+    reg_write64(CXL_GPU_REG_PARAM2, Flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_WAIT_EVENT);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
+                             cuuint32_t value, unsigned int flags) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(stream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    reg_write64(CXL_GPU_REG_PARAM1, addr);
+    reg_write64(CXL_GPU_REG_PARAM2, value);
+    reg_write64(CXL_GPU_REG_PARAM3, flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_WAIT_VALUE32);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamBatchMemOp(CUstream stream, unsigned int count,
+                            CUstreamBatchMemOpParams *paramArray,
+                            unsigned int flags) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(stream, &stream_wire) || count >= 256 ||
+        (count && !paramArray) || count > CXL_GPU_DATA_SIZE / sizeof(*paramArray))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    if (count)
+        data_write(0, paramArray, count * sizeof(*paramArray));
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    reg_write64(CXL_GPU_REG_PARAM1, count);
+    reg_write64(CXL_GPU_REG_PARAM2, flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_BATCH_MEM_OP);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!pctx || !cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_GET_CTX);
+    if (result == CUDA_SUCCESS)
+        result = cuCtxGetCurrent(pctx);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamBeginCapture_v2(CUstream hStream, CUstreamCaptureMode mode) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    reg_write64(CXL_GPU_REG_PARAM1, (uint64_t)(uint32_t)mode);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_BEGIN_CAPTURE);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamBeginCapture(CUstream hStream, CUstreamCaptureMode mode) {
+    return cuStreamBeginCapture_v2(hStream, mode);
+}
+
+CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!phGraph || !cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_END_CAPTURE);
+    uint64_t graph_id = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result == CUDA_SUCCESS)
+        *phGraph = graph_id == UINT64_MAX ? NULL :
+                   (CUgraph)cxl_gpu_handle_from_id(graph_id);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamIsCapturing(CUstream hStream,
+                             CUstreamCaptureStatus *captureStatus) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!captureStatus || !cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_IS_CAPTURING);
+    if (result == CUDA_SUCCESS)
+        *captureStatus = (CUstreamCaptureStatus)reg_read64(CXL_GPU_REG_RESULT0);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuStreamGetCaptureInfo_v2(CUstream hStream,
+                                   CUstreamCaptureStatus *captureStatus_out,
+                                   cuuint64_t *id_out, CUgraph *graph_out,
+                                   const CUgraphNode **dependencies_out,
+                                   size_t *numDependencies_out) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!captureStatus_out || !cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_GET_CAPTURE_INFO);
+    if (result == CUDA_SUCCESS) {
+        size_t count = reg_read64(CXL_GPU_REG_RESULT2);
+        uint64_t graph_id = reg_read64(CXL_GPU_REG_RESULT3);
+        if (count > CXL_GPU_DATA_SIZE / sizeof(uint64_t)) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        CXLStreamCaptureSnapshot *snapshot = stream_capture_snapshot_get(stream_wire);
+        CUgraphNode *dependencies = count ? calloc(count, sizeof(*dependencies)) : NULL;
+        uint64_t *ids = count ? malloc(count * sizeof(*ids)) : NULL;
+        if (!snapshot || (count && (!dependencies || !ids))) {
+            free(dependencies);
+            free(ids);
+            cmd_unlock();
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
+        if (count)
+            data_read(0, ids, count * sizeof(*ids));
+        for (size_t i = 0; i < count; i++)
+            dependencies[i] = (CUgraphNode)cxl_gpu_handle_from_id(ids[i]);
+        free(ids);
+        free(snapshot->dependencies);
+        snapshot->dependencies = dependencies;
+        snapshot->count = count;
+        *captureStatus_out = (CUstreamCaptureStatus)reg_read64(CXL_GPU_REG_RESULT0);
+        if (id_out)
+            *id_out = reg_read64(CXL_GPU_REG_RESULT1);
+        if (graph_out)
+            *graph_out = graph_id == UINT64_MAX ? NULL :
+                         (CUgraph)cxl_gpu_handle_from_id(graph_id);
+        if (dependencies_out)
+            *dependencies_out = snapshot->dependencies;
+        if (numDependencies_out)
+            *numDependencies_out = count;
+    }
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
+                            CUdevice dstDevice, CUstream hStream) {
+    uint64_t stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, devPtr);
+    reg_write64(CXL_GPU_REG_PARAM1, count);
+    reg_write64(CXL_GPU_REG_PARAM2, (uint64_t)(int64_t)dstDevice);
+    reg_write64(CXL_GPU_REG_PARAM3, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MEM_PREFETCH_ASYNC);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
@@ -3157,6 +3629,61 @@ CUresult cuCtxGetCurrent(CUcontext *pctx) {
 CUresult cuCtxSetCurrent(CUcontext ctx) {
     DLOG("cuCtxSetCurrent(%p)\n", ctx);
     return cxl_cuda_context_set_current((uintptr_t)ctx);
+}
+
+CUresult cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!pvalue)
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(uint32_t)limit);
+    CUresult result = execute_cmd(CXL_GPU_CMD_CTX_GET_LIMIT);
+    if (result == CUDA_SUCCESS)
+        *pvalue = reg_read64(CXL_GPU_REG_RESULT0);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
+                               CUdevice peerDev) {
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!canAccessPeer)
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(int64_t)dev);
+    reg_write64(CXL_GPU_REG_PARAM1, (uint64_t)(int64_t)peerDev);
+    CUresult result = execute_cmd(CXL_GPU_CMD_DEVICE_CAN_ACCESS_PEER);
+    if (result == CUDA_SUCCESS)
+        *canAccessPeer = (int)reg_read64(CXL_GPU_REG_RESULT0);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuCtxEnablePeerAccess(CUcontext peerContext, unsigned int Flags) {
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!peerContext)
+        return CUDA_ERROR_INVALID_CONTEXT;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(uintptr_t)peerContext);
+    reg_write64(CXL_GPU_REG_PARAM1, Flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_CTX_ENABLE_PEER);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuCtxDisablePeerAccess(CUcontext peerContext) {
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!peerContext)
+        return CUDA_ERROR_INVALID_CONTEXT;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(uintptr_t)peerContext);
+    CUresult result = execute_cmd(CXL_GPU_CMD_CTX_DISABLE_PEER);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuCtxPushCurrent_v2(CUcontext ctx) {
@@ -3576,39 +4103,103 @@ CUresult cuModuleUnload(CUmodule hmod) {
 }
 
 CUresult cuEventCreate(CUevent *phEvent, unsigned int Flags) {
-    DLOG("cuEventCreate(flags=%u)\n", Flags);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
     if (!phEvent)
         return CUDA_ERROR_INVALID_VALUE;
-    /* Create a dummy event handle */
-    static int event_counter = 0;
-    *phEvent = (CUevent)(uintptr_t)(++event_counter);
-    return CUDA_SUCCESS;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, Flags);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_CREATE);
+    uint64_t id = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result == CUDA_SUCCESS) {
+        if (id > UINT32_MAX) {
+            cmd_unlock();
+            return CUDA_ERROR_INVALID_HANDLE;
+        }
+        *phEvent = (CUevent)cxl_gpu_handle_from_id(id);
+    }
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuEventDestroy_v2(CUevent hEvent) {
-    DLOG("cuEventDestroy_v2(%p)\n", hEvent);
-    return CUDA_SUCCESS;
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hEvent, &id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_DESTROY);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuEventDestroy(CUevent hEvent) { return cuEventDestroy_v2(hEvent); }
 
 CUresult cuEventRecord(CUevent hEvent, CUstream hStream) {
-    DLOG("cuEventRecord(%p, stream=%p)\n", hEvent, hStream);
-    return CUDA_SUCCESS;
+    uint64_t event_id, stream_wire;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hEvent, &event_id) ||
+        !cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, event_id);
+    reg_write64(CXL_GPU_REG_PARAM1, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_RECORD);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuEventSynchronize(CUevent hEvent) {
-    DLOG("cuEventSynchronize(%p)\n", hEvent);
-    return CUDA_SUCCESS;
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hEvent, &id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_SYNC);
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuEventQuery(CUevent hEvent) {
+    uint64_t id;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!cxl_gpu_handle_id(hEvent, &id))
+        return CUDA_ERROR_INVALID_HANDLE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_QUERY);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuEventElapsedTime(float *pMilliseconds, CUevent hStart, CUevent hEnd) {
-    DLOG("cuEventElapsedTime(%p, %p)\n", hStart, hEnd);
-    if (!pMilliseconds)
+    uint64_t start, end;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!pMilliseconds || !cxl_gpu_handle_id(hStart, &start) ||
+        !cxl_gpu_handle_id(hEnd, &end))
         return CUDA_ERROR_INVALID_VALUE;
-    /* Return a dummy elapsed time since we don't have real timing */
-    *pMilliseconds = 0.001f;
-    return CUDA_SUCCESS;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, start);
+    reg_write64(CXL_GPU_REG_PARAM1, end);
+    CUresult result = execute_cmd(CXL_GPU_CMD_EVENT_ELAPSED_TIME);
+    if (result == CUDA_SUCCESS) {
+        uint32_t bits = reg_read64(CXL_GPU_REG_RESULT0);
+        memcpy(pMilliseconds, &bits, sizeof(bits));
+    }
+    cmd_unlock();
+    return result;
+}
+
+CUresult cuEventElapsedTime_v2(float *pMilliseconds, CUevent hStart,
+                               CUevent hEnd) {
+    return cuEventElapsedTime(pMilliseconds, hStart, hEnd);
 }
 
 CUresult cuDeviceGetUuid(void *uuid, CUdevice dev) {
