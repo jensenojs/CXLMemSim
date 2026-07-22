@@ -487,6 +487,14 @@ def verify(args: argparse.Namespace) -> int:
         for field in ("realpath", "sha256", "build_id", "image_offset"):
             if not caller_mapping.get(field):
                 pair_errors.append(f"natural call {record.get('sequence')} caller mapping lacks {field}")
+    for record in captures:
+        caller_mapping = record.get("caller_mapping")
+        if not isinstance(caller_mapping, dict):
+            pair_errors.append(f"capture {record.get('sequence')} lacks caller_mapping")
+            continue
+        for field in ("realpath", "sha256", "build_id", "image_offset"):
+            if not caller_mapping.get(field):
+                pair_errors.append(f"capture {record.get('sequence')} caller mapping lacks {field}")
     if gdb_status.get("unreturned_sequences"):
         pair_errors.append("natural private calls remained unreturned at process exit")
     if driver_observation is not None:
@@ -1451,9 +1459,10 @@ if gdb is not None:
                 return
             self.register_table(uuid, table)
 
-        def observe_function_entry(self, address: int) -> None:
+        def observe_function_entry(self, address: int) -> bool:
             mappings = sorted(self.slot_by_address[address], key=lambda item: (item.uuid, item.slot))
             frame = gdb.newest_frame()
+            caller = self.caller_address(frame)
             caller_mapping = self.caller_mapping(frame)
             registers = self.registers()
             rdi = int(registers["rdi"], 16)
@@ -1470,7 +1479,7 @@ if gdb is not None:
                     "sequence": sequence,
                     "address": hex_address(address),
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in mappings],
-                    "caller": hex_address(self.caller_address(frame)),
+                    "caller": hex_address(caller),
                     "caller_mapping": caller_mapping,
                     "thread": None if thread is None else thread.global_num,
                     "entry_registers": registers,
@@ -1493,7 +1502,12 @@ if gdb is not None:
                     recorded,
                     capture_sequence,
                     capture_matches,
+                    address,
+                    caller,
+                    caller_mapping,
+                    None if thread is None else thread.global_num,
                 )
+            return bool(capture_matches)
 
         def capture_matches(self, mapping: TableSlot, selector_candidate: int | None) -> bool:
             if self.config["mode"] != "capture":
@@ -1583,7 +1597,9 @@ if gdb is not None:
             self.address = address
 
         def stop(self) -> bool:
-            self.observer.observe_function_entry(self.address)
+            captured = self.observer.observe_function_entry(self.address)
+            if captured and self.observer.config["mode"] == "capture":
+                self.enabled = False
             return False
 
 
@@ -1598,6 +1614,10 @@ if gdb is not None:
             record_return: bool,
             capture_sequence: int | None,
             capture_mappings: list[TableSlot],
+            address: int,
+            caller: int,
+            caller_mapping: dict[str, Any],
+            thread: int | None,
         ) -> None:
             super().__init__(frame, internal=True)
             self.observer = observer
@@ -1607,6 +1627,10 @@ if gdb is not None:
             self.record_return = record_return
             self.capture_sequence = capture_sequence
             self.capture_mappings = capture_mappings
+            self.address = address
+            self.caller = caller
+            self.caller_mapping = caller_mapping
+            self.thread = thread
             self.memory_before: list[dict[str, Any]] = []
             if capture_mappings:
                 for memory in observer.config.get("memory", []):
@@ -1648,7 +1672,11 @@ if gdb is not None:
                     "kind": "capture",
                     "sequence": self.capture_sequence,
                     "call_sequence": self.call_sequence,
+                    "address": hex_address(self.address),
                     "mappings": [{"uuid": item.uuid, "slot": item.slot} for item in self.capture_mappings],
+                    "caller": hex_address(self.caller),
+                    "caller_mapping": self.caller_mapping,
+                    "thread": self.thread,
                     "entry_registers": self.entry_registers,
                     "return_rax": return_rax,
                     "memory_windows_before": self.memory_before,

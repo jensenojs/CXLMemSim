@@ -206,6 +206,42 @@ class PrivateCallVerificationTests(unittest.TestCase):
             self.assertEqual(summary["status"], "pass")
             self.assertEqual(summary["call_records"], 1)
 
+    def test_rejects_capture_without_exact_caller_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            config_path = output / "probe-config.json"
+            config = {
+                "output_dir": str(output),
+                "mode": "capture",
+                "uuid": "target",
+                "slots": [4],
+                "selector": None,
+                "driver_observation": None,
+                "resolver_observation": None,
+                "inferior_io": None,
+            }
+            capture = {
+                "kind": "capture",
+                "sequence": 1,
+                "call_sequence": 1,
+                "mappings": [{"uuid": "target", "slot": 4}],
+                "return_rax": "0x0",
+            }
+            status = {"exit_code": 0, "fatal_errors": [], "unreturned_sequences": []}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            (output / "identity.json").write_text(json.dumps({}), encoding="utf-8")
+            (output / "tables.jsonl").write_text("", encoding="utf-8")
+            (output / "calls.jsonl").write_text("", encoding="utf-8")
+            (output / "returns.jsonl").write_text("", encoding="utf-8")
+            (output / "captures.jsonl").write_text(json.dumps(capture) + "\n", encoding="utf-8")
+            (output / "gdb-status.json").write_text(json.dumps(status), encoding="utf-8")
+
+            result = verify(SimpleNamespace(config=str(config_path)))
+
+            self.assertEqual(result, 2)
+            summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+            self.assertIn("capture 1 lacks caller_mapping", summary["pair_errors"])
+
 
 class DriverVerificationTests(unittest.TestCase):
     def test_accepts_one_complete_exact_driver_call(self) -> None:
