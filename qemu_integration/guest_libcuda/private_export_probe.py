@@ -105,6 +105,12 @@ def parse_driver_symbol(text: str) -> str:
     return text
 
 
+def observe_table_slot(config: dict[str, Any], uuid: str, slot: int) -> bool:
+    if config["mode"] == "discovery":
+        return True
+    return uuid == config["uuid"] and slot == config["slot"]
+
+
 def parse_proc_maps(text: str) -> list[dict[str, Any]]:
     mappings: list[dict[str, Any]] = []
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -947,7 +953,7 @@ if gdb is not None:
                         "callable": callable_slot,
                     }
                 )
-                if callable_slot:
+                if callable_slot and observe_table_slot(self.config, uuid, index):
                     mapping = TableSlot(uuid=uuid, slot=index)
                     self.slot_by_address.setdefault(address, set()).add(mapping)
                     self.call_counts.setdefault(mapping, 0)
