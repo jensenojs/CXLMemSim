@@ -221,6 +221,15 @@ typedef struct CXLGraphKernelNodeSnapshot {
 static CXLGraphKernelNodeSnapshot *g_graph_kernel_node_snapshots;
 static void graph_kernel_node_snapshots_clear(void);
 
+typedef struct CXLCudaErrorName {
+    CUresult error;
+    char *name;
+    struct CXLCudaErrorName *next;
+} CXLCudaErrorName;
+
+static CXLCudaErrorName *g_cuda_error_names;
+static pthread_mutex_t g_cuda_error_names_lock = PTHREAD_MUTEX_INITIALIZER;
+
 #define CUDART_LIBRARY_RECORD_OPTION_CAP 4
 #define CUDART_LIBRARY_RECORD_MAGIC 0x43584c4942524152ULL /* "CXLIBRAR" */
 
@@ -1721,6 +1730,71 @@ CUresult cuDriverGetVersion(int *version) {
      * into cuDeviceGetCount. */
     *version = cxl_cuda_effective_driver_version();
     DLOG("  version=%d\n", *version);
+    return CUDA_SUCCESS;
+}
+
+CUresult cuGetErrorName(CUresult error, const char **pStr) {
+    CXLCudaErrorName *entry;
+    CUresult result;
+    uint64_t length;
+    char *name;
+
+    DLOG("cuGetErrorName(error=%d)\n", error);
+    if (!pStr)
+        return CUDA_ERROR_INVALID_VALUE;
+    *pStr = NULL;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+
+    pthread_mutex_lock(&g_cuda_error_names_lock);
+    for (entry = g_cuda_error_names; entry; entry = entry->next) {
+        if (entry->error == error) {
+            *pStr = entry->name;
+            pthread_mutex_unlock(&g_cuda_error_names_lock);
+            return CUDA_SUCCESS;
+        }
+    }
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, (uint64_t)(int64_t)error);
+    result = execute_cmd(CXL_GPU_CMD_GET_ERROR_NAME);
+    length = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result != CUDA_SUCCESS) {
+        cmd_unlock();
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return result;
+    }
+    if (length >= CXL_GPU_DATA_SIZE) {
+        cmd_unlock();
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    name = malloc((size_t)length + 1);
+    entry = malloc(sizeof(*entry));
+    if (!name || !entry) {
+        free(name);
+        free(entry);
+        cmd_unlock();
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    data_read(0, name, (size_t)length + 1);
+    cmd_unlock();
+    if (name[length] != '\0') {
+        free(name);
+        free(entry);
+        pthread_mutex_unlock(&g_cuda_error_names_lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    entry->error = error;
+    entry->name = name;
+    entry->next = g_cuda_error_names;
+    g_cuda_error_names = entry;
+    *pStr = name;
+    DLOG("  name=%s\n", name);
+    pthread_mutex_unlock(&g_cuda_error_names_lock);
     return CUDA_SUCCESS;
 }
 
@@ -4008,6 +4082,8 @@ CUresult cuCxlGetCoherentBase(CUdeviceptr *base, size_t *size, CUdevice dev) {
 __attribute__((constructor)) static void libcuda_init(void) { DLOG("libcuda.so loaded (CXL Type 2 shim)\n"); }
 
 __attribute__((destructor)) static void libcuda_cleanup(void) {
+    CXLCudaErrorName *error_name;
+
     DLOG("libcuda.so unloading\n");
     graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);
@@ -4020,5 +4096,10 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
         g_bar4_fd = -1;
     }
     cxl_gpu_transport_close(&g_transport);
+    while ((error_name = g_cuda_error_names) != NULL) {
+        g_cuda_error_names = error_name->next;
+        free(error_name->name);
+        free(error_name);
+    }
     g_initialized = 0;
 }
