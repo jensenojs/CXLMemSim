@@ -1,5 +1,6 @@
 #include "cxl_gpu_cmd.h"
 
+#include <elf.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@ typedef void *CUfunction;
 typedef void *CUstream;
 typedef void *CUarray;
 typedef void *CUlibrary;
+typedef void *CUkernel;
 typedef int CUdriverProcAddressQueryResult;
 typedef int CUmemorytype;
 typedef int CUlibraryOption;
@@ -65,6 +67,7 @@ typedef struct {
 
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
+#define CUDA_ERROR_NOT_INITIALIZED 3
 #define CUDA_ERROR_DEINITIALIZED 4
 #define CUDA_ERROR_INVALID_CONTEXT 201
 #define CUDA_ERROR_NO_BINARY_FOR_GPU 209
@@ -75,6 +78,7 @@ typedef struct {
 
 #define CU_MEMORYTYPE_DEVICE 0x02
 #define CU_LIBRARY_BINARY_IS_PRESERVED 1
+#define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES 8
 
 #define CUDART_FATBIN_MAGIC 0xBA55ED50U
 #define CUDART_FATBIN_VERSION 0x1U
@@ -91,6 +95,7 @@ uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
 void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value);
 void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
+CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size);
 
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
@@ -119,6 +124,10 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOption
                            unsigned int numLibraryOptions);
 CUresult cuLibraryUnload(CUlibrary library);
 CUresult cuLibraryGetModule(void **module, CUlibrary library);
+CUresult cuLibraryGetKernel(CUkernel *kernel, CUlibrary library, const char *name);
+CUresult cuKernelGetFunction(CUfunction *function, CUkernel kernel);
+CUresult cuFuncGetAttribute(int *value, int attribute, CUfunction function);
+CUresult cuModuleUnload(void *module);
 CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
 
 #define CHECK(expr)                                                                                                    \
@@ -143,6 +152,10 @@ static unsigned int memcpy2d_row_count;
 static unsigned int memcpy2d_phase;
 static uint64_t memcpy2d_width;
 static unsigned int cubin_load_count;
+static size_t cubin_expected_size = 8;
+static uint32_t cubin_expected_encoding;
+static size_t cubin_expected_decoded_size = 8;
+static unsigned char cubin_expected_first_byte = 0x80;
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -223,6 +236,19 @@ static CUresult fake_execute(uint32_t command) {
             cxl_cuda_test_write_result(0, 3);
         }
         return occupancy_result;
+    case CXL_GPU_CMD_FUNC_GET_ATTRIBUTE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) ==
+              CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES);
+        cxl_cuda_test_write_result(0, 49152);
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_FUNC_GET:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
+        cxl_cuda_test_write_result(0, 4);
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_MODULE_UNLOAD:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
+        return CUDA_SUCCESS;
     case CXL_GPU_CMD_MEM_COPY_DTOH:
         CHECK(memcpy2d_phase / 2 < memcpy2d_row_count);
         CHECK(memcpy2d_phase % 2 == 0);
@@ -239,11 +265,11 @@ static CUresult fake_execute(uint32_t command) {
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MODULE_LOAD_CUBIN: {
         unsigned char observed[8] = {0};
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == sizeof(observed));
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 0);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == sizeof(observed));
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == cubin_expected_size);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == cubin_expected_encoding);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == cubin_expected_decoded_size);
         cxl_cuda_test_read_data(0, observed, sizeof(observed));
-        CHECK(observed[0] == 0x80);
+        CHECK(observed[0] == cubin_expected_first_byte);
         cubin_load_count++;
         cxl_cuda_test_write_result(0, issued_token);
         return CUDA_SUCCESS;
@@ -781,7 +807,12 @@ static int test_library_legacy_only_fatbin_registers_without_module_load(void) {
 
 static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
     enum { library_count = 513 };
-    unsigned char preserved_code[16] = {0};
+    CudartFatbinHeader preserved_code = {
+        .magic = CUDART_FATBIN_MAGIC,
+        .version = CUDART_FATBIN_VERSION,
+        .header_size = sizeof(CudartFatbinHeader),
+        .files_size = 0,
+    };
     CUlibrary libraries[library_count];
     CUlibraryOption options[] = {CU_LIBRARY_BINARY_IS_PRESERVED};
     void *option_values[] = {(void *)(uintptr_t)1};
@@ -789,7 +820,7 @@ static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
     cxl_cuda_test_reset();
     for (unsigned int i = 0; i < library_count; i++) {
         libraries[i] = NULL;
-        CHECK(cuLibraryLoadData(&libraries[i], preserved_code, NULL, NULL, 0, options, option_values, 1) ==
+        CHECK(cuLibraryLoadData(&libraries[i], &preserved_code, NULL, NULL, 0, options, option_values, 1) ==
               CUDA_SUCCESS);
         CHECK(libraries[i] != NULL);
     }
@@ -801,12 +832,71 @@ static int test_library_registration_exceeds_the_previous_fixed_capacity(void) {
     }
 
     CUlibrary later_library = NULL;
-    CHECK(cuLibraryLoadData(&later_library, preserved_code, NULL, NULL, 0, options, option_values, 1) ==
+    CHECK(cuLibraryLoadData(&later_library, &preserved_code, NULL, NULL, 0, options, option_values, 1) ==
           CUDA_SUCCESS);
     CHECK(later_library != NULL);
     CHECK(later_library != libraries[0]);
     CHECK(later_library != libraries[library_count - 1]);
     CHECK(cuLibraryUnload(later_library) == CUDA_SUCCESS);
+    return 0;
+}
+
+static int test_direct_elf_library_kernel_function_lifecycle(void) {
+    unsigned char image[sizeof(Elf64_Ehdr) + sizeof(Elf64_Shdr) + 8] = {0};
+    Elf64_Ehdr *header = (Elf64_Ehdr *)(void *)image;
+    Elf64_Shdr *section = (Elf64_Shdr *)(void *)(image + sizeof(*header));
+    CUlibraryOption options[] = {CU_LIBRARY_BINARY_IS_PRESERVED};
+    CUlibrary library = NULL;
+    CUkernel kernel = NULL;
+    CUfunction function = NULL;
+    size_t inferred_size = 0;
+    int attribute = 0;
+
+    memcpy(header->e_ident, ELFMAG, SELFMAG);
+    header->e_ident[EI_CLASS] = ELFCLASS64;
+    header->e_ident[EI_DATA] = ELFDATA2LSB;
+    header->e_ident[EI_VERSION] = EV_CURRENT;
+    header->e_version = EV_CURRENT;
+    header->e_ehsize = sizeof(*header);
+    header->e_shoff = sizeof(*header);
+    header->e_shentsize = sizeof(*section);
+    header->e_shnum = 1;
+    section->sh_type = SHT_PROGBITS;
+    section->sh_offset = sizeof(*header) + sizeof(*section);
+    section->sh_size = 8;
+
+    CHECK(cxl_cuda_test_direct_elf_size(image, &inferred_size) == CUDA_SUCCESS);
+    CHECK(inferred_size == sizeof(image));
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    cubin_load_count = 0;
+    cubin_expected_size = sizeof(image);
+    cubin_expected_encoding = 0;
+    cubin_expected_decoded_size = sizeof(image);
+    cubin_expected_first_byte = ELFMAG0;
+
+    CHECK(cuLibraryLoadData(&library, image, NULL, NULL, 0, options, NULL, 1) == CUDA_SUCCESS);
+    CHECK(library != NULL);
+    CHECK(command_count == 0);
+    CHECK(cuLibraryGetKernel(&kernel, library, "captured_cutlass_kernel") == CUDA_SUCCESS);
+    CHECK(kernel != NULL);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_MODULE_LOAD_CUBIN);
+    CHECK(commands[1] == CXL_GPU_CMD_FUNC_GET);
+    CHECK(cuKernelGetFunction(&function, kernel) == CUDA_SUCCESS);
+    CHECK(function == (CUfunction)(uintptr_t)5);
+    CHECK(cuFuncGetAttribute(&attribute, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, function) == CUDA_SUCCESS);
+    CHECK(attribute == 49152);
+    CHECK(command_count == 3 && commands[2] == CXL_GPU_CMD_FUNC_GET_ATTRIBUTE);
+    CHECK(cuLibraryUnload(library) == CUDA_SUCCESS);
+    CHECK(command_count == 4 && commands[3] == CXL_GPU_CMD_MODULE_UNLOAD);
+    CHECK(cuLibraryGetModule((void **)&function, library) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(cuKernelGetFunction(&function, kernel) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(cuLibraryUnload(library) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(cuModuleUnload(NULL) == CUDA_ERROR_INVALID_HANDLE);
+    CHECK(command_count == 4);
     return 0;
 }
 
@@ -818,5 +908,6 @@ int main(void) {
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
            test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
-           test_library_registration_exceeds_the_previous_fixed_capacity();
+           test_library_registration_exceeds_the_previous_fixed_capacity() ||
+           test_direct_elf_library_kernel_function_lifecycle();
 }

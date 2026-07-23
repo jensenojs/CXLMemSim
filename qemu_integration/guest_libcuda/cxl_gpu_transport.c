@@ -262,6 +262,14 @@ int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug) {
             closedir(directory);
             return -1;
         }
+        uint32_t version = cxl_gpu_transport_read32(transport, CXL_GPU_REG_VERSION);
+        if (version != CXL_GPU_VERSION) {
+            transport_log(transport, "protocol version mismatch device=0x%x guest=0x%x\n", version,
+                          CXL_GPU_VERSION);
+            cxl_gpu_transport_close(transport);
+            closedir(directory);
+            return -1;
+        }
         uint32_t status = cxl_gpu_transport_read32(transport, CXL_GPU_REG_STATUS);
         if (!(status & CXL_GPU_STATUS_READY)) {
             transport_log(transport, "device not ready, status=0x%x\n", status);
@@ -270,7 +278,7 @@ int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug) {
         }
 
         transport_log(transport, "mapped BAR2 size=%zu magic=0x%x version=0x%x\n", transport->bar_size, magic,
-                      cxl_gpu_transport_read32(transport, CXL_GPU_REG_VERSION));
+                      version);
         closedir(directory);
         return 0;
     }
