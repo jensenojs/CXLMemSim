@@ -754,6 +754,8 @@ void cxl_cuda_test_reset(void) {
 
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
 
+void cxl_cuda_test_set_initialized(int initialized) { g_initialized = initialized; }
+
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset) { return reg_read64(offset); }
 
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value) {
@@ -776,7 +778,11 @@ void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length) {
 #endif
 
 /* Find and map CXL Type 2 device */
-static int find_and_map_device(void) { return cxl_gpu_transport_open(&g_transport, g_debug); }
+static int find_and_map_device(void) {
+    if (g_transport.regs)
+        return 0;
+    return cxl_gpu_transport_open(&g_transport, g_debug);
+}
 
 /* CUDA 12 runtime resolves most driver entry points through cuGetProcAddress.
  * Use the dynamic symbol table of this shim so missing APIs stay visible in

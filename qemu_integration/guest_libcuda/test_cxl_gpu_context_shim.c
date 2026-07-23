@@ -91,12 +91,15 @@ typedef struct {
 
 void cxl_cuda_test_reset(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
+void cxl_cuda_test_set_initialized(int initialized);
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
 void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value);
 void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
 CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size);
 
+CUresult cuInit(unsigned int flags);
+CUresult cuDriverGetVersion(int *version);
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
 CUresult cuCtxCreate_v2(CUcontext *ctx, unsigned int flags, CUdevice dev);
@@ -903,6 +906,18 @@ static int test_direct_elf_library_kernel_function_lifecycle(void) {
     return 0;
 }
 
+static int test_driver_version_mapping_is_reused_by_init(void) {
+    int version = 0;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_initialized(0);
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_STATUS, CXL_GPU_STATUS_READY);
+    CHECK(cuDriverGetVersion(&version) == CUDA_SUCCESS);
+    CHECK(version == 12090);
+    CHECK(cuInit(0) == CUDA_SUCCESS);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -912,5 +927,6 @@ int main(void) {
            test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity() ||
-           test_direct_elf_library_kernel_function_lifecycle();
+           test_direct_elf_library_kernel_function_lifecycle() ||
+           test_driver_version_mapping_is_reused_by_init();
 }
