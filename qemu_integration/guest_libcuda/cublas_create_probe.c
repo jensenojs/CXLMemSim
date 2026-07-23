@@ -937,65 +937,50 @@ int tiny_cuda_probe_run(void) {
         return 36;
     }
 
+    int failure = 0;
     int create_result = create(&cublas_handle);
     printf("cublas_create_result=%d handle=%p\n", create_result, cublas_handle);
     observe_module_loading_environment("after-create");
     if (create_result != 0 || !cublas_handle) {
-        dlclose(runtime);
-        dlclose(cublas);
-        dlclose(ggml);
-        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-        return 34;
-    }
-
-    if (!observe_module_loading_mode("after-create", driver_path, &loading_mode_result) || loading_mode_result != 0) {
-        destroy(cublas_handle);
-        dlclose(runtime);
-        dlclose(cublas);
-        dlclose(ggml);
-        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-        return 37;
-    }
-
-    if (run_sgemm_oracle(cublas_handle, sgemm, cuda_malloc, cuda_memcpy, cuda_free, cuda_device_synchronize) != 0) {
-        destroy(cublas_handle);
-        dlclose(runtime);
-        dlclose(cublas);
-        dlclose(ggml);
-        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-        return 41;
-    }
-
-    if (run_gemm_ex_oracle(cublas_handle, gemm_ex, cuda_malloc, cuda_memcpy, cuda_free, cuda_device_synchronize) != 0) {
-        destroy(cublas_handle);
-        dlclose(runtime);
-        dlclose(cublas);
-        dlclose(ggml);
-        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-        return 42;
+        failure = 34;
+    } else {
+        if (!observe_module_loading_mode("after-create", driver_path, &loading_mode_result) ||
+            loading_mode_result != 0) {
+            failure = 37;
+        }
+        if (run_sgemm_oracle(cublas_handle, sgemm, cuda_malloc, cuda_memcpy, cuda_free,
+                             cuda_device_synchronize) != 0 &&
+            failure == 0) {
+            failure = 41;
+        }
+        if (run_gemm_ex_oracle(cublas_handle, gemm_ex, cuda_malloc, cuda_memcpy, cuda_free,
+                               cuda_device_synchronize) != 0 &&
+            failure == 0) {
+            failure = 42;
+        }
     }
 
     if ((corpus_root && *corpus_root) || (corpus_expected_text && *corpus_expected_text)) {
         unsigned int corpus_expected = 0;
         if (!corpus_root || !*corpus_root || !parse_unsigned(corpus_expected_text, &corpus_expected) ||
             !corpus_expected || run_library_corpus_replay(corpus_root, corpus_expected, driver_path) != 0) {
-            destroy(cublas_handle);
-            dlclose(runtime);
-            dlclose(cublas);
-            dlclose(ggml);
-            printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-            return 43;
+            if (failure == 0) {
+                failure = 43;
+            }
         }
     }
 
-    int destroy_result = destroy(cublas_handle);
+    int destroy_result = cublas_handle ? destroy(cublas_handle) : 0;
     printf("cublas_destroy_result=%d\n", destroy_result);
     dlclose(runtime);
     dlclose(cublas);
     dlclose(ggml);
-    if (destroy_result != 0) {
+    if (destroy_result != 0 && failure == 0) {
+        failure = 35;
+    }
+    if (failure != 0) {
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
-        return 35;
+        return failure;
     }
 
     printf("=== CUBLAS_CREATE_PROBE_PASS ===\n");

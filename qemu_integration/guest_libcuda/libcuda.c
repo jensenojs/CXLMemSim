@@ -1657,7 +1657,11 @@ static CUresult integrity_device_hash_info(IntegrityDeviceHashInfo *info) {
 }
 
 static int cxl_cuda_effective_driver_version(void) {
-    return (int)reg_read32(CXL_GPU_REG_DRIVER_VERSION);
+    /* cuDriverGetVersion describes the virtual Driver contract consumed by
+     * guest CUDA userland.  The physical Driver version remains available in
+     * the BAR2 register and QEMU trace, but advertising it here would claim
+     * CUDA API semantics that this shim does not implement. */
+    return 12090;
 }
 
 static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_t result[2]) {
@@ -2105,9 +2109,8 @@ CUresult cuDriverGetVersion(int *version) {
     if (!version)
         return CUDA_ERROR_INVALID_VALUE;
 
-    /* CUDA userland queries the Driver version before cuInit.  Mapping BAR2 is
-     * transport discovery only; the value was captured from the real Driver
-     * when QEMU realized the Type-2 device. */
+    /* CUDA userland queries the virtual Driver contract before cuInit.
+     * Mapping BAR2 is transport discovery only. */
     if (!g_initialized && find_and_map_device() < 0)
         return CUDA_ERROR_NO_DEVICE;
     *version = cxl_cuda_effective_driver_version();
