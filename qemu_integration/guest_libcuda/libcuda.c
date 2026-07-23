@@ -2713,7 +2713,7 @@ static CUresult cudart_direct_elf_size(const void *code, size_t *elf_size) {
     memcpy(&header, bytes, sizeof(header));
     if (memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 || header.e_ident[EI_CLASS] != ELFCLASS64 ||
         header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_ident[EI_VERSION] != EV_CURRENT ||
-        header.e_version != EV_CURRENT || header.e_ehsize != sizeof(header) || header.e_phnum == PN_XNUM ||
+        header.e_machine != EM_CUDA || header.e_ehsize != sizeof(header) || header.e_phnum == PN_XNUM ||
         (header.e_phnum && header.e_phentsize != sizeof(Elf64_Phdr)) ||
         (header.e_shnum && header.e_shentsize != sizeof(Elf64_Shdr))) {
         return CUDA_ERROR_INVALID_VALUE;

@@ -858,7 +858,8 @@ static int test_direct_elf_library_kernel_function_lifecycle(void) {
     header->e_ident[EI_CLASS] = ELFCLASS64;
     header->e_ident[EI_DATA] = ELFDATA2LSB;
     header->e_ident[EI_VERSION] = EV_CURRENT;
-    header->e_version = EV_CURRENT;
+    header->e_machine = EM_CUDA;
+    header->e_version = 0x7b;
     header->e_ehsize = sizeof(*header);
     header->e_shoff = sizeof(*header);
     header->e_shentsize = sizeof(*section);
