@@ -306,6 +306,7 @@ typedef struct CudartLibraryRecord {
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
 CUresult cuModuleUnload(CUmodule hmod);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
+static CUresult cxl_module_load_image(CUmodule *module, const void *image);
 
 static CudartLibraryRecord *g_cudart_library_records = NULL;
 static unsigned int g_cudart_library_next_id = 1;
@@ -616,6 +617,49 @@ static void cmd_unlock(void) {
 /* Execute command and wait for completion.
  * Caller MUST hold cmd_lock() if params were written before this call. */
 static uint32_t g_api_chain_sequence;
+static uint64_t g_async_copy_sequence;
+
+typedef struct CXLAsyncCopyTrace {
+    bool active;
+    uint64_t public_sequence;
+    const char *api;
+    size_t total_bytes;
+    uint64_t stream_wire;
+    bool stream_wire_valid;
+    uint32_t command_index;
+} CXLAsyncCopyTrace;
+
+static __thread CXLAsyncCopyTrace g_async_copy_trace;
+
+static void async_copy_trace_begin(const char *api, size_t total_bytes, CUstream stream) {
+    uint64_t stream_wire = 0;
+    bool stream_wire_valid = cxl_gpu_stream_wire(stream, &stream_wire);
+    uint64_t public_sequence = __sync_add_and_fetch(&g_async_copy_sequence, 1);
+
+    g_async_copy_trace = (CXLAsyncCopyTrace){
+        .active = true,
+        .public_sequence = public_sequence,
+        .api = api,
+        .total_bytes = total_bytes,
+        .stream_wire = stream_wire,
+        .stream_wire_valid = stream_wire_valid,
+    };
+    DLOG("async_copy event=public-entry public_sequence=%" PRIu64
+         " api=%s total_bytes=%zu guest_stream=%p stream_wire=%s0x%016" PRIx64
+         " implementation=blocking stream_forwarded=0\n",
+         public_sequence, api, total_bytes, stream,
+         stream_wire_valid ? "" : "invalid:", stream_wire);
+}
+
+static CUresult async_copy_trace_end(CUresult result) {
+    DLOG("async_copy event=public-return public_sequence=%" PRIu64
+         " api=%s total_bytes=%zu commands=%u result=%d implementation=blocking\n",
+         g_async_copy_trace.public_sequence, g_async_copy_trace.api,
+         g_async_copy_trace.total_bytes, g_async_copy_trace.command_index,
+         result);
+    memset(&g_async_copy_trace, 0, sizeof(g_async_copy_trace));
+    return result;
+}
 
 static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint32_t sequence = __sync_add_and_fetch(&g_api_chain_sequence, 1);
@@ -624,6 +668,19 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     DLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
          " symbol=%s command=0x%x\n",
          call_id, symbol, cmd);
+    uint32_t async_command_index = 0;
+    if (g_async_copy_trace.active) {
+        async_command_index = ++g_async_copy_trace.command_index;
+        DLOG("async_copy event=command-entry public_sequence=%" PRIu64
+             " command_index=%u call_id=0x%016" PRIx64
+             " api=%s command=0x%x p0=0x%016" PRIx64 " bytes=%" PRIu64
+             " stream_wire=%s0x%016" PRIx64 " implementation=blocking\n",
+             g_async_copy_trace.public_sequence, async_command_index, call_id,
+             g_async_copy_trace.api, cmd, reg_read64(CXL_GPU_REG_PARAM0),
+             reg_read64(CXL_GPU_REG_PARAM1),
+             g_async_copy_trace.stream_wire_valid ? "" : "invalid:",
+             g_async_copy_trace.stream_wire);
+    }
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
     if (g_test_execute_cmd) {
         CUresult result = g_test_execute_cmd(cmd);
@@ -631,6 +688,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
         DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
              " symbol=%s command=0x%x result=%d\n",
              call_id, symbol, cmd, result);
+        if (g_async_copy_trace.active) {
+            DLOG("async_copy event=command-return public_sequence=%" PRIu64
+                 " command_index=%u call_id=0x%016" PRIx64
+                 " api=%s command=0x%x result=%d implementation=blocking\n",
+                 g_async_copy_trace.public_sequence, async_command_index,
+                 call_id, g_async_copy_trace.api, cmd, result);
+        }
         return result;
     }
 #endif
@@ -639,6 +703,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
          " symbol=%s command=0x%x result=%d\n",
          call_id, symbol, cmd, result);
+    if (g_async_copy_trace.active) {
+        DLOG("async_copy event=command-return public_sequence=%" PRIu64
+             " command_index=%u call_id=0x%016" PRIx64
+             " api=%s command=0x%x result=%d implementation=blocking\n",
+             g_async_copy_trace.public_sequence, async_command_index, call_id,
+             g_async_copy_trace.api, cmd, result);
+    }
     return result;
 }
 
@@ -1586,7 +1657,7 @@ static CUresult integrity_device_hash_info(IntegrityDeviceHashInfo *info) {
 }
 
 static int cxl_cuda_effective_driver_version(void) {
-    return 12090; /* CUDA 12.9 */
+    return (int)reg_read32(CXL_GPU_REG_DRIVER_VERSION);
 }
 
 static CUresult integrity_check(uint32_t version, uint64_t unix_seconds, uint64_t result[2]) {
@@ -2033,10 +2104,15 @@ CUresult cuDriverGetVersion(int *version) {
     DLOG("cuDriverGetVersion\n");
     if (!version)
         return CUDA_ERROR_INVALID_VALUE;
-    /* The guest payload currently uses CUDA Runtime 12.9.  libcudart refuses to
-     * initialize when the Driver API reports an older version, before it calls
-     * into cuDeviceGetCount. */
+
+    /* CUDA userland queries the Driver version before cuInit.  Mapping BAR2 is
+     * transport discovery only; the value was captured from the real Driver
+     * when QEMU realized the Type-2 device. */
+    if (!g_initialized && find_and_map_device() < 0)
+        return CUDA_ERROR_NO_DEVICE;
     *version = cxl_cuda_effective_driver_version();
+    if (*version <= 0)
+        return CUDA_ERROR_NOT_INITIALIZED;
     DLOG("  version=%d\n", *version);
     return CUDA_SUCCESS;
 }
@@ -2390,11 +2466,11 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
 
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
     DLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
-    (void)hStream;
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
      * stream-aware BAR2 command only when concurrent stream execution is measured. */
-    return cuMemcpyHtoD_v2(dstDevice, srcHost, byteCount);
+    async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, hStream);
+    return async_copy_trace_end(cuMemcpyHtoD_v2(dstDevice, srcHost, byteCount));
 }
 
 CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
@@ -2436,11 +2512,11 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
 
 CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
     DLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount, hStream);
-    (void)hStream;
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
      * stream-aware BAR2 command only when concurrent stream execution is measured. */
-    return cuMemcpyDtoH_v2(dstHost, srcDevice, byteCount);
+    async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, hStream);
+    return async_copy_trace_end(cuMemcpyDtoH_v2(dstHost, srcDevice, byteCount));
 }
 
 CUresult cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
@@ -2515,20 +2591,7 @@ CUresult cuModuleLoadData(CUmodule *module, const void *image) {
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!module || !image)
         return CUDA_ERROR_INVALID_VALUE;
-
-    /* Copy PTX to data buffer */
-    size_t len = strlen((const char *)image) + 1;
-    if (len > CXL_GPU_DATA_SIZE) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-
-    data_write(0, image, len);
-    CUresult err = execute_cmd(CXL_GPU_CMD_MODULE_LOAD_PTX);
-    if (err == CUDA_SUCCESS) {
-        *module = (CUmodule)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
-        DLOG("  module=%p\n", *module);
-    }
-    return err;
+    return cxl_module_load_image(module, image);
 }
 
 static CUresult cxl_module_load_cubin(CUmodule *module, const void *image, size_t image_size, uint32_t encoding,
@@ -3037,6 +3100,68 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
     return CUDA_ERROR_NO_BINARY_FOR_GPU;
 }
 
+static CUresult cxl_module_load_direct_elf(CUmodule *module, const void *image, size_t image_size) {
+    if (image_size <= CXL_GPU_DATA_SIZE) {
+        fprintf(stderr, "[CXL-CUDA] direct ELF load raw_size=%zu encoding=raw\n", image_size);
+        return cxl_module_load_cubin(module, image, image_size, 0, image_size);
+    }
+
+    size_t bound = ZSTD_compressBound(image_size);
+    void *compressed = malloc(bound);
+    if (!compressed) {
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    size_t compressed_size = ZSTD_compress(compressed, bound, image, image_size, 1);
+    if (ZSTD_isError(compressed_size) || compressed_size > CXL_GPU_DATA_SIZE) {
+        if (ZSTD_isError(compressed_size)) {
+            fprintf(stderr, "[CXL-CUDA] direct ELF Zstd compression failed: %s\n",
+                    ZSTD_getErrorName(compressed_size));
+        } else {
+            fprintf(stderr,
+                    "[CXL-CUDA] direct ELF compressed payload exceeds BAR2 raw_size=%zu compressed_size=%zu "
+                    "limit=%u\n",
+                    image_size, compressed_size, CXL_GPU_DATA_SIZE);
+        }
+        free(compressed);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    fprintf(stderr, "[CXL-CUDA] direct ELF load raw_size=%zu compressed_size=%zu encoding=zstd\n", image_size,
+            compressed_size);
+    CUresult result = cxl_module_load_cubin(module, compressed, compressed_size, CXL_GPU_MODULE_DATA_ZSTD, image_size);
+    free(compressed);
+    return result;
+}
+
+static CUresult cxl_module_load_image(CUmodule *module, const void *image) {
+    uint32_t magic;
+    memcpy(&magic, image, sizeof(magic));
+    if (magic == CUDART_FATBINC_MAGIC || magic == CUDART_FATBIN_MAGIC || magic == UINT32_C(0x464c457f)) {
+        CudartLibraryCodeKind kind;
+        size_t image_size = 0;
+        CUresult shape_result = cudart_library_code_shape(image, &kind, &image_size);
+        if (shape_result != CUDA_SUCCESS) {
+            return shape_result;
+        }
+        if (kind == CUDART_LIBRARY_CODE_DIRECT_ELF) {
+            return cxl_module_load_direct_elf(module, image, image_size);
+        }
+        return cudart_load_module_from_fatbin(image, module);
+    }
+
+    size_t ptx_size = strnlen((const char *)image, CXL_GPU_DATA_SIZE);
+    if (ptx_size == CXL_GPU_DATA_SIZE) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    data_write(0, image, ptx_size + 1);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MODULE_LOAD_PTX);
+    if (result == CUDA_SUCCESS) {
+        *module = (CUmodule)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
+        DLOG("  PTX module=%p\n", *module);
+    }
+    return result;
+}
+
 static CUresult cudart_library_materialize_module(CudartLibraryRecord *record) {
     if (!record || !record->alive) {
         return CUDA_ERROR_INVALID_HANDLE;
@@ -3050,40 +3175,7 @@ static CUresult cudart_library_materialize_module(CudartLibraryRecord *record) {
         if (!record->preserved_code_size || record->preserved_code_size > CUDART_DIRECT_ELF_MAX_SIZE) {
             return CUDA_ERROR_INVALID_VALUE;
         }
-        if (record->preserved_code_size <= CXL_GPU_DATA_SIZE) {
-            fprintf(stderr, "[CXL-CUDA]   library direct ELF load raw_size=%zu encoding=raw\n",
-                    record->preserved_code_size);
-            result = cxl_module_load_cubin(&record->module, record->preserved_code, record->preserved_code_size, 0,
-                                           record->preserved_code_size);
-        } else {
-            size_t bound = ZSTD_compressBound(record->preserved_code_size);
-            void *compressed = malloc(bound);
-            if (!compressed) {
-                return CUDA_ERROR_OUT_OF_MEMORY;
-            }
-            size_t compressed_size = ZSTD_compress(compressed, bound, record->preserved_code,
-                                                   record->preserved_code_size, 1);
-            if (ZSTD_isError(compressed_size)) {
-                fprintf(stderr, "[CXL-CUDA]   library direct ELF Zstd compression failed: %s\n",
-                        ZSTD_getErrorName(compressed_size));
-                free(compressed);
-                return CUDA_ERROR_INVALID_VALUE;
-            }
-            if (compressed_size > CXL_GPU_DATA_SIZE) {
-                fprintf(stderr,
-                        "[CXL-CUDA]   library direct ELF compressed payload exceeds BAR2 raw_size=%zu "
-                        "compressed_size=%zu limit=%u\n",
-                        record->preserved_code_size, compressed_size, CXL_GPU_DATA_SIZE);
-                free(compressed);
-                return CUDA_ERROR_INVALID_VALUE;
-            }
-            fprintf(stderr,
-                    "[CXL-CUDA]   library direct ELF load raw_size=%zu compressed_size=%zu encoding=zstd\n",
-                    record->preserved_code_size, compressed_size);
-            result = cxl_module_load_cubin(&record->module, compressed, compressed_size,
-                                           CXL_GPU_MODULE_DATA_ZSTD, record->preserved_code_size);
-            free(compressed);
-        }
+        result = cxl_module_load_direct_elf(&record->module, record->preserved_code, record->preserved_code_size);
     } else {
         result = cudart_load_module_from_fatbin(record->code, &record->module);
     }
@@ -3135,11 +3227,6 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
                     table->functionTable, table->functionWindowSize, table->dataTable, table->dataWindowSize);
         }
     }
-    if (getenv("CXL_CUDA_LIBRARY_LOAD_DATA_NOT_SUPPORTED")) {
-        fprintf(stderr, "[CXL-CUDA]   diagnostic override -> CUDA_ERROR_NOT_SUPPORTED\n");
-        return CUDA_ERROR_NOT_SUPPORTED;
-    }
-
     if (!library || !code) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -4390,8 +4477,8 @@ CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteC
 }
 
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
-    (void)hStream;
-    return cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount);
+    async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, hStream);
+    return async_copy_trace_end(cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount));
 }
 
 CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
@@ -4458,11 +4545,14 @@ CUresult cuMemcpy2D(const CUDA_MEMCPY2D *copy) { return cuMemcpy2D_v2(copy); }
 
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     DLOG("cuMemcpy2DAsync_v2(copy=%p, stream=%p)\n", (const void *)copy, hStream);
-    (void)hStream;
     /* knockout: Type-2 currently serializes transfer commands. Preserve the
      * existing async copy contract by completing this multidimensional copy
      * before return; add a stream-aware BAR2 protocol only after it is measured. */
-    return cxl_memcpy2d_device_to_device(copy);
+    size_t total_bytes = 0;
+    if (copy && (copy->Height == 0 || copy->WidthInBytes <= SIZE_MAX / copy->Height))
+        total_bytes = copy->WidthInBytes * copy->Height;
+    async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, hStream);
+    return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy));
 }
 
 CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) { return cuMemcpy2DAsync_v2(copy, hStream); }

@@ -397,6 +397,8 @@ static int test_integrity_export_table_shape(void) {
     const void *table = NULL;
     uint64_t result[2] = {0, 0};
 
+    cxl_cuda_test_write_reg32(CXL_GPU_REG_DRIVER_VERSION, 12090);
+
     CHECK(cuGetExportTable(&table, &integrity_check_uuid) == CUDA_SUCCESS);
     CHECK(table != NULL);
     const void *const *slots = table;
