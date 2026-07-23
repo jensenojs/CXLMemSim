@@ -1676,11 +1676,22 @@ static CUresult tools_runtime_callback_hook_slot4(const void *input, uint64_t *o
 }
 
 static CUresult tools_tls_get(void **out) {
+    uintptr_t token;
+    CUresult result;
+
     DLOG("TOOLS_TLS.get(out=%p)\n", (void *)out);
     if (!out) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     *out = NULL;
+
+    result = cxl_cuda_context_get_current_live(&token);
+    if (result != CUDA_SUCCESS) {
+        DLOG("TOOLS_TLS.get -> %d\n", result);
+        return result;
+    }
+    *out = (void *)token;
+    DLOG("TOOLS_TLS.get -> context=%p CUDA_SUCCESS\n", *out);
     return CUDA_SUCCESS;
 }
 

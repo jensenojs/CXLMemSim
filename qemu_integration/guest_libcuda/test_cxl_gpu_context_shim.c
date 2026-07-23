@@ -156,6 +156,10 @@ static const CUuuid context_checks_uuid = {
     .bytes = {0x26, 0x3e, 0x88, 0x60, 0x7c, 0xd2, 0x61, 0x43, 0x92, 0xf6, 0xbb, 0xd5, 0x00, 0x6d, 0xfa, 0x7e},
 };
 
+static const CUuuid tools_tls_uuid = {
+    .bytes = {0x42, 0xd8, 0x5a, 0x81, 0x23, 0xf6, 0xcb, 0x47, 0x82, 0x98, 0xf6, 0xe7, 0x8a, 0x3a, 0xec, 0xdc},
+};
+
 static const CUuuid cublas_context_stream_uuid = {
     .bytes = {0x21, 0x31, 0x8c, 0x60, 0x97, 0x14, 0x32, 0x48, 0x8c, 0xa6, 0x41, 0xff, 0x73, 0x24, 0xc8, 0xf2},
 };
@@ -475,12 +479,15 @@ static int test_context_check_preserves_result2(void) {
 }
 
 static int test_cublas_context_stream_export_table(void) {
+    typedef CUresult (*tools_tls_get_t)(void **context);
     typedef CUresult (*context_key_t)(CUcontext context, uint64_t *key);
     typedef CUresult (*stream_from_public_t)(CUcontext context, CUstream stream, void **private_stream,
                                              int per_thread);
     typedef CUresult (*stream_identity_t)(CUcontext context, const void *private_stream, uint64_t *identity);
-    const void *table = NULL;
+    const void *tools_tls_table = NULL;
+    const void *context_stream_table = NULL;
     CUcontext context = NULL;
+    void *private_context = (void *)(uintptr_t)1;
     CUstream stream = NULL;
     void *private_stream = NULL;
     uint64_t key = 0;
@@ -489,17 +496,29 @@ static int test_cublas_context_stream_export_table(void) {
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
     command_count = 0;
+    CHECK(cuGetExportTable(&tools_tls_table, &tools_tls_uuid) == CUDA_SUCCESS);
+    CHECK(tools_tls_table != NULL);
+    const void *const *tools_tls_slots = tools_tls_table;
+    CHECK((uintptr_t)tools_tls_slots[0] == 3 * sizeof(void *));
+    CHECK(tools_tls_slots[2] != NULL);
+    tools_tls_get_t tools_tls_get = (tools_tls_get_t)tools_tls_slots[2];
+    CHECK(tools_tls_get(&private_context) == CUDA_ERROR_INVALID_CONTEXT);
+    CHECK(private_context == NULL);
+
     CHECK(cuCtxCreate_v2(&context, 0, 0) == CUDA_SUCCESS);
-    CHECK(cuGetExportTable(&table, &cublas_context_stream_uuid) == CUDA_SUCCESS);
-    CHECK(table != NULL);
-    const void *const *slots = table;
+    CHECK(tools_tls_get(&private_context) == CUDA_SUCCESS);
+    CHECK(private_context == context);
+
+    CHECK(cuGetExportTable(&context_stream_table, &cublas_context_stream_uuid) == CUDA_SUCCESS);
+    CHECK(context_stream_table != NULL);
+    const void *const *slots = context_stream_table;
     CHECK((uintptr_t)slots[0] == 93 * sizeof(void *));
     CHECK(slots[4] != NULL && slots[39] != NULL && slots[51] != NULL);
 
     context_key_t context_key = (context_key_t)slots[4];
     stream_identity_t stream_identity = (stream_identity_t)slots[39];
     stream_from_public_t stream_from_public = (stream_from_public_t)slots[51];
-    CHECK(context_key(context, &key) == CUDA_SUCCESS);
+    CHECK(context_key((CUcontext)private_context, &key) == CUDA_SUCCESS);
     CHECK(key == issued_token);
     CHECK(context_key((CUcontext)(uintptr_t)(issued_token + 1), &key) == CUDA_ERROR_INVALID_CONTEXT);
 
@@ -524,6 +543,11 @@ static int test_cublas_context_stream_export_table(void) {
     CHECK(command_count == 2);
     CHECK(commands[0] == CXL_GPU_CMD_CTX_CREATE);
     CHECK(commands[1] == CXL_GPU_CMD_STREAM_CREATE);
+    CHECK(cuCtxDestroy_v2(context) == CUDA_SUCCESS);
+    private_context = (void *)(uintptr_t)1;
+    CHECK(tools_tls_get(&private_context) == CUDA_ERROR_INVALID_CONTEXT);
+    CHECK(private_context == NULL);
+    CHECK(command_count == 3 && commands[2] == CXL_GPU_CMD_CTX_DESTROY);
     return 0;
 }
 
