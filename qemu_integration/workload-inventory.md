@@ -27,6 +27,11 @@
 
 `ggml_flash_attn_ext_trigger.cpp`把一次已经在Kimi core中观察到的公开GGML CUDA图缩小为合法、可重复的输入。它用公开GGML API建立F16的Q、K、V、mask和输出tensor，要求CUDA backend支持该图，计算完成后同步，并逐元素检查零输入应得到有限的`0.0f`输出。这个数值oracle让“程序退出零”与“计算结果正确”成为两个独立事实。
 
+`cublas_create_probe.c`在同一份正式CUDA userland中建立一个cuBLAS handle，并让该handle执行固定2x2 FP32
+`cublasSgemm_v2`。输入采用column-major非零矩阵，DtoH后逐元素比较`{23,34,31,46}`。这一步让初始化阶段自然进入
+cuBLAS计算期的context、private Runtime、allocation、copy和synchronization路径；它仍不读取Kimi模型，也不能覆盖
+模型shape、完整kernel集合或paired case隔离。
+
 该源文件属于CXLMemSim，因为它定义了要触及的guest CUDA shim、BAR2、QEMU和HetGPU边界；它的编译输入属于type2-guest，因为guest executable必须链接本轮profile已经冻结的GGML动态库。最终组合关系是：
 
 ```text

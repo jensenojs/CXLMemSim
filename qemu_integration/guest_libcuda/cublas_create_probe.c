@@ -1,18 +1,30 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <link.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
 
 typedef int (*cublas_create_t)(void **handle);
 typedef int (*cublas_destroy_t)(void *handle);
+typedef int (*cublas_sgemm_t)(void *handle, int transa, int transb, int m, int n, int k, const float *alpha,
+                              const float *a, int lda, const float *b, int ldb, const float *beta, float *c, int ldc);
+typedef int (*cuda_malloc_t)(void **pointer, size_t size);
+typedef int (*cuda_memcpy_t)(void *destination, const void *source, size_t size, int kind);
+typedef int (*cuda_free_t)(void *pointer);
+typedef int (*cuda_device_synchronize_t)(void);
 typedef int (*cu_module_get_loading_mode_t)(int *mode);
+
+enum {
+    CUDA_MEMCPY_HOST_TO_DEVICE = 1,
+    CUDA_MEMCPY_DEVICE_TO_HOST = 2,
+    CUBLAS_OP_N = 0,
+};
 
 static const char *configured_path(const char *name, const char *fallback) {
     const char *value = getenv(name);
@@ -24,8 +36,7 @@ static void observe_module_loading_environment(const char *phase) {
     const char *enable_lazy_loading = getenv("CUDA_ENABLE_MODULE_LAZY_LOADING");
     printf("cublas_module_loading_environment phase=%s CUDA_MODULE_LOADING=%s "
            "CUDA_ENABLE_MODULE_LAZY_LOADING=%s\n",
-           phase, module_loading ? module_loading : "<unset>",
-           enable_lazy_loading ? enable_lazy_loading : "<unset>");
+           phase, module_loading ? module_loading : "<unset>", enable_lazy_loading ? enable_lazy_loading : "<unset>");
 }
 
 /*
@@ -83,7 +94,7 @@ static int emit_loader_dso(struct dl_phdr_info *info, size_t size, void *opaque)
     struct loader_inventory_context *context = opaque;
     const char *path = info->dlpi_name ? info->dlpi_name : "";
     const char *kind = path[0] == '\0' ? "main-program"
-                       : (strncmp(path, "linux-vdso", strlen("linux-vdso")) == 0 ? "special" : "file");
+                                       : (strncmp(path, "linux-vdso", strlen("linux-vdso")) == 0 ? "special" : "file");
     printf("cublas_loader_dso={\"schema_version\":1,\"phase\":");
     json_string(stdout, context->phase);
     printf(",\"kind\":");
@@ -128,12 +139,10 @@ static int observe_module_loading_mode(const char *phase, const char *driver_pat
     }
 
     dlerror();
-    cu_module_get_loading_mode_t get_mode =
-        (cu_module_get_loading_mode_t)dlsym(driver, "cuModuleGetLoadingMode");
+    cu_module_get_loading_mode_t get_mode = (cu_module_get_loading_mode_t)dlsym(driver, "cuModuleGetLoadingMode");
     error = dlerror();
     if (!get_mode) {
-        printf("cublas_module_loading_mode phase=%s status=unresolved error=%s\n", phase,
-               error ? error : "unknown");
+        printf("cublas_module_loading_mode phase=%s status=unresolved error=%s\n", phase, error ? error : "unknown");
         dlclose(driver);
         return 0;
     }
@@ -218,13 +227,95 @@ static int wait_for_gdb_observer(cublas_create_t create) {
     return -1;
 }
 
+static int run_sgemm_oracle(void *cublas_handle, cublas_sgemm_t sgemm, cuda_malloc_t cuda_malloc,
+                            cuda_memcpy_t cuda_memcpy, cuda_free_t cuda_free,
+                            cuda_device_synchronize_t cuda_device_synchronize) {
+    static const float host_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    static const float host_b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    static const float expected[4] = {23.0f, 34.0f, 31.0f, 46.0f};
+    float host_c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    float *device_a = NULL;
+    float *device_b = NULL;
+    float *device_c = NULL;
+    int status = cuda_malloc((void **)&device_a, sizeof(host_a));
+    if (status == 0) {
+        status = cuda_malloc((void **)&device_b, sizeof(host_b));
+    }
+    if (status == 0) {
+        status = cuda_malloc((void **)&device_c, sizeof(host_c));
+    }
+    printf("cublas_sgemm_allocation_result=%d a=%p b=%p c=%p\n", status, (void *)device_a, (void *)device_b,
+           (void *)device_c);
+    if (status != 0) {
+        goto cleanup;
+    }
+    status = cuda_memcpy(device_a, host_a, sizeof(host_a), CUDA_MEMCPY_HOST_TO_DEVICE);
+    if (status == 0) {
+        status = cuda_memcpy(device_b, host_b, sizeof(host_b), CUDA_MEMCPY_HOST_TO_DEVICE);
+    }
+    printf("cublas_sgemm_input_copy_result=%d\n", status);
+    if (status != 0) {
+        goto cleanup;
+    }
+    status =
+        sgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, 2, 2, 2, &alpha, device_a, 2, device_b, 2, &beta, device_c, 2);
+    printf("cublas_sgemm_result=%d m=2 n=2 k=2\n", status);
+    if (status != 0) {
+        goto cleanup;
+    }
+    status = cuda_device_synchronize();
+    printf("cublas_sgemm_synchronize_result=%d\n", status);
+    if (status != 0) {
+        goto cleanup;
+    }
+    status = cuda_memcpy(host_c, device_c, sizeof(host_c), CUDA_MEMCPY_DEVICE_TO_HOST);
+    printf("cublas_sgemm_output_copy_result=%d\n", status);
+    if (status != 0) {
+        goto cleanup;
+    }
+    float max_error = 0.0f;
+    for (size_t index = 0; index < 4; ++index) {
+        float error = host_c[index] - expected[index];
+        if (error < 0.0f) {
+            error = -error;
+        }
+        if (error > max_error) {
+            max_error = error;
+        }
+        if (error > 0.000001f) {
+            printf("cublas_sgemm_oracle_mismatch index=%zu actual=%.9g expected=%.9g abs_error=%.9g\n", index,
+                   host_c[index], expected[index], error);
+            status = 1;
+            goto cleanup;
+        }
+    }
+    printf("cublas_sgemm_numerical_oracle=pass elements=4 max_abs_error=%.9g\n", max_error);
+
+cleanup:
+    if (device_c && cuda_free(device_c) != 0 && status == 0) {
+        status = 1;
+    }
+    if (device_b && cuda_free(device_b) != 0 && status == 0) {
+        status = 1;
+    }
+    if (device_a && cuda_free(device_a) != 0 && status == 0) {
+        status = 1;
+    }
+    printf("cublas_sgemm_cleanup_result=%d\n", status);
+    return status;
+}
+
 int tiny_cuda_probe_run(void) {
     const char *expected = getenv("CUBLAS_CREATE_EXPECTED_REGISTRATIONS");
     const char *ggml_path = configured_path("CUBLAS_CREATE_GGML_LIBRARY", "/opt/llama/bin/libggml-cuda.so.0");
     const char *cublas_path = configured_path("CUBLAS_CREATE_LIBRARY", "libcublas.so.12");
+    const char *runtime_path = configured_path("CUBLAS_CREATE_RUNTIME_LIBRARY", "libcudart.so.12");
     const char *driver_path = configured_path("CUBLAS_CREATE_DRIVER_LIBRARY", "libcuda.so.1");
     void *ggml = NULL;
     void *cublas = NULL;
+    void *runtime = NULL;
     void *cublas_handle = NULL;
     int loading_mode_result = 0;
 
@@ -257,18 +348,51 @@ int tiny_cuda_probe_run(void) {
     dlerror();
     cublas_destroy_t destroy = (cublas_destroy_t)dlsym(cublas, "cublasDestroy_v2");
     const char *destroy_error = dlerror();
-    if (!create || !destroy) {
-        printf("cublas_create_probe_symbols status=fail create=%p destroy=%p create_error=%s destroy_error=%s\n",
-               (void *)create, (void *)destroy, create_error ? create_error : "none",
-               destroy_error ? destroy_error : "none");
+    dlerror();
+    cublas_sgemm_t sgemm = (cublas_sgemm_t)dlsym(cublas, "cublasSgemm_v2");
+    const char *sgemm_error = dlerror();
+    if (!create || !destroy || !sgemm) {
+        printf("cublas_create_probe_symbols status=fail create=%p destroy=%p sgemm=%p create_error=%s "
+               "destroy_error=%s sgemm_error=%s\n",
+               (void *)create, (void *)destroy, (void *)sgemm, create_error ? create_error : "none",
+               destroy_error ? destroy_error : "none", sgemm_error ? sgemm_error : "none");
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
         return 33;
     }
-    printf("cublas_create_probe_symbols status=pass create=%p destroy=%p\n", (void *)create, (void *)destroy);
+    printf("cublas_create_probe_symbols status=pass create=%p destroy=%p sgemm=%p\n", (void *)create, (void *)destroy,
+           (void *)sgemm);
+
+    runtime = dlopen(runtime_path, RTLD_NOW | RTLD_NOLOAD);
+    if (!runtime) {
+        const char *runtime_error = dlerror();
+        printf("cublas_create_probe_runtime status=fail path=%s error=%s\n", runtime_path,
+               runtime_error ? runtime_error : "unknown");
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 39;
+    }
+    cuda_malloc_t cuda_malloc = (cuda_malloc_t)dlsym(runtime, "cudaMalloc");
+    cuda_memcpy_t cuda_memcpy = (cuda_memcpy_t)dlsym(runtime, "cudaMemcpy");
+    cuda_free_t cuda_free = (cuda_free_t)dlsym(runtime, "cudaFree");
+    cuda_device_synchronize_t cuda_device_synchronize =
+        (cuda_device_synchronize_t)dlsym(runtime, "cudaDeviceSynchronize");
+    if (!cuda_malloc || !cuda_memcpy || !cuda_free || !cuda_device_synchronize) {
+        printf("cublas_create_probe_runtime_symbols status=fail malloc=%p memcpy=%p free=%p synchronize=%p\n",
+               (void *)cuda_malloc, (void *)cuda_memcpy, (void *)cuda_free, (void *)cuda_device_synchronize);
+        dlclose(runtime);
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 40;
+    }
+    printf("cublas_create_probe_runtime_symbols status=pass malloc=%p memcpy=%p free=%p synchronize=%p\n",
+           (void *)cuda_malloc, (void *)cuda_memcpy, (void *)cuda_free, (void *)cuda_device_synchronize);
 
     if (wait_for_gdb_observer(create) != 0) {
+        dlclose(runtime);
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
@@ -277,6 +401,7 @@ int tiny_cuda_probe_run(void) {
 
     observe_module_loading_environment("before-create");
     if (!observe_module_loading_mode("before-create", driver_path, &loading_mode_result)) {
+        dlclose(runtime);
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
@@ -287,6 +412,7 @@ int tiny_cuda_probe_run(void) {
     printf("cublas_create_result=%d handle=%p\n", create_result, cublas_handle);
     observe_module_loading_environment("after-create");
     if (create_result != 0 || !cublas_handle) {
+        dlclose(runtime);
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
@@ -295,14 +421,25 @@ int tiny_cuda_probe_run(void) {
 
     if (!observe_module_loading_mode("after-create", driver_path, &loading_mode_result) || loading_mode_result != 0) {
         destroy(cublas_handle);
+        dlclose(runtime);
         dlclose(cublas);
         dlclose(ggml);
         printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
         return 37;
     }
 
+    if (run_sgemm_oracle(cublas_handle, sgemm, cuda_malloc, cuda_memcpy, cuda_free, cuda_device_synchronize) != 0) {
+        destroy(cublas_handle);
+        dlclose(runtime);
+        dlclose(cublas);
+        dlclose(ggml);
+        printf("=== CUBLAS_CREATE_PROBE_FAIL ===\n");
+        return 41;
+    }
+
     int destroy_result = destroy(cublas_handle);
     printf("cublas_destroy_result=%d\n", destroy_result);
+    dlclose(runtime);
     dlclose(cublas);
     dlclose(ggml);
     if (destroy_result != 0) {

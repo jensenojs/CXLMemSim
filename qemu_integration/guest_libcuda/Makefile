@@ -49,6 +49,7 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 	@output="$$(CUBLAS_CREATE_EXPECTED_REGISTRATIONS=3346 \
 		CUBLAS_CREATE_GGML_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
 		CUBLAS_CREATE_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
+		CUBLAS_CREATE_RUNTIME_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
 		CUBLAS_CREATE_DRIVER_LIBRARY="$(CURDIR)/$(CUBLAS_CREATE_FAKE)" \
 		./$(TINY_CUDA_PROBE) "$(CURDIR)/$(CUBLAS_CREATE_PROBE)")"; \
 	printf '%s\n' "$$output"; \
@@ -56,6 +57,10 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 	printf '%s\n' "$$output" | grep -Fx 'cublas_module_loading_mode phase=before-create status=called result=3 mode=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_create_result=0 handle=0x1' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_module_loading_mode phase=after-create status=called result=0 mode=2' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_result=0 m=2 n=2 k=2' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_synchronize_result=0' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_output_copy_result=0' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_numerical_oracle=pass elements=4 max_abs_error=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_destroy_result=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx '=== CUBLAS_CREATE_PROBE_PASS ===' >/dev/null
 
