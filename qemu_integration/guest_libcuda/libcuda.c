@@ -4661,37 +4661,13 @@ CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t by
     if (!dstDevice || !srcDevice)
         return CUDA_ERROR_INVALID_VALUE;
 
-    /* For D2D copy, use intermediate host buffer via data region */
-    size_t offset = 0;
-    while (offset < byteCount) {
-        size_t chunk = byteCount - offset;
-        if (chunk > CXL_GPU_DATA_SIZE) {
-            chunk = CXL_GPU_DATA_SIZE;
-        }
-
-        cmd_lock();
-        /* Read from source device memory to data region */
-        reg_write64(CXL_GPU_REG_PARAM0, srcDevice + offset);
-        reg_write64(CXL_GPU_REG_PARAM1, chunk);
-        CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_DTOH);
-        if (result != CUDA_SUCCESS) {
-            cmd_unlock();
-            return result;
-        }
-
-        /* Write from data region to destination device memory */
-        reg_write64(CXL_GPU_REG_PARAM0, dstDevice + offset);
-        reg_write64(CXL_GPU_REG_PARAM1, chunk);
-        result = execute_cmd(CXL_GPU_CMD_MEM_COPY_HTOD);
-        cmd_unlock();
-        if (result != CUDA_SUCCESS) {
-            return result;
-        }
-
-        offset += chunk;
-    }
-
-    return CUDA_SUCCESS;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, dstDevice);
+    reg_write64(CXL_GPU_REG_PARAM1, srcDevice);
+    reg_write64(CXL_GPU_REG_PARAM2, byteCount);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_DTOD);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount) {

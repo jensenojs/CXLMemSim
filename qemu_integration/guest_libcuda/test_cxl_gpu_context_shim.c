@@ -275,18 +275,11 @@ static CUresult fake_execute(uint32_t command) {
     case CXL_GPU_CMD_MODULE_UNLOAD:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
         return CUDA_SUCCESS;
-    case CXL_GPU_CMD_MEM_COPY_DTOH:
-        CHECK(memcpy2d_phase / 2 < memcpy2d_row_count);
-        CHECK(memcpy2d_phase % 2 == 0);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_src_rows[memcpy2d_phase / 2]);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_width);
-        memcpy2d_phase++;
-        return CUDA_SUCCESS;
-    case CXL_GPU_CMD_MEM_COPY_HTOD:
-        CHECK(memcpy2d_phase / 2 < memcpy2d_row_count);
-        CHECK(memcpy2d_phase % 2 == 1);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_dst_rows[memcpy2d_phase / 2]);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_width);
+    case CXL_GPU_CMD_MEM_COPY_DTOD:
+        CHECK(memcpy2d_phase < memcpy2d_row_count);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_dst_rows[memcpy2d_phase]);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_src_rows[memcpy2d_phase]);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == memcpy2d_width);
         memcpy2d_phase++;
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MODULE_LOAD_CUBIN: {
@@ -701,24 +694,24 @@ static int test_memcpy2d_device_route(void) {
     CHECK(resolved == (void *)cuMemcpy2DAsync_v2);
     CHECK(symbol_status == 0);
     CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_SUCCESS);
-    CHECK(memcpy2d_phase == 2 * copy.Height);
-    CHECK(command_count == 2 * copy.Height);
+    CHECK(memcpy2d_phase == copy.Height);
+    CHECK(command_count == copy.Height);
 
     copy.WidthInBytes = copy.srcPitch - copy.srcXInBytes + 1;
     CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
-    CHECK(command_count == 2 * memcpy2d_row_count);
+    CHECK(command_count == memcpy2d_row_count);
     copy.WidthInBytes = memcpy2d_width;
     copy.srcMemoryType = 1;
     CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_NOT_SUPPORTED);
-    CHECK(command_count == 2 * memcpy2d_row_count);
+    CHECK(command_count == memcpy2d_row_count);
     copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
     copy.srcY = SIZE_MAX;
     CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
-    CHECK(command_count == 2 * memcpy2d_row_count);
+    CHECK(command_count == memcpy2d_row_count);
     copy.srcY = 0;
     copy.srcDevice = UINT64_MAX - 15;
     CHECK(cuMemcpy2DAsync_v2(&copy, NULL) == CUDA_ERROR_INVALID_VALUE);
-    CHECK(command_count == 2 * memcpy2d_row_count);
+    CHECK(command_count == memcpy2d_row_count);
     return 0;
 }
 
