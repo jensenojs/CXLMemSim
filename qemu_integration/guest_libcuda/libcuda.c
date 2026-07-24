@@ -4714,24 +4714,33 @@ static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
         return CUDA_ERROR_INVALID_VALUE;
     }
 
-    for (size_t row = 0; row < copy->Height; row++) {
-        CUdeviceptr src;
-        CUdeviceptr dst;
-        if (copy->srcY > SIZE_MAX - row || copy->dstY > SIZE_MAX - row ||
-            !cxl_memcpy2d_offset(copy->srcDevice, copy->srcPitch, copy->srcXInBytes, copy->srcY + row,
-                                 copy->WidthInBytes, &src) ||
-            !cxl_memcpy2d_offset(copy->dstDevice, copy->dstPitch, copy->dstXInBytes, copy->dstY + row,
-                                 copy->WidthInBytes, &dst)) {
-            return CUDA_ERROR_INVALID_VALUE;
-        }
-
-        CUresult result = cuMemcpyDtoD_v2(dst, src, copy->WidthInBytes);
-        if (result != CUDA_SUCCESS) {
-            return result;
-        }
+    CUdeviceptr src;
+    CUdeviceptr dst;
+    size_t last_row = copy->Height - 1;
+    if (copy->srcY > SIZE_MAX - last_row || copy->dstY > SIZE_MAX - last_row ||
+        !cxl_memcpy2d_offset(copy->srcDevice, copy->srcPitch, copy->srcXInBytes, copy->srcY, copy->WidthInBytes,
+                             &src) ||
+        !cxl_memcpy2d_offset(copy->dstDevice, copy->dstPitch, copy->dstXInBytes, copy->dstY, copy->WidthInBytes,
+                             &dst)) {
+        return CUDA_ERROR_INVALID_VALUE;
     }
 
-    return CUDA_SUCCESS;
+    CUdeviceptr ignored;
+    if (!cxl_memcpy2d_offset(src, copy->srcPitch, 0, last_row, copy->WidthInBytes, &ignored) ||
+        !cxl_memcpy2d_offset(dst, copy->dstPitch, 0, last_row, copy->WidthInBytes, &ignored)) {
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, dst);
+    reg_write64(CXL_GPU_REG_PARAM1, src);
+    reg_write64(CXL_GPU_REG_PARAM2, copy->dstPitch);
+    reg_write64(CXL_GPU_REG_PARAM3, copy->srcPitch);
+    reg_write64(CXL_GPU_REG_PARAM4, copy->WidthInBytes);
+    reg_write64(CXL_GPU_REG_PARAM5, copy->Height);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_2D_DTOD);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *copy) {
