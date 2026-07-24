@@ -93,6 +93,18 @@ void cxl_gpu_transport_data_write(CxlGpuTransport *transport, size_t offset, con
     if (offset > CXL_GPU_DATA_SIZE || len > CXL_GPU_DATA_SIZE - offset)
         return;
 
+    /* Protocol v1.10 maps only the data window as QEMU RAM. Unlike command
+     * registers, it has no per-access device side effect, so libc may use
+     * wide stores. The full barrier below publishes every payload byte before
+     * the caller writes params and the command doorbell through volatile MMIO. */
+    memcpy((void *)(transport->data + offset), src, len);
+#if 0
+    /* Historical I/O-window implementation. It limited every store to the
+     * former QEMU MemoryRegionOps maximum access width. The v1.10 data window
+     * is RAM-backed; enabling this loop again would restore the TCG narrow-
+     * store cost without preserving any additional device semantics.
+     * knockout: restore only with an older I/O-backed data-window protocol,
+     * and only together with a distinct protocol version and QEMU mapping. */
     const uint8_t *source = src;
     volatile uint8_t *destination = transport->data + offset;
     size_t index = 0;
@@ -103,6 +115,8 @@ void cxl_gpu_transport_data_write(CxlGpuTransport *transport, size_t offset, con
     }
     for (; index < len; index++)
         destination[index] = source[index];
+#endif
+    /* QEMU must not observe the command doorbell before the RAM payload. */
     __sync_synchronize();
 }
 
@@ -110,7 +124,13 @@ void cxl_gpu_transport_data_read(const CxlGpuTransport *transport, size_t offset
     if (offset > CXL_GPU_DATA_SIZE || len > CXL_GPU_DATA_SIZE - offset)
         return;
 
+    /* Observe QEMU's completed command and payload writes before bulk read. */
     __sync_synchronize();
+    /* The same RAM-window argument permits wide loads on the return path. */
+    memcpy(dst, (const void *)(transport->data + offset), len);
+#if 0
+    /* Historical peer of the write loop above. Keep it only as evidence of
+     * the old I/O-window access-width contract. */
     uint8_t *destination = dst;
     volatile uint8_t *source = transport->data + offset;
     size_t index = 0;
@@ -120,6 +140,7 @@ void cxl_gpu_transport_data_read(const CxlGpuTransport *transport, size_t offset
     }
     for (; index < len; index++)
         destination[index] = source[index];
+#endif
 }
 
 int cxl_gpu_transport_lock(CxlGpuTransport *transport) {

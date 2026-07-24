@@ -628,6 +628,7 @@ typedef struct CXLAsyncCopyTrace {
     uint64_t stream_wire;
     bool stream_wire_valid;
     uint32_t command_index;
+    const char *implementation;
 } CXLAsyncCopyTrace;
 
 static __thread CXLAsyncCopyTrace g_async_copy_trace;
@@ -640,7 +641,8 @@ static uint64_t guest_monotonic_ns(void) {
     return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
 }
 
-static void async_copy_trace_begin(const char *api, size_t total_bytes, CUstream stream) {
+static void async_copy_trace_begin(const char *api, size_t total_bytes,
+                                   CUstream stream, const char *implementation) {
     uint64_t stream_wire = 0;
     bool stream_wire_valid = cxl_gpu_stream_wire(stream, &stream_wire);
     uint64_t public_sequence = __sync_add_and_fetch(&g_async_copy_sequence, 1);
@@ -652,20 +654,22 @@ static void async_copy_trace_begin(const char *api, size_t total_bytes, CUstream
         .total_bytes = total_bytes,
         .stream_wire = stream_wire,
         .stream_wire_valid = stream_wire_valid,
+        .implementation = implementation,
     };
     DLOG("async_copy event=public-entry public_sequence=%" PRIu64
          " api=%s total_bytes=%zu guest_stream=%p stream_wire=%s0x%016" PRIx64
-         " implementation=blocking stream_forwarded=0\n",
+         " implementation=%s stream_forwarded=%u\n",
          public_sequence, api, total_bytes, stream,
-         stream_wire_valid ? "" : "invalid:", stream_wire);
+         stream_wire_valid ? "" : "invalid:", stream_wire, implementation,
+         strcmp(implementation, "async-enqueue") == 0);
 }
 
 static CUresult async_copy_trace_end(CUresult result) {
     DLOG("async_copy event=public-return public_sequence=%" PRIu64
-         " api=%s total_bytes=%zu commands=%u result=%d implementation=blocking\n",
+         " api=%s total_bytes=%zu commands=%u result=%d implementation=%s\n",
          g_async_copy_trace.public_sequence, g_async_copy_trace.api,
          g_async_copy_trace.total_bytes, g_async_copy_trace.command_index,
-         result);
+         result, g_async_copy_trace.implementation);
     memset(&g_async_copy_trace, 0, sizeof(g_async_copy_trace));
     return result;
 }
@@ -684,12 +688,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
         DLOG("async_copy event=command-entry public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64
              " api=%s command=0x%x p0=0x%016" PRIx64 " bytes=%" PRIu64
-             " stream_wire=%s0x%016" PRIx64 " implementation=blocking\n",
+             " stream_wire=%s0x%016" PRIx64 " implementation=%s\n",
              g_async_copy_trace.public_sequence, async_command_index, call_id,
              g_async_copy_trace.api, cmd, reg_read64(CXL_GPU_REG_PARAM0),
              reg_read64(CXL_GPU_REG_PARAM1),
              g_async_copy_trace.stream_wire_valid ? "" : "invalid:",
-             g_async_copy_trace.stream_wire);
+             g_async_copy_trace.stream_wire,
+             g_async_copy_trace.implementation);
     }
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
     if (g_test_execute_cmd) {
@@ -704,9 +709,10 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
         if (g_async_copy_trace.active) {
             DLOG("async_copy event=command-return public_sequence=%" PRIu64
                  " command_index=%u call_id=0x%016" PRIx64
-                 " api=%s command=0x%x result=%d implementation=blocking\n",
+                 " api=%s command=0x%x result=%d implementation=%s\n",
                  g_async_copy_trace.public_sequence, async_command_index,
-                 call_id, g_async_copy_trace.api, cmd, result);
+                 call_id, g_async_copy_trace.api, cmd, result,
+                 g_async_copy_trace.implementation);
         }
         return result;
     }
@@ -724,9 +730,10 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     if (g_async_copy_trace.active) {
         DLOG("async_copy event=command-return public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64
-             " api=%s command=0x%x result=%d implementation=blocking\n",
+             " api=%s command=0x%x result=%d implementation=%s\n",
              g_async_copy_trace.public_sequence, async_command_index, call_id,
-             g_async_copy_trace.api, cmd, result);
+             g_async_copy_trace.api, cmd, result,
+             g_async_copy_trace.implementation);
     }
     return result;
 }
@@ -2476,7 +2483,16 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
         }
 
         cmd_lock();
+        uint64_t data_write_start_ns = guest_monotonic_ns();
         data_write(0, (const uint8_t *)srcHost + offset, chunk);
+        uint64_t data_write_end_ns = guest_monotonic_ns();
+        DLOG("copy_transport event=data-write transport=ram-bulk api=%s public_sequence=%" PRIu64
+             " chunk_index=%u offset=%zu bytes=%zu duration_ns=%" PRIu64 "\n",
+             g_async_copy_trace.active ? g_async_copy_trace.api : "cuMemcpyHtoD",
+             g_async_copy_trace.active ? g_async_copy_trace.public_sequence : 0,
+             g_async_copy_trace.command_index + 1, offset, chunk,
+             data_write_end_ns >= data_write_start_ns ?
+                 data_write_end_ns - data_write_start_ns : 0);
         reg_write64(CXL_GPU_REG_PARAM0, dstDevice + offset);
         reg_write64(CXL_GPU_REG_PARAM1, chunk);
 
@@ -2492,12 +2508,44 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
 }
 
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
+    uint64_t stream_wire;
+
     DLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
-    /* knockout: the current Type-2 command path serializes transfers and kernel
-     * launches. Completing the copy before return preserves correctness; add a
-     * stream-aware BAR2 command only when concurrent stream execution is measured. */
-    async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, hStream);
-    return async_copy_trace_end(cuMemcpyHtoD_v2(dstDevice, srcHost, byteCount));
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!srcHost)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, hStream,
+                           "async-enqueue");
+    size_t offset = 0;
+    while (offset < byteCount) {
+        size_t chunk = byteCount - offset;
+        if (chunk > CXL_GPU_DATA_SIZE)
+            chunk = CXL_GPU_DATA_SIZE;
+
+        cmd_lock();
+        uint64_t data_write_start_ns = guest_monotonic_ns();
+        data_write(0, (const uint8_t *)srcHost + offset, chunk);
+        uint64_t data_write_end_ns = guest_monotonic_ns();
+        DLOG("copy_transport event=data-write transport=ram-bulk api=%s public_sequence=%" PRIu64
+             " chunk_index=%u offset=%zu bytes=%zu duration_ns=%" PRIu64 "\n",
+             g_async_copy_trace.api, g_async_copy_trace.public_sequence,
+             g_async_copy_trace.command_index + 1, offset, chunk,
+             data_write_end_ns >= data_write_start_ns ?
+                 data_write_end_ns - data_write_start_ns : 0);
+        reg_write64(CXL_GPU_REG_PARAM0, dstDevice + offset);
+        reg_write64(CXL_GPU_REG_PARAM1, chunk);
+        reg_write64(CXL_GPU_REG_PARAM2, stream_wire);
+        CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_HTOD_ASYNC);
+        cmd_unlock();
+        if (result != CUDA_SUCCESS)
+            return async_copy_trace_end(result);
+        offset += chunk;
+    }
+    return async_copy_trace_end(CUDA_SUCCESS);
 }
 
 CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
@@ -2529,7 +2577,17 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
             return err;
         }
 
+        uint64_t data_read_start_ns = guest_monotonic_ns();
         data_read(0, (uint8_t *)dstHost + offset, chunk);
+        uint64_t data_read_end_ns = guest_monotonic_ns();
+        DLOG("copy_transport event=data-read transport=ram-bulk api=%s "
+             "public_sequence=%" PRIu64
+             " chunk_index=%u offset=%zu bytes=%zu duration_ns=%" PRIu64 "\n",
+             g_async_copy_trace.active ? g_async_copy_trace.api : "cuMemcpyDtoH",
+             g_async_copy_trace.active ? g_async_copy_trace.public_sequence : 0,
+             g_async_copy_trace.command_index, offset, chunk,
+             data_read_end_ns >= data_read_start_ns ?
+                 data_read_end_ns - data_read_start_ns : 0);
         cmd_unlock();
         offset += chunk;
     }
@@ -2542,7 +2600,8 @@ CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteC
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
      * stream-aware BAR2 command only when concurrent stream execution is measured. */
-    async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, hStream);
+    async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, hStream,
+                           "blocking");
     return async_copy_trace_end(cuMemcpyDtoH_v2(dstHost, srcDevice, byteCount));
 }
 
@@ -4504,7 +4563,8 @@ CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteC
 }
 
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
-    async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, hStream);
+    async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, hStream,
+                           "blocking");
     return async_copy_trace_end(cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount));
 }
 
@@ -4578,7 +4638,8 @@ CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     size_t total_bytes = 0;
     if (copy && (copy->Height == 0 || copy->WidthInBytes <= SIZE_MAX / copy->Height))
         total_bytes = copy->WidthInBytes * copy->Height;
-    async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, hStream);
+    async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, hStream,
+                           "blocking");
     return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy));
 }
 
