@@ -60,7 +60,7 @@ static int run_begin(CxlGpuTransport *transport, int argc, char **argv) {
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM1, case_id);
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM2, binding);
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM3, 0);
-    uint32_t result = cxl_gpu_transport_execute(transport, CXL_GPU_CMD_CASE_BEGIN);
+    uint32_t result = cxl_gpu_transport_execute(transport, CXL_GPU_CMD_CASE_BEGIN, NULL);
     uint64_t epoch = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT0);
     uint64_t acknowledged_case = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT1);
     uint64_t first_sequence = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT2);
@@ -107,7 +107,7 @@ static int run_end(CxlGpuTransport *transport, int argc, char **argv) {
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM1, epoch);
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM2, (uint64_t)(int64_t)application_exit);
     cxl_gpu_transport_write64(transport, CXL_GPU_REG_PARAM3, binding);
-    uint32_t result = cxl_gpu_transport_execute(transport, CXL_GPU_CMD_CASE_END);
+    uint32_t result = cxl_gpu_transport_execute(transport, CXL_GPU_CMD_CASE_END, NULL);
     uint64_t acknowledged_epoch = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT0);
     uint64_t last_sequence = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT1);
     uint64_t concordia_status = cxl_gpu_transport_read64(transport, CXL_GPU_REG_RESULT2);

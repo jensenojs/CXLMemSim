@@ -134,15 +134,22 @@ int cxl_gpu_transport_unlock(CxlGpuTransport *transport) {
     return flock(transport->pci_fd, LOCK_UN);
 }
 
-uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command) {
+uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command, uint32_t *poll_count) {
     cxl_gpu_transport_write32(transport, CXL_GPU_REG_CMD, command);
 
+    uint32_t polls = 0;
     int timeout = 1000000;
     while (timeout-- > 0) {
         uint32_t status = cxl_gpu_transport_read32(transport, CXL_GPU_REG_CMD_STATUS);
-        if (status == CXL_GPU_CMD_STATUS_COMPLETE || status == CXL_GPU_CMD_STATUS_ERROR)
+        polls++;
+        if (status == CXL_GPU_CMD_STATUS_COMPLETE || status == CXL_GPU_CMD_STATUS_ERROR) {
+            if (poll_count)
+                *poll_count = polls;
             return cxl_gpu_transport_read32(transport, CXL_GPU_REG_CMD_RESULT);
+        }
     }
+    if (poll_count)
+        *poll_count = polls;
     return CXL_GPU_ERROR_UNKNOWN;
 }
 

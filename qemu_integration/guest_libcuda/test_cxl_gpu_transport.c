@@ -27,7 +27,7 @@ int main(void) {
 
     cxl_gpu_transport_write32(&transport, CXL_GPU_REG_CMD_STATUS, CXL_GPU_CMD_STATUS_COMPLETE);
     cxl_gpu_transport_write32(&transport, CXL_GPU_REG_CMD_RESULT, CXL_GPU_SUCCESS);
-    assert(cxl_gpu_transport_execute(&transport, CXL_GPU_CMD_CASE_BEGIN) == CXL_GPU_SUCCESS);
+    assert(cxl_gpu_transport_execute(&transport, CXL_GPU_CMD_CASE_BEGIN, NULL) == CXL_GPU_SUCCESS);
     assert(cxl_gpu_transport_read32(&transport, CXL_GPU_REG_CMD) == CXL_GPU_CMD_CASE_BEGIN);
 
     free(bar);

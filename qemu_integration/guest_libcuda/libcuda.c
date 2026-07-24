@@ -27,6 +27,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cxl_gpu_cmd.h"
@@ -631,6 +632,14 @@ typedef struct CXLAsyncCopyTrace {
 
 static __thread CXLAsyncCopyTrace g_async_copy_trace;
 
+static uint64_t guest_monotonic_ns(void) {
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+
 static void async_copy_trace_begin(const char *api, size_t total_bytes, CUstream stream) {
     uint64_t stream_wire = 0;
     bool stream_wire_valid = cxl_gpu_stream_wire(stream, &stream_wire);
@@ -664,10 +673,11 @@ static CUresult async_copy_trace_end(CUresult result) {
 static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint32_t sequence = __sync_add_and_fetch(&g_api_chain_sequence, 1);
     uint64_t call_id = ((uint64_t)(uint32_t)getpid() << 32) | sequence;
+    uint64_t start_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, call_id);
     DLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
-         " symbol=%s command=0x%x\n",
-         call_id, symbol, cmd);
+         " symbol=%s command=0x%x guest_ns=%" PRIu64 "\n",
+         call_id, symbol, cmd, start_ns);
     uint32_t async_command_index = 0;
     if (g_async_copy_trace.active) {
         async_command_index = ++g_async_copy_trace.command_index;
@@ -684,10 +694,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
     if (g_test_execute_cmd) {
         CUresult result = g_test_execute_cmd(cmd);
+        uint64_t end_ns = guest_monotonic_ns();
         reg_write64(CXL_GPU_REG_CALL_ID, 0);
         DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
-             " symbol=%s command=0x%x result=%d\n",
-             call_id, symbol, cmd, result);
+             " symbol=%s command=0x%x guest_ns=%" PRIu64
+             " duration_ns=%" PRIu64 " status_poll_count=0 result=%d\n",
+             call_id, symbol, cmd, end_ns,
+             end_ns >= start_ns ? end_ns - start_ns : 0, result);
         if (g_async_copy_trace.active) {
             DLOG("async_copy event=command-return public_sequence=%" PRIu64
                  " command_index=%u call_id=0x%016" PRIx64
@@ -698,11 +711,16 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
         return result;
     }
 #endif
-    CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd);
+    uint32_t poll_count = 0;
+    CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd, &poll_count);
+    uint64_t end_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, 0);
     DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
-         " symbol=%s command=0x%x result=%d\n",
-         call_id, symbol, cmd, result);
+         " symbol=%s command=0x%x guest_ns=%" PRIu64
+         " duration_ns=%" PRIu64 " status_poll_count=%u result=%d\n",
+         call_id, symbol, cmd, end_ns,
+         end_ns >= start_ns ? end_ns - start_ns : 0,
+         poll_count, result);
     if (g_async_copy_trace.active) {
         DLOG("async_copy event=command-return public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64

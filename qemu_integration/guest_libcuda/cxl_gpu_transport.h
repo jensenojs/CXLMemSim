@@ -33,6 +33,6 @@ void cxl_gpu_transport_data_read(const CxlGpuTransport *transport, size_t offset
 
 int cxl_gpu_transport_lock(CxlGpuTransport *transport);
 int cxl_gpu_transport_unlock(CxlGpuTransport *transport);
-uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command);
+uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command, uint32_t *poll_count);
 
 #endif
