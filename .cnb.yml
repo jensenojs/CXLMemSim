@@ -32,6 +32,9 @@ $:
           script: |
            bash scripts/build_component.sh
            bash scripts/publish_component.sh .work/component/payload
+           bash scripts/pull_component.sh \
+             .work/component/publish/candidate.json \
+             .work/component/verified
 
   # Pull the candidate artifact by digest into an empty directory and verify every file.
   api_trigger_component_fresh_pull:
