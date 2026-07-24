@@ -312,6 +312,24 @@ static CUresult cxl_module_load_image(CUmodule *module, const void *image);
 static CudartLibraryRecord *g_cudart_library_records = NULL;
 static unsigned int g_cudart_library_next_id = 1;
 
+typedef struct FunctionParamLayout {
+    CUfunction function;
+    uint32_t num_args;
+    size_t extent;
+    size_t offsets[CXL_MAX_KERNEL_ARGS];
+    size_t sizes[CXL_MAX_KERNEL_ARGS];
+} FunctionParamLayout;
+
+#define FUNCTION_PARAM_LAYOUT_PAGE_BITS 16
+#define FUNCTION_PARAM_LAYOUT_PAGE_SIZE (1U << FUNCTION_PARAM_LAYOUT_PAGE_BITS)
+static FunctionParamLayout **g_function_param_layout_pages[FUNCTION_PARAM_LAYOUT_PAGE_SIZE];
+static pthread_mutex_t g_function_param_layouts_lock = PTHREAD_MUTEX_INITIALIZER;
+static void function_param_layouts_clear(const char *reason);
+static CUresult function_param_layout_copy(CUfunction function,
+                                           size_t offsets[CXL_MAX_KERNEL_ARGS],
+                                           size_t sizes[CXL_MAX_KERNEL_ARGS],
+                                           uint32_t *num_args, size_t *extent);
+
 /* CUlibrary is the record address.  Unload marks a record dead but keeps that
  * address reserved until process exit, so an old opaque handle can never name
  * a later library after allocator reuse.  The test reset frees the whole list
@@ -353,6 +371,28 @@ static int g_debug = 0;
         if (g_debug)                                                                                                   \
             fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                                \
     } while (0)
+
+static void function_param_layouts_clear(const char *reason) {
+    uint64_t cleared = 0;
+
+    pthread_mutex_lock(&g_function_param_layouts_lock);
+    for (size_t page_index = 0; page_index < FUNCTION_PARAM_LAYOUT_PAGE_SIZE; page_index++) {
+        FunctionParamLayout **page = g_function_param_layout_pages[page_index];
+        if (!page)
+            continue;
+        for (size_t slot = 0; slot < FUNCTION_PARAM_LAYOUT_PAGE_SIZE; slot++) {
+            if (page[slot]) {
+                free(page[slot]);
+                cleared++;
+            }
+        }
+        free(page);
+        g_function_param_layout_pages[page_index] = NULL;
+    }
+    pthread_mutex_unlock(&g_function_param_layouts_lock);
+    DLOG("function_param_cache event=clear reason=%s layouts=%" PRIu64 "\n",
+         reason, cleared);
+}
 
 static void log_context_state(const char *api, CUresult result) {
     CxlCudaContextStateView state = cxl_cuda_context_state_view();
@@ -744,6 +784,7 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 static void context_storage_test_reset(void);
 
 void cxl_cuda_test_reset(void) {
+    function_param_layouts_clear("test-reset");
     while (g_cudart_library_records) {
         CudartLibraryRecord *record = g_cudart_library_records;
         g_cudart_library_records = record->next;
@@ -1022,28 +1063,12 @@ CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNod
     if (!nodeParams->kernelParams && nodeParams->extra)
         return CUDA_ERROR_NOT_SUPPORTED;
 
-    while (num_args < CXL_MAX_KERNEL_ARGS) {
-        size_t offset = 0;
-        size_t size = 0;
-        CUresult result = cuFuncGetParamInfo(nodeParams->func, num_args, &offset, &size);
-
-        if (result == CUDA_ERROR_INVALID_VALUE)
-            break;
-        if (result != CUDA_SUCCESS)
-            return result;
-        if (!nodeParams->kernelParams || !nodeParams->kernelParams[num_args] ||
-            offset > CXL_GPU_DATA_SIZE || size > CXL_GPU_DATA_SIZE - offset)
-            return CUDA_ERROR_INVALID_VALUE;
-        param_offsets[num_args] = offset;
-        param_sizes[num_args] = size;
-        if (offset + size > param_extent)
-            param_extent = offset + size;
-        num_args++;
-    }
-    if (num_args == CXL_MAX_KERNEL_ARGS) {
-        size_t offset = 0;
-        size_t size = 0;
-        if (cuFuncGetParamInfo(nodeParams->func, num_args, &offset, &size) == CUDA_SUCCESS)
+    CUresult layout_result = function_param_layout_copy(
+        nodeParams->func, param_offsets, param_sizes, &num_args, &param_extent);
+    if (layout_result != CUDA_SUCCESS)
+        return layout_result;
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (!nodeParams->kernelParams || !nodeParams->kernelParams[i])
             return CUDA_ERROR_INVALID_VALUE;
     }
 
@@ -2419,11 +2444,14 @@ CUresult cuCtxDestroy_v2(CUcontext ctx) {
 
     cmd_lock();
     CUresult err = execute_cmd(CXL_GPU_CMD_CTX_DESTROY);
+    bool context_destroyed = err == CUDA_SUCCESS;
     if (err == CUDA_SUCCESS) {
         context_storage_clear_context(ctx, 1);
         err = cxl_cuda_context_commit_destroy((uintptr_t)ctx);
     }
     cmd_unlock();
+    if (context_destroyed)
+        function_param_layouts_clear("context-destroy");
     return err;
 }
 
@@ -3727,25 +3755,147 @@ CUresult cuFuncGetName(const char **name, CUfunction hfunc) {
     return CUDA_ERROR_NOT_SUPPORTED;
 }
 
+static CUresult function_param_info_uncached(CUfunction hfunc, size_t param_index,
+                                             size_t *param_offset, size_t *param_size) {
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hfunc));
+    reg_write64(CXL_GPU_REG_PARAM1, param_index);
+    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    if (err == CUDA_SUCCESS) {
+        *param_offset = reg_read64(CXL_GPU_REG_RESULT0);
+        if (param_size)
+            *param_size = reg_read64(CXL_GPU_REG_RESULT1);
+    }
+    cmd_unlock();
+    return err;
+}
+
+static FunctionParamLayout *function_param_layout_find(CUfunction function) {
+    uint64_t function_id;
+
+    if (!cxl_gpu_handle_id(function, &function_id))
+        return NULL;
+    FunctionParamLayout **page =
+        g_function_param_layout_pages[function_id >> FUNCTION_PARAM_LAYOUT_PAGE_BITS];
+    return page ? page[function_id & (FUNCTION_PARAM_LAYOUT_PAGE_SIZE - 1)] : NULL;
+}
+
+static bool function_param_layout_insert(FunctionParamLayout *layout) {
+    uint64_t function_id;
+
+    if (!cxl_gpu_handle_id(layout->function, &function_id))
+        return false;
+    size_t page_index = function_id >> FUNCTION_PARAM_LAYOUT_PAGE_BITS;
+    FunctionParamLayout **page = g_function_param_layout_pages[page_index];
+    if (!page) {
+        page = calloc(FUNCTION_PARAM_LAYOUT_PAGE_SIZE, sizeof(*page));
+        if (!page)
+            return false;
+        g_function_param_layout_pages[page_index] = page;
+    }
+    page[function_id & (FUNCTION_PARAM_LAYOUT_PAGE_SIZE - 1)] = layout;
+    return true;
+}
+
+static CUresult function_param_layout_copy(CUfunction function,
+                                           size_t offsets[CXL_MAX_KERNEL_ARGS],
+                                           size_t sizes[CXL_MAX_KERNEL_ARGS],
+                                           uint32_t *num_args, size_t *extent) {
+    uint32_t backend_queries = 0;
+    uint64_t function_id;
+
+    if (!cxl_gpu_handle_id(function, &function_id))
+        return CUDA_ERROR_INVALID_HANDLE;
+
+    pthread_mutex_lock(&g_function_param_layouts_lock);
+    FunctionParamLayout *layout = function_param_layout_find(function);
+    if (!layout) {
+        FunctionParamLayout candidate = {.function = function};
+        CUresult result = CUDA_SUCCESS;
+
+        while (candidate.num_args < CXL_MAX_KERNEL_ARGS) {
+            size_t offset = 0;
+            size_t size = 0;
+
+            result = function_param_info_uncached(function, candidate.num_args,
+                                                  &offset, &size);
+            backend_queries++;
+            if (result == CUDA_ERROR_INVALID_VALUE)
+                break;
+            if (result != CUDA_SUCCESS) {
+                pthread_mutex_unlock(&g_function_param_layouts_lock);
+                return result;
+            }
+            if (offset > CXL_GPU_DATA_SIZE || size > CXL_GPU_DATA_SIZE - offset) {
+                pthread_mutex_unlock(&g_function_param_layouts_lock);
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+            candidate.offsets[candidate.num_args] = offset;
+            candidate.sizes[candidate.num_args] = size;
+            if (offset + size > candidate.extent)
+                candidate.extent = offset + size;
+            candidate.num_args++;
+        }
+        if (candidate.num_args == CXL_MAX_KERNEL_ARGS) {
+            size_t offset = 0;
+            size_t size = 0;
+
+            result = function_param_info_uncached(function, candidate.num_args,
+                                                  &offset, &size);
+            backend_queries++;
+            if (result != CUDA_ERROR_INVALID_VALUE) {
+                pthread_mutex_unlock(&g_function_param_layouts_lock);
+                return result == CUDA_SUCCESS ? CUDA_ERROR_INVALID_VALUE : result;
+            }
+        }
+
+        layout = calloc(1, sizeof(*layout));
+        if (!layout) {
+            pthread_mutex_unlock(&g_function_param_layouts_lock);
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
+        *layout = candidate;
+        if (!function_param_layout_insert(layout)) {
+            free(layout);
+            pthread_mutex_unlock(&g_function_param_layouts_lock);
+            return CUDA_ERROR_OUT_OF_MEMORY;
+        }
+    }
+
+    memcpy(offsets, layout->offsets, sizeof(layout->offsets));
+    memcpy(sizes, layout->sizes, sizeof(layout->sizes));
+    *num_args = layout->num_args;
+    *extent = layout->extent;
+    pthread_mutex_unlock(&g_function_param_layouts_lock);
+
+    DLOG("function_param_layout event=%s function=%p args=%u extent=%zu backend_queries=%u\n",
+         backend_queries ? "miss" : "hit", function, *num_args, *extent,
+         backend_queries);
+    return CUDA_SUCCESS;
+}
+
 CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex, size_t *paramOffset, size_t *paramSize) {
     DLOG("cuFuncGetParamInfo(func=%p, index=%zu)\n", hfunc, paramIndex);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
-    if (!hfunc || !paramOffset) {
+    if (!hfunc || !paramOffset)
         return CUDA_ERROR_INVALID_VALUE;
-    }
 
-    cmd_lock();
-    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hfunc));
-    reg_write64(CXL_GPU_REG_PARAM1, paramIndex);
-    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    if (err == CUDA_SUCCESS) {
-        *paramOffset = reg_read64(CXL_GPU_REG_RESULT0);
+    pthread_mutex_lock(&g_function_param_layouts_lock);
+    FunctionParamLayout *layout = function_param_layout_find(hfunc);
+    if (layout) {
+        if (paramIndex >= layout->num_args) {
+            pthread_mutex_unlock(&g_function_param_layouts_lock);
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        *paramOffset = layout->offsets[paramIndex];
         if (paramSize)
-            *paramSize = reg_read64(CXL_GPU_REG_RESULT1);
+            *paramSize = layout->sizes[paramIndex];
+        pthread_mutex_unlock(&g_function_param_layouts_lock);
+        return CUDA_SUCCESS;
     }
-    cmd_unlock();
-    return err;
+    pthread_mutex_unlock(&g_function_param_layouts_lock);
+    return function_param_info_uncached(hfunc, paramIndex, paramOffset, paramSize);
 }
 
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name) {
@@ -3840,33 +3990,13 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     size_t param_sizes[CXL_MAX_KERNEL_ARGS];
     uint32_t num_args = 0;
     size_t param_extent = 0;
-    while (num_args < CXL_MAX_KERNEL_ARGS) {
-        size_t offset = 0;
-        size_t size = 0;
-        CUresult query = cuFuncGetParamInfo(f, num_args, &offset, &size);
-
-        if (query == CUDA_ERROR_INVALID_VALUE) {
-            break;
-        }
-        if (query != CUDA_SUCCESS) {
-            return query;
-        }
-        if (!kernelParams || !kernelParams[num_args] || offset > CXL_GPU_DATA_SIZE ||
-            size > CXL_GPU_DATA_SIZE - offset) {
+    CUresult layout_result = function_param_layout_copy(
+        f, param_offsets, param_sizes, &num_args, &param_extent);
+    if (layout_result != CUDA_SUCCESS)
+        return layout_result;
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (!kernelParams || !kernelParams[i])
             return CUDA_ERROR_INVALID_VALUE;
-        }
-        param_offsets[num_args] = offset;
-        param_sizes[num_args] = size;
-        if (offset + size > param_extent)
-            param_extent = offset + size;
-        num_args++;
-    }
-    if (num_args == CXL_MAX_KERNEL_ARGS) {
-        size_t offset = 0;
-        size_t size = 0;
-        if (cuFuncGetParamInfo(f, num_args, &offset, &size) == CUDA_SUCCESS) {
-            return CUDA_ERROR_INVALID_VALUE;
-        }
     }
 
     uint8_t *param_buffer = NULL;
@@ -4450,7 +4580,10 @@ CUresult cuDevicePrimaryCtxRelease(CUdevice dev) {
     DLOG("cuDevicePrimaryCtxRelease(dev=%d)\n", dev);
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    return cxl_cuda_context_primary_release();
+    CUresult result = cxl_cuda_context_primary_release();
+    if (result == CUDA_SUCCESS)
+        function_param_layouts_clear("primary-context-release");
+    return result;
 }
 
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice dev) { return cuDevicePrimaryCtxRelease(dev); }
@@ -4481,7 +4614,10 @@ CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
     DLOG("cuDevicePrimaryCtxReset(dev=%d)\n", dev);
     if (dev != 0)
         return CUDA_ERROR_INVALID_DEVICE;
-    return cxl_cuda_context_primary_reset();
+    CUresult result = cxl_cuda_context_primary_reset();
+    if (result == CUDA_SUCCESS)
+        function_param_layouts_clear("primary-context-reset");
+    return result;
 }
 
 CUresult cuDevicePrimaryCtxReset_v2(CUdevice dev) { return cuDevicePrimaryCtxReset(dev); }
@@ -4786,6 +4922,8 @@ CUresult cuModuleUnload(CUmodule hmod) {
     reg_write64(CXL_GPU_REG_PARAM0, module_id);
     CUresult result = execute_cmd(CXL_GPU_CMD_MODULE_UNLOAD);
     cmd_unlock();
+    if (result == CUDA_SUCCESS)
+        function_param_layouts_clear("module-unload");
     return result;
 }
 
@@ -5363,6 +5501,7 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
     CXLCudaErrorName *error_name;
 
     DLOG("libcuda.so unloading\n");
+    function_param_layouts_clear("process-exit");
     graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);
     if (g_bar4_ptr) {

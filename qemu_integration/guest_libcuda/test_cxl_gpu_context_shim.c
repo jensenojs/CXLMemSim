@@ -130,6 +130,10 @@ CUresult cuLibraryGetModule(void **module, CUlibrary library);
 CUresult cuLibraryGetKernel(CUkernel *kernel, CUlibrary library, const char *name);
 CUresult cuKernelGetFunction(CUfunction *function, CUkernel kernel);
 CUresult cuFuncGetAttribute(int *value, int attribute, CUfunction function);
+CUresult cuLaunchKernel(CUfunction function, unsigned int gridDimX, unsigned int gridDimY,
+                        unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+                        unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream stream,
+                        void **kernelParams, void **extra);
 CUresult cuModuleUnload(void *module);
 CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
 
@@ -248,6 +252,25 @@ static CUresult fake_execute(uint32_t command) {
     case CXL_GPU_CMD_FUNC_GET:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
         cxl_cuda_test_write_result(0, 4);
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_FUNC_GET_PARAM_INFO:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
+        switch (cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1)) {
+        case 0:
+            cxl_cuda_test_write_result(0, 0);
+            cxl_cuda_test_write_result(1, 8);
+            return CUDA_SUCCESS;
+        case 1:
+            cxl_cuda_test_write_result(0, 8);
+            cxl_cuda_test_write_result(1, 4);
+            return CUDA_SUCCESS;
+        default:
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+    case CXL_GPU_CMD_LAUNCH_KERNEL:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
+        CHECK((cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM4) >> 32) == 2);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM5) == 12);
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MODULE_UNLOAD:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
@@ -918,6 +941,38 @@ static int test_driver_version_mapping_is_reused_by_init(void) {
     return 0;
 }
 
+static int test_launch_reuses_param_layout_until_module_unload(void) {
+    uint64_t first = UINT64_C(0x1122334455667788);
+    uint32_t second = UINT32_C(0xaabbccdd);
+    void *params[] = {&first, &second};
+    CUfunction function = (CUfunction)(uintptr_t)5;
+    void *module = (void *)(uintptr_t)(issued_token + 1);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+
+    CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
+    CHECK(command_count == 4);
+    CHECK(commands[0] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[1] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[2] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[3] == CXL_GPU_CMD_LAUNCH_KERNEL);
+
+    CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
+    CHECK(command_count == 5 && commands[4] == CXL_GPU_CMD_LAUNCH_KERNEL);
+
+    CHECK(cuModuleUnload(module) == CUDA_SUCCESS);
+    CHECK(command_count == 6 && commands[5] == CXL_GPU_CMD_MODULE_UNLOAD);
+    CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
+    CHECK(command_count == 10);
+    CHECK(commands[6] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[7] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[8] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
+    CHECK(commands[9] == CXL_GPU_CMD_LAUNCH_KERNEL);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -928,5 +983,6 @@ int main(void) {
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity() ||
            test_direct_elf_library_kernel_function_lifecycle() ||
-           test_driver_version_mapping_is_reused_by_init();
+           test_driver_version_mapping_is_reused_by_init() ||
+           test_launch_reuses_param_layout_until_module_unload();
 }
