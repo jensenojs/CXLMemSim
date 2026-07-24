@@ -96,6 +96,7 @@ uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
 void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value);
 void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
+void cxl_cuda_test_write_data(size_t offset, const void *src, size_t length);
 CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size);
 
 CUresult cuInit(unsigned int flags);
@@ -267,6 +268,17 @@ static CUresult fake_execute(uint32_t command) {
         default:
             return CUDA_ERROR_INVALID_VALUE;
         }
+    case CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT: {
+        CXLFunctionParamLayoutWire wire = {
+            .num_args = 2,
+            .extent = 12,
+            .params = {{.offset = 0, .size = 8}, {.offset = 8, .size = 4}},
+        };
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
+        cxl_cuda_test_write_data(0, &wire, sizeof(wire));
+        cxl_cuda_test_write_result(0, 3);
+        return CUDA_SUCCESS;
+    }
     case CXL_GPU_CMD_LAUNCH_KERNEL:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
         CHECK((cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM4) >> 32) == 2);
@@ -946,23 +958,19 @@ static int test_launch_reuses_param_layout_until_module_unload(void) {
     command_count = 0;
 
     CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
-    CHECK(command_count == 4);
-    CHECK(commands[0] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[1] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[2] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[3] == CXL_GPU_CMD_LAUNCH_KERNEL);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT);
+    CHECK(commands[1] == CXL_GPU_CMD_LAUNCH_KERNEL);
 
     CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
-    CHECK(command_count == 5 && commands[4] == CXL_GPU_CMD_LAUNCH_KERNEL);
+    CHECK(command_count == 3 && commands[2] == CXL_GPU_CMD_LAUNCH_KERNEL);
 
     CHECK(cuModuleUnload(module) == CUDA_SUCCESS);
-    CHECK(command_count == 6 && commands[5] == CXL_GPU_CMD_MODULE_UNLOAD);
+    CHECK(command_count == 4 && commands[3] == CXL_GPU_CMD_MODULE_UNLOAD);
     CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
-    CHECK(command_count == 10);
-    CHECK(commands[6] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[7] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[8] == CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    CHECK(commands[9] == CXL_GPU_CMD_LAUNCH_KERNEL);
+    CHECK(command_count == 6);
+    CHECK(commands[4] == CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT);
+    CHECK(commands[5] == CXL_GPU_CMD_LAUNCH_KERNEL);
     return 0;
 }
 

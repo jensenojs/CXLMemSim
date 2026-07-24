@@ -841,6 +841,10 @@ void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value) { reg_write32(of
 void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length) {
     cxl_gpu_transport_data_read(&g_transport, offset, dst, length);
 }
+
+void cxl_cuda_test_write_data(size_t offset, const void *src, size_t length) {
+    cxl_gpu_transport_data_write(&g_transport, offset, src, length);
+}
 #endif
 
 /* Find and map CXL Type 2 device */
@@ -3802,6 +3806,7 @@ static CUresult function_param_layout_copy(CUfunction function,
                                            size_t sizes[CXL_MAX_KERNEL_ARGS],
                                            uint32_t *num_args, size_t *extent) {
     uint32_t backend_queries = 0;
+    uint32_t layout_commands = 0;
     uint64_t function_id;
 
     if (!cxl_gpu_handle_id(function, &function_id))
@@ -3811,42 +3816,36 @@ static CUresult function_param_layout_copy(CUfunction function,
     FunctionParamLayout *layout = function_param_layout_find(function);
     if (!layout) {
         FunctionParamLayout candidate = {.function = function};
-        CUresult result = CUDA_SUCCESS;
+        CXLFunctionParamLayoutWire wire;
 
-        while (candidate.num_args < CXL_MAX_KERNEL_ARGS) {
-            size_t offset = 0;
-            size_t size = 0;
-
-            result = function_param_info_uncached(function, candidate.num_args,
-                                                  &offset, &size);
-            backend_queries++;
-            if (result == CUDA_ERROR_INVALID_VALUE)
-                break;
-            if (result != CUDA_SUCCESS) {
-                pthread_mutex_unlock(&g_function_param_layouts_lock);
-                return result;
-            }
-            if (offset > CXL_GPU_DATA_SIZE || size > CXL_GPU_DATA_SIZE - offset) {
+        cmd_lock();
+        reg_write64(CXL_GPU_REG_PARAM0, function_id);
+        layout_commands = 1;
+        CUresult result = execute_cmd(CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT);
+        if (result == CUDA_SUCCESS) {
+            data_read(0, &wire, sizeof(wire));
+            backend_queries = reg_read64(CXL_GPU_REG_RESULT0);
+        }
+        cmd_unlock();
+        if (result != CUDA_SUCCESS) {
+            pthread_mutex_unlock(&g_function_param_layouts_lock);
+            return result;
+        }
+        if (wire.reserved != 0 || wire.num_args > CXL_MAX_KERNEL_ARGS ||
+            wire.extent > CXL_GPU_DATA_SIZE) {
+            pthread_mutex_unlock(&g_function_param_layouts_lock);
+            return CUDA_ERROR_INVALID_VALUE;
+        }
+        candidate.num_args = wire.num_args;
+        candidate.extent = wire.extent;
+        for (uint32_t i = 0; i < wire.num_args; i++) {
+            if (wire.params[i].offset > wire.extent ||
+                wire.params[i].size > wire.extent - wire.params[i].offset) {
                 pthread_mutex_unlock(&g_function_param_layouts_lock);
                 return CUDA_ERROR_INVALID_VALUE;
             }
-            candidate.offsets[candidate.num_args] = offset;
-            candidate.sizes[candidate.num_args] = size;
-            if (offset + size > candidate.extent)
-                candidate.extent = offset + size;
-            candidate.num_args++;
-        }
-        if (candidate.num_args == CXL_MAX_KERNEL_ARGS) {
-            size_t offset = 0;
-            size_t size = 0;
-
-            result = function_param_info_uncached(function, candidate.num_args,
-                                                  &offset, &size);
-            backend_queries++;
-            if (result != CUDA_ERROR_INVALID_VALUE) {
-                pthread_mutex_unlock(&g_function_param_layouts_lock);
-                return result == CUDA_SUCCESS ? CUDA_ERROR_INVALID_VALUE : result;
-            }
+            candidate.offsets[i] = wire.params[i].offset;
+            candidate.sizes[i] = wire.params[i].size;
         }
 
         layout = calloc(1, sizeof(*layout));
@@ -3868,9 +3867,9 @@ static CUresult function_param_layout_copy(CUfunction function,
     *extent = layout->extent;
     pthread_mutex_unlock(&g_function_param_layouts_lock);
 
-    DLOG("function_param_layout event=%s function=%p args=%u extent=%zu backend_queries=%u\n",
-         backend_queries ? "miss" : "hit", function, *num_args, *extent,
-         backend_queries);
+    DLOG("function_param_layout event=%s function=%p args=%u extent=%zu backend_queries=%u layout_commands=%u\n",
+         layout_commands ? "miss" : "hit", function, *num_args, *extent,
+         backend_queries, layout_commands);
     return CUDA_SUCCESS;
 }
 
