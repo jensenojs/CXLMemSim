@@ -16,7 +16,7 @@ CUDA 12.9本机头文件`/usr/local/cuda-12.9/targets/x86_64-linux/include/cuda.
 
 目标是让guest从backend查询每个参数的offset和size，按真实布局把参数字节写入BAR2 DATA，并让QEMU使用同一backend布局构造`kernelParams[]`后调用现有launch链。
 
-非目标包括实现`extra` launch buffer协议、stream并发、动态并行、kernel签名缓存、PTX签名解析或新的function registry。
+非目标包括实现`extra` launch buffer协议、stream并发、动态并行、PTX签名解析或新的function registry。
 
 长期不变量：function身份继续是guest可见的QEMU function-id；参数布局只由持有真实NVIDIA function的backend回答；guest不得用NULL哨兵或固定八字节猜参数；QEMU不得直接解引用guest指针；tiny与真实模型使用同一套布局协议。
 
@@ -46,22 +46,28 @@ Concordia/
 
 ## 最小接口约束
 
-冻结命令`CXL_GPU_CMD_FUNC_GET_PARAM_INFO = 0x35`：
+最初的单参数命令`CXL_GPU_CMD_FUNC_GET_PARAM_INFO = 0x35`用于建立真实
+Driver布局事实。Kimi随后暴露出public参数查询和launch分别发现同一布局，
+导致跨VM命令与Driver查询重复。当前协议以完整布局命令作为唯一入口：
 
 ```text
 请求
   PARAM0 = function-id
-  PARAM1 = parameter index
 
 成功响应
-  RESULT0 = parameter offset
-  RESULT1 = parameter size
+  DATA = 参数数量、extent和每项offset/size
+  RESULT0 = 本次真实Driver参数查询数
 
 失败响应
   function-id越界  -> CUDA_ERROR_INVALID_HANDLE
-  index越界        -> CUDA_ERROR_INVALID_VALUE
   backend无能力    -> CUDA_ERROR_NOT_SUPPORTED
 ```
+
+guest按function缓存完整布局。public `cuFuncGetParamInfo`、launch与graph都从
+这个对象读取；module、context、test reset和process结束时清除。QEMU也按同一
+function保存完整布局，首次miss在一次CUDA锁和context activation内调用真实
+Driver的`cuFuncGetParamInfo(index=0..N)`。Driver逐索引接口仍是布局事实来源，
+guest到QEMU的单参数协议与QEMU的单参数wrapper已经删除，opcode `0x35`不复用。
 
 launch继续使用现有`CXL_GPU_CMD_LAUNCH_KERNEL`，但DATA从“连续八字节值”收紧为“backend device-side parameter layout”：
 
@@ -78,10 +84,12 @@ guest从index 0顺序查询，首次`INVALID_VALUE`表示参数列表结束；�
 
 ```text
 libcudart cuLaunchKernel(kernelParams)
-  -> guest逐项FUNC_GET_PARAM_INFO
-     -> QEMU hetgpu_get_param_info
+  -> guest首次消费function时请求完整布局
+     -> QEMU在一个context activation内逐项查询
         -> Concordia NvidiaKernel
-           -> NVIDIA cuFuncGetParamInfo
+           -> NVIDIA cuFuncGetParamInfo(index=0..N)
+     -> guest缓存完整布局
+  -> public参数查询、launch与graph复用guest布局
   -> guest按offset/size复制参数字节到BAR2 DATA
   -> BAR2 LAUNCH_KERNEL(function-id, count, extent)
      -> QEMU按同一布局构造host_kernel_params[]
@@ -90,7 +98,7 @@ libcudart cuLaunchKernel(kernelParams)
 
 ## 删减、停止与回滚
 
-删除guest的NULL哨兵扫描和固定八字节槽假设；保留现有function registry、launch opcode与1 MiB DATA buffer。第一刀只增加参数布局查询，不实现缓存或完整stream模型。
+删除guest的NULL哨兵扫描、固定八字节槽假设和单参数跨VM查询协议；保留现有function registry、launch opcode与1 MiB DATA buffer。stream模型仍由独立边界处理。
 
 如果系统NVIDIA Driver对当前函数不能提供参数布局，停止并保留错误；不回退到mangled-name解析或按某个kernel特判。若参数extent超过DATA buffer，记录真实需求后重新设计bulk参数通道，不静默截断。
 

@@ -122,6 +122,8 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(int *numBlocks, CU
                                                               size_t dynamicSMemSize, unsigned int flags);
 CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func, int blockSize,
                                                      size_t dynamicSMemSize);
+CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex,
+                            size_t *paramOffset, size_t *paramSize);
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
 CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOptions, void **jitOptionsValues,
                            unsigned int numJitOptions, CUlibraryOption *libraryOptions, void **libraryOptionValues,
@@ -254,20 +256,6 @@ static CUresult fake_execute(uint32_t command) {
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
         cxl_cuda_test_write_result(0, 4);
         return CUDA_SUCCESS;
-    case CXL_GPU_CMD_FUNC_GET_PARAM_INFO:
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
-        switch (cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1)) {
-        case 0:
-            cxl_cuda_test_write_result(0, 0);
-            cxl_cuda_test_write_result(1, 8);
-            return CUDA_SUCCESS;
-        case 1:
-            cxl_cuda_test_write_result(0, 8);
-            cxl_cuda_test_write_result(1, 4);
-            return CUDA_SUCCESS;
-        default:
-            return CUDA_ERROR_INVALID_VALUE;
-        }
     case CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT: {
         CXLFunctionParamLayoutWire wire = {
             .num_args = 2,
@@ -951,6 +939,8 @@ static int test_driver_version_mapping_is_reused_by_init(void) {
 static int test_launch_reuses_param_layout_until_module_unload(void) {
     uint64_t first = UINT64_C(0x1122334455667788);
     uint32_t second = UINT32_C(0xaabbccdd);
+    size_t param_offset = SIZE_MAX;
+    size_t param_size = SIZE_MAX;
     void *params[] = {&first, &second};
     CUfunction function = (CUfunction)(uintptr_t)5;
     void *module = (void *)(uintptr_t)(issued_token + 1);
@@ -959,9 +949,14 @@ static int test_launch_reuses_param_layout_until_module_unload(void) {
     cxl_cuda_test_set_executor(fake_execute);
     command_count = 0;
 
+    CHECK(cuFuncGetParamInfo(function, 1, &param_offset, &param_size) == CUDA_SUCCESS);
+    CHECK(param_offset == 8);
+    CHECK(param_size == 4);
+    CHECK(command_count == 1);
+    CHECK(commands[0] == CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT);
+
     CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);
     CHECK(command_count == 2);
-    CHECK(commands[0] == CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT);
     CHECK(commands[1] == CXL_GPU_CMD_LAUNCH_KERNEL);
 
     CHECK(cuLaunchKernel(function, 1, 1, 1, 1, 1, 1, 0, NULL, params, NULL) == CUDA_SUCCESS);

@@ -3759,21 +3759,6 @@ CUresult cuFuncGetName(const char **name, CUfunction hfunc) {
     return CUDA_ERROR_NOT_SUPPORTED;
 }
 
-static CUresult function_param_info_uncached(CUfunction hfunc, size_t param_index,
-                                             size_t *param_offset, size_t *param_size) {
-    cmd_lock();
-    reg_write64(CXL_GPU_REG_PARAM0, cxl_gpu_id_from_handle(hfunc));
-    reg_write64(CXL_GPU_REG_PARAM1, param_index);
-    CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET_PARAM_INFO);
-    if (err == CUDA_SUCCESS) {
-        *param_offset = reg_read64(CXL_GPU_REG_RESULT0);
-        if (param_size)
-            *param_size = reg_read64(CXL_GPU_REG_RESULT1);
-    }
-    cmd_unlock();
-    return err;
-}
-
 static FunctionParamLayout *function_param_layout_find(CUfunction function) {
     uint64_t function_id;
 
@@ -3874,27 +3859,28 @@ static CUresult function_param_layout_copy(CUfunction function,
 }
 
 CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex, size_t *paramOffset, size_t *paramSize) {
+    size_t offsets[CXL_MAX_KERNEL_ARGS];
+    size_t sizes[CXL_MAX_KERNEL_ARGS];
+    size_t extent;
+    uint32_t num_args;
+
     DLOG("cuFuncGetParamInfo(func=%p, index=%zu)\n", hfunc, paramIndex);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!hfunc || !paramOffset)
         return CUDA_ERROR_INVALID_VALUE;
 
-    pthread_mutex_lock(&g_function_param_layouts_lock);
-    FunctionParamLayout *layout = function_param_layout_find(hfunc);
-    if (layout) {
-        if (paramIndex >= layout->num_args) {
-            pthread_mutex_unlock(&g_function_param_layouts_lock);
-            return CUDA_ERROR_INVALID_VALUE;
-        }
-        *paramOffset = layout->offsets[paramIndex];
-        if (paramSize)
-            *paramSize = layout->sizes[paramIndex];
-        pthread_mutex_unlock(&g_function_param_layouts_lock);
-        return CUDA_SUCCESS;
-    }
-    pthread_mutex_unlock(&g_function_param_layouts_lock);
-    return function_param_info_uncached(hfunc, paramIndex, paramOffset, paramSize);
+    CUresult result = function_param_layout_copy(
+        hfunc, offsets, sizes, &num_args, &extent);
+    if (result != CUDA_SUCCESS)
+        return result;
+    if (paramIndex >= num_args)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    *paramOffset = offsets[paramIndex];
+    if (paramSize)
+        *paramSize = sizes[paramIndex];
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name) {
