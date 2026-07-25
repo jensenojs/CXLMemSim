@@ -877,7 +877,7 @@ static void *lookup_proc_address(const char *symbol) {
         return NULL;
     }
     void *fn = dlsym(RTLD_DEFAULT, symbol);
-    fprintf(stderr, "[CXL-CUDA] lookup_proc_address(symbol=%s) -> %p\n", symbol, fn);
+    OLOG("lookup_proc_address(symbol=%s) -> %p\n", symbol, fn);
     return fn;
 }
 
@@ -885,25 +885,21 @@ static void log_proc_address_caller(const char *event, const char *symbol, const
     Dl_info info = {0};
     if (dladdr(caller, &info) != 0 && info.dli_fbase && info.dli_fname) {
         uintptr_t base = (uintptr_t)info.dli_fbase;
-        fprintf(stderr,
-                "[CXL-CUDA] api_provenance event=%s pid=%ld symbol=%s caller_status=resolved "
-                "caller_file=%s caller_base=0x%llx caller_offset=0x%llx\n",
-                event, (long)getpid(), symbol ? symbol : "(null)", info.dli_fname, (unsigned long long)base,
-                (unsigned long long)((uintptr_t)caller - base));
+        OLOG("api_provenance event=%s pid=%ld symbol=%s caller_status=resolved "
+             "caller_file=%s caller_base=0x%llx caller_offset=0x%llx\n",
+             event, (long)getpid(), symbol ? symbol : "(null)", info.dli_fname, (unsigned long long)base,
+             (unsigned long long)((uintptr_t)caller - base));
     } else {
-        fprintf(stderr,
-                "[CXL-CUDA] api_provenance event=%s pid=%ld symbol=%s caller_status=unresolved caller_address=%p\n",
-                event, (long)getpid(), symbol ? symbol : "(null)", caller);
+        OLOG("api_provenance event=%s pid=%ld symbol=%s caller_status=unresolved caller_address=%p\n", event,
+             (long)getpid(), symbol ? symbol : "(null)", caller);
     }
 }
 
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags,
                           CUdriverProcAddressQueryResult *symbolStatus) {
     const void *caller = __builtin_return_address(0);
-    g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
-    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
-    fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(symbol=%s, version=%d, flags=0x%lx, pfn=%p, status=%p)\n",
-            symbol ? symbol : "(null)", cudaVersion, (unsigned long)flags, (void *)pfn, (void *)symbolStatus);
+    OLOG("cuGetProcAddress(symbol=%s, version=%d, flags=0x%lx, pfn=%p, status=%p)\n",
+         symbol ? symbol : "(null)", cudaVersion, (unsigned long)flags, (void *)pfn, (void *)symbolStatus);
     log_proc_address_caller("query", symbol, caller);
     (void)cudaVersion;
     (void)flags;
@@ -918,8 +914,8 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
         if (symbolStatus) {
             *symbolStatus = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
         }
-        fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=NULL status=SYMBOL_NOT_FOUND result=CUDA_SUCCESS\n",
-                symbol ? symbol : "(null)");
+        OLOG("cuGetProcAddress(%s) -> pfn=NULL status=SYMBOL_NOT_FOUND result=CUDA_SUCCESS\n",
+             symbol ? symbol : "(null)");
         log_proc_address_caller("unresolved", symbol, caller);
         /* CUDA's driver entry-point API reports unsupported symbols through
          * pfn=NULL and symbolStatus, while the call itself still succeeds.
@@ -933,7 +929,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
     if (symbolStatus) {
         *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
     }
-    fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(%s) -> pfn=%p status=SUCCESS result=CUDA_SUCCESS\n", symbol, fn);
+    OLOG("cuGetProcAddress(%s) -> pfn=%p status=SUCCESS result=CUDA_SUCCESS\n", symbol, fn);
     log_proc_address_caller("resolved", symbol, caller);
     return CUDA_SUCCESS;
 }
@@ -1402,6 +1398,9 @@ static void context_storage_log_bytes(const char *label, const void *ptr) {
 }
 
 static void context_storage_log_entries(const char *label) {
+    if (!g_debug && !g_observation) {
+        return;
+    }
     ContextStorageEntry entries[CONTEXT_STORAGE_MAX_ENTRIES];
     int count = 0;
 
@@ -2069,9 +2068,6 @@ static const void *CUBLAS_CONTEXT_STREAM_TABLE[93] = {
 };
 
 CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTableId) {
-    g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
-    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
-
     if (pExportTableId) {
         DLOG("cuGetExportTable(uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x)\n",
              pExportTableId->bytes[0], pExportTableId->bytes[1], pExportTableId->bytes[2], pExportTableId->bytes[3],
@@ -2149,8 +2145,6 @@ CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTable
 CUresult cuInit(unsigned int flags) {
     (void)flags;
 
-    g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
-    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
     DLOG("cuInit(%u)\n", flags);
 
     if (g_initialized) {
@@ -2969,6 +2963,9 @@ CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size) {
 #endif
 
 static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
+    if (!g_debug && !g_observation) {
+        return;
+    }
     if (!header) {
         return;
     }
@@ -3010,6 +3007,9 @@ static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
 }
 
 static void cudart_log_fatbin_headers(const void *code) {
+    if (!g_debug && !g_observation) {
+        return;
+    }
     if (!code) {
         fprintf(stderr, "[CXL-CUDA]   fatbinc_wrapper=<null>\n");
         return;
@@ -3229,7 +3229,7 @@ static CUresult cudart_load_module_from_fatbin(const void *code, CUmodule *modul
 
 static CUresult cxl_module_load_direct_elf(CUmodule *module, const void *image, size_t image_size) {
     if (image_size <= CXL_GPU_DATA_SIZE) {
-        fprintf(stderr, "[CXL-CUDA] direct ELF load raw_size=%zu encoding=raw\n", image_size);
+        OLOG("direct ELF load raw_size=%zu encoding=raw\n", image_size);
         return cxl_module_load_cubin(module, image, image_size, 0, image_size);
     }
 
@@ -3253,8 +3253,7 @@ static CUresult cxl_module_load_direct_elf(CUmodule *module, const void *image, 
         return CUDA_ERROR_INVALID_VALUE;
     }
 
-    fprintf(stderr, "[CXL-CUDA] direct ELF load raw_size=%zu compressed_size=%zu encoding=zstd\n", image_size,
-            compressed_size);
+    OLOG("direct ELF load raw_size=%zu compressed_size=%zu encoding=zstd\n", image_size, compressed_size);
     CUresult result = cxl_module_load_cubin(module, compressed, compressed_size, CXL_GPU_MODULE_DATA_ZSTD, image_size);
     free(compressed);
     return result;
@@ -3312,7 +3311,7 @@ static CUresult cudart_library_materialize_module(CudartLibraryRecord *record) {
         return result;
     }
 
-    fprintf(stderr, "[CXL-CUDA] library_record id=%u module materialized module=%p\n", record->id, record->module);
+    OLOG("library_record id=%u module materialized module=%p\n", record->id, record->module);
     return CUDA_SUCCESS;
 }
 
@@ -3322,17 +3321,16 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
     void *caller = __builtin_return_address(0);
     Dl_info caller_info;
     if (caller && dladdr(caller, &caller_info) && caller_info.dli_fbase) {
-        fprintf(stderr, "[CXL-CUDA] cuLibraryLoadData caller=%p file=%s file_offset=0x%lx\n", caller,
-                caller_info.dli_fname ? caller_info.dli_fname : "(unknown)",
-                (unsigned long)((uintptr_t)caller - (uintptr_t)caller_info.dli_fbase));
+        OLOG("cuLibraryLoadData caller=%p file=%s file_offset=0x%lx\n", caller,
+             caller_info.dli_fname ? caller_info.dli_fname : "(unknown)",
+             (unsigned long)((uintptr_t)caller - (uintptr_t)caller_info.dli_fbase));
     }
     cxl_cuda_provenance_emit_first_stack("cuLibraryLoadData");
     context_storage_log_entries("cuLibraryLoadData:entry");
-    fprintf(stderr,
-            "[CXL-CUDA] cuLibraryLoadData(library=%p, code=%p, jitOptions=%p, jitOptionsValues=%p, "
-            "numJitOptions=%u, libraryOptions=%p, libraryOptionValues=%p, numLibraryOptions=%u) -> library object\n",
-            (void *)library, code, (void *)jitOptions, (void *)jitOptionsValues, numJitOptions, (void *)libraryOptions,
-            (void *)libraryOptionValues, numLibraryOptions);
+    OLOG("cuLibraryLoadData(library=%p, code=%p, jitOptions=%p, jitOptionsValues=%p, numJitOptions=%u, "
+         "libraryOptions=%p, libraryOptionValues=%p, numLibraryOptions=%u) -> library object\n",
+         (void *)library, code, (void *)jitOptions, (void *)jitOptionsValues, numJitOptions, (void *)libraryOptions,
+         (void *)libraryOptionValues, numLibraryOptions);
     if (library) {
         *library = NULL;
     }
@@ -3344,14 +3342,12 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
         }
         CUlibraryOption option = libraryOptions[i];
         void *option_value = libraryOptionValues ? libraryOptionValues[i] : NULL;
-        fprintf(stderr, "[CXL-CUDA]   libraryOptions[%u]=%d libraryOptionValues[%u]=%p\n", i, option, i, option_value);
+        OLOG("  libraryOptions[%u]=%d libraryOptionValues[%u]=%p\n", i, option, i, option_value);
         if (option == CU_LIBRARY_HOST_UNIVERSAL_FUNCTION_AND_DATA_TABLE && option_value) {
             CUlibraryHostUniversalFunctionAndDataTable *table =
                 (CUlibraryHostUniversalFunctionAndDataTable *)option_value;
-            fprintf(stderr,
-                    "[CXL-CUDA]   host_universal_table functionTable=%p functionWindowSize=%zu dataTable=%p "
-                    "dataWindowSize=%zu\n",
-                    table->functionTable, table->functionWindowSize, table->dataTable, table->dataWindowSize);
+            OLOG("  host_universal_table functionTable=%p functionWindowSize=%zu dataTable=%p dataWindowSize=%zu\n",
+                 table->functionTable, table->functionWindowSize, table->dataTable, table->dataWindowSize);
         }
     }
     if (!library || !code) {
@@ -3397,7 +3393,7 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
     if (code_kind == CUDART_LIBRARY_CODE_FATBIN) {
         cudart_log_fatbin_headers(code);
     } else {
-        fprintf(stderr, "[CXL-CUDA]   direct ELF validated size=%zu\n", code_size);
+        OLOG("  direct ELF validated size=%zu\n", code_size);
     }
 
     /* The code pointer names the registration wrapper stored in the DSO that
@@ -3447,15 +3443,13 @@ CUresult cuLibraryLoadData(CUlibrary *library, const void *code, CUjit_option *j
     g_cudart_library_records = record;
 
     *library = (CUlibrary)record;
-    fprintf(stderr,
-            "[CXL-CUDA]   library_record id=%u handle=%p code=%p code_file=%s code_base=0x%llx code_offset=0x%lx "
-            "numJitOptions=%u numLibraryOptions=%u "
-            "storedOptions=%u preserve_binary=%d code_kind=%u code_size=%zu module=%p alive=%d magic=0x%llx\n",
-            record->id, (void *)*library, record->code, code_file, (unsigned long long)code_base, code_offset,
-            record->num_jit_options,
-            record->num_library_options, record->stored_library_options, record->preserve_binary,
-            (unsigned int)record->code_kind, record->preserved_code_size, record->module, record->alive,
-            (unsigned long long)record->magic);
+    OLOG("  library_record id=%u handle=%p code=%p code_file=%s code_base=0x%llx code_offset=0x%lx "
+         "numJitOptions=%u numLibraryOptions=%u storedOptions=%u preserve_binary=%d code_kind=%u code_size=%zu "
+         "module=%p alive=%d magic=0x%llx\n",
+         record->id, (void *)*library, record->code, code_file, (unsigned long long)code_base, code_offset,
+         record->num_jit_options, record->num_library_options, record->stored_library_options,
+         record->preserve_binary, (unsigned int)record->code_kind, record->preserved_code_size, record->module,
+         record->alive, (unsigned long long)record->magic);
     context_storage_log_entries("cuLibraryLoadData:success_exit");
     return CUDA_SUCCESS;
 }
@@ -3485,7 +3479,7 @@ CUresult cuLibraryUnload(CUlibrary library) {
         kernel->alive = 0;
     }
     record->alive = 0;
-    fprintf(stderr, "[CXL-CUDA] cuLibraryUnload(library=%p id=%u) -> CUDA_SUCCESS\n", library, record->id);
+    OLOG("cuLibraryUnload(library=%p id=%u) -> CUDA_SUCCESS\n", library, record->id);
     return CUDA_SUCCESS;
 }
 
@@ -3544,10 +3538,8 @@ CUresult cuLibraryGetKernel(CUkernel *pKernel, CUlibrary library, const char *na
     kernel->next = record->kernels;
     record->kernels = kernel;
     *pKernel = (CUkernel)kernel;
-    fprintf(stderr,
-            "[CXL-CUDA] cuLibraryGetKernel(library=%p id=%u name=%s module=%p) -> kernel=%p function=%p "
-            "CUDA_SUCCESS\n",
-            library, record->id, name, record->module, (void *)*pKernel, function);
+    OLOG("cuLibraryGetKernel(library=%p id=%u name=%s module=%p) -> kernel=%p function=%p CUDA_SUCCESS\n",
+         library, record->id, name, record->module, (void *)*pKernel, function);
     return CUDA_SUCCESS;
 }
 
@@ -3569,8 +3561,7 @@ CUresult cuLibraryGetModule(CUmodule *pMod, CUlibrary library) {
         }
     }
     *pMod = record->module;
-    fprintf(stderr, "[CXL-CUDA] cuLibraryGetModule(library=%p id=%u) -> module=%p CUDA_SUCCESS\n", library, record->id,
-            record->module);
+    OLOG("cuLibraryGetModule(library=%p id=%u) -> module=%p CUDA_SUCCESS\n", library, record->id, record->module);
     return CUDA_SUCCESS;
 }
 
@@ -3621,8 +3612,8 @@ CUresult cuKernelGetFunction(CUfunction *pFunc, CUkernel kernel) {
         return CUDA_ERROR_INVALID_HANDLE;
     }
     *pFunc = record->function;
-    fprintf(stderr, "[CXL-CUDA] cuKernelGetFunction(kernel=%p name=%s) -> function=%p CUDA_SUCCESS\n", kernel,
-            record->name, record->function);
+    OLOG("cuKernelGetFunction(kernel=%p name=%s) -> function=%p CUDA_SUCCESS\n", kernel, record->name,
+         record->function);
     return CUDA_SUCCESS;
 }
 
@@ -5474,7 +5465,11 @@ CUresult cuCxlGetCoherentBase(CUdeviceptr *base, size_t *size, CUdevice dev) {
 }
 
 /* Library initialization/cleanup */
-__attribute__((constructor)) static void libcuda_init(void) { DLOG("libcuda.so loaded (CXL Type 2 shim)\n"); }
+__attribute__((constructor)) static void libcuda_init(void) {
+    g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
+    DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
+}
 
 __attribute__((destructor)) static void libcuda_cleanup(void) {
     CXLCudaErrorName *error_name;
