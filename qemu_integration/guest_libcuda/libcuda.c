@@ -366,10 +366,16 @@ static CudartKernelRecord *cudart_kernel_record_from_handle(CUkernel kernel) {
 
 /* Debug logging */
 static int g_debug = 0;
+static int g_observation = 0;
 #define DLOG(...)                                                                                                      \
     do {                                                                                                               \
         if (g_debug)                                                                                                   \
             fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                                \
+    } while (0)
+#define OLOG(...)                                                                                                      \
+    do {                                                                                                               \
+        if (g_observation)                                                                                             \
+            fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                              \
     } while (0)
 
 static void function_param_layouts_clear(const char *reason) {
@@ -696,7 +702,7 @@ static void async_copy_trace_begin(const char *api, size_t total_bytes,
         .stream_wire_valid = stream_wire_valid,
         .implementation = implementation,
     };
-    DLOG("async_copy event=public-entry public_sequence=%" PRIu64
+    OLOG("async_copy event=public-entry public_sequence=%" PRIu64
          " api=%s total_bytes=%zu guest_stream=%p stream_wire=%s0x%016" PRIx64
          " implementation=%s stream_forwarded=%u\n",
          public_sequence, api, total_bytes, stream,
@@ -705,7 +711,7 @@ static void async_copy_trace_begin(const char *api, size_t total_bytes,
 }
 
 static CUresult async_copy_trace_end(CUresult result) {
-    DLOG("async_copy event=public-return public_sequence=%" PRIu64
+    OLOG("async_copy event=public-return public_sequence=%" PRIu64
          " api=%s total_bytes=%zu commands=%u result=%d implementation=%s\n",
          g_async_copy_trace.public_sequence, g_async_copy_trace.api,
          g_async_copy_trace.total_bytes, g_async_copy_trace.command_index,
@@ -719,13 +725,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint64_t call_id = ((uint64_t)(uint32_t)getpid() << 32) | sequence;
     uint64_t start_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, call_id);
-    DLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
+    OLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
          " symbol=%s command=0x%x guest_ns=%" PRIu64 "\n",
          call_id, symbol, cmd, start_ns);
     uint32_t async_command_index = 0;
     if (g_async_copy_trace.active) {
         async_command_index = ++g_async_copy_trace.command_index;
-        DLOG("async_copy event=command-entry public_sequence=%" PRIu64
+        OLOG("async_copy event=command-entry public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64
              " api=%s command=0x%x p0=0x%016" PRIx64 " bytes=%" PRIu64
              " stream_wire=%s0x%016" PRIx64 " implementation=%s\n",
@@ -741,13 +747,13 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
         CUresult result = g_test_execute_cmd(cmd);
         uint64_t end_ns = guest_monotonic_ns();
         reg_write64(CXL_GPU_REG_CALL_ID, 0);
-        DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
+        OLOG("api_chain event=guest-return call_id=0x%016" PRIx64
              " symbol=%s command=0x%x guest_ns=%" PRIu64
              " duration_ns=%" PRIu64 " status_poll_count=0 result=%d\n",
              call_id, symbol, cmd, end_ns,
              end_ns >= start_ns ? end_ns - start_ns : 0, result);
         if (g_async_copy_trace.active) {
-            DLOG("async_copy event=command-return public_sequence=%" PRIu64
+            OLOG("async_copy event=command-return public_sequence=%" PRIu64
                  " command_index=%u call_id=0x%016" PRIx64
                  " api=%s command=0x%x result=%d implementation=%s\n",
                  g_async_copy_trace.public_sequence, async_command_index,
@@ -761,14 +767,14 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd, &poll_count);
     uint64_t end_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, 0);
-    DLOG("api_chain event=guest-return call_id=0x%016" PRIx64
+    OLOG("api_chain event=guest-return call_id=0x%016" PRIx64
          " symbol=%s command=0x%x guest_ns=%" PRIu64
          " duration_ns=%" PRIu64 " status_poll_count=%u result=%d\n",
          call_id, symbol, cmd, end_ns,
          end_ns >= start_ns ? end_ns - start_ns : 0,
          poll_count, result);
     if (g_async_copy_trace.active) {
-        DLOG("async_copy event=command-return public_sequence=%" PRIu64
+        OLOG("async_copy event=command-return public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64
              " api=%s command=0x%x result=%d implementation=%s\n",
              g_async_copy_trace.public_sequence, async_command_index, call_id,
@@ -895,6 +901,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
                           CUdriverProcAddressQueryResult *symbolStatus) {
     const void *caller = __builtin_return_address(0);
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
     fprintf(stderr, "[CXL-CUDA] cuGetProcAddress(symbol=%s, version=%d, flags=0x%lx, pfn=%p, status=%p)\n",
             symbol ? symbol : "(null)", cudaVersion, (unsigned long)flags, (void *)pfn, (void *)symbolStatus);
     log_proc_address_caller("query", symbol, caller);
@@ -2063,6 +2070,7 @@ static const void *CUBLAS_CONTEXT_STREAM_TABLE[93] = {
 
 CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTableId) {
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
 
     if (pExportTableId) {
         DLOG("cuGetExportTable(uuid=%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x)\n",
@@ -2142,6 +2150,7 @@ CUresult cuInit(unsigned int flags) {
     (void)flags;
 
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
     DLOG("cuInit(%u)\n", flags);
 
     if (g_initialized) {
@@ -2500,7 +2509,7 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
 }
 
 CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount) {
-    DLOG("cuMemcpyHtoD(dst=0x%lx, size=%zu)\n", (unsigned long)dstDevice, byteCount);
+    OLOG("cuMemcpyHtoD(dst=0x%lx, size=%zu)\n", (unsigned long)dstDevice, byteCount);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!srcHost)
@@ -2542,7 +2551,7 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
     uint64_t stream_wire;
 
-    DLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
+    OLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!srcHost)
@@ -2585,7 +2594,7 @@ CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost, size_t by
 }
 
 CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount) {
-    DLOG("cuMemcpyDtoH(src=0x%lx, size=%zu)\n", (unsigned long)srcDevice, byteCount);
+    OLOG("cuMemcpyDtoH(src=0x%lx, size=%zu)\n", (unsigned long)srcDevice, byteCount);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!dstHost)
@@ -2628,7 +2637,7 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
 }
 
 CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
-    DLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount, hStream);
+    OLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount, hStream);
     /* knockout: the current Type-2 command path serializes transfers and kernel
      * launches. Completing the copy before return preserves correctness; add a
      * stream-aware BAR2 command only when concurrent stream execution is measured. */
@@ -3852,7 +3861,7 @@ static CUresult function_param_layout_copy(CUfunction function,
     *extent = layout->extent;
     pthread_mutex_unlock(&g_function_param_layouts_lock);
 
-    DLOG("function_param_layout event=%s function=%p args=%u extent=%zu backend_queries=%u layout_commands=%u\n",
+    OLOG("function_param_layout event=%s function=%p args=%u extent=%zu backend_queries=%u layout_commands=%u\n",
          layout_commands ? "miss" : "hit", function, *num_args, *extent,
          backend_queries, layout_commands);
     return CUDA_SUCCESS;
@@ -3864,7 +3873,7 @@ CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex, size_t *paramOf
     size_t extent;
     uint32_t num_args;
 
-    DLOG("cuFuncGetParamInfo(func=%p, index=%zu)\n", hfunc, paramIndex);
+    OLOG("cuFuncGetParamInfo(func=%p, index=%zu)\n", hfunc, paramIndex);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!hfunc || !paramOffset)
@@ -3884,7 +3893,7 @@ CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex, size_t *paramOf
 }
 
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name) {
-    DLOG("cuModuleGetFunction(mod=%p, name=%s)\n", hmod, name);
+    OLOG("cuModuleGetFunction(mod=%p, name=%s)\n", hmod, name);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!hfunc || !name)
@@ -3905,14 +3914,14 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
     CUresult err = execute_cmd(CXL_GPU_CMD_FUNC_GET);
     if (err == CUDA_SUCCESS) {
         *hfunc = (CUfunction)cxl_gpu_handle_from_id(reg_read64(CXL_GPU_REG_RESULT0));
-        DLOG("  func=%p\n", *hfunc);
+        OLOG("  func=%p\n", *hfunc);
     }
     cmd_unlock();
     return err;
 }
 
 CUresult cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod, const char *name) {
-    DLOG("cuModuleGetGlobal_v2(dptr=%p, bytes=%p, mod=%p, name=%s)\n", (void *)dptr, (void *)bytes, hmod,
+    OLOG("cuModuleGetGlobal_v2(dptr=%p, bytes=%p, mod=%p, name=%s)\n", (void *)dptr, (void *)bytes, hmod,
          name ? name : "<null>");
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
@@ -3955,7 +3964,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDi
     (void)extra;
     uint64_t stream_wire;
 
-    DLOG("cuLaunchKernel(f=%p, grid=(%u,%u,%u), block=(%u,%u,%u), shared=%u)\n", f, gridDimX, gridDimY, gridDimZ,
+    OLOG("cuLaunchKernel(f=%p, grid=(%u,%u,%u), block=(%u,%u,%u), shared=%u)\n", f, gridDimX, gridDimY, gridDimZ,
          blockDimX, blockDimY, blockDimZ, sharedMemBytes);
 
     if (!g_initialized)
