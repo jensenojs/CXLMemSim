@@ -212,7 +212,7 @@ static int initialize_logger(void) {
     if (path_length <= 0 || (size_t)path_length >= sizeof(destination)) {
         return -1;
     }
-    g_log_fd = open(destination, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    g_log_fd = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (g_log_fd < 0) {
         return -1;
     }

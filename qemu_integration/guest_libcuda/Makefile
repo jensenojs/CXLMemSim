@@ -161,10 +161,11 @@ $(LOADER_AUDIT_CLIENT): test_loader_audit_client.c $(CUDA_LINK)
 test-loader-audit: $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT)
 	@directory="$$(mktemp -d)"; \
 	trap 'rm -rf "$$directory"' EXIT; \
-	LD_AUDIT="$(CURDIR)/$(LOADER_AUDIT)" CXL_LOADER_AUDIT_DIR="$$directory" ./$(LOADER_AUDIT_CLIENT); \
+	env LD_AUDIT="$(CURDIR)/$(LOADER_AUDIT)" CXL_LOADER_AUDIT_DIR="$$directory" ./$(LOADER_AUDIT_CLIENT); \
 	logs="$$(find "$$directory" -type f -name '*.jsonl')"; \
 	test -n "$$logs"; \
-	grep -F '"event":"process-start"' $$logs >/dev/null; \
+	test "$$(grep -F -c '"event":"process-start"' $$logs)" -eq 1; \
+	grep -F '"event":"process-start"' $$logs | grep -F '"executable":"$(CURDIR)/$(LOADER_AUDIT_CLIENT)"' >/dev/null; \
 	grep -F '"event":"open"' $$logs >/dev/null; \
 	grep -F '"event":"symbol-bind"' $$logs | grep -F '"symbol":"cuInit"' >/dev/null
 
