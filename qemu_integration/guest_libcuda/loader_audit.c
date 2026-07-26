@@ -73,7 +73,7 @@ static size_t json_string(char *destination, size_t capacity, const char *source
 }
 
 static void write_line(const char *line, size_t length) {
-    if (g_log_fd < 0 || length == 0 || length >= CXL_LOADER_AUDIT_LINE_LIMIT) {
+    if (g_log_fd < 0 || getpid() != g_pid || length == 0 || length >= CXL_LOADER_AUDIT_LINE_LIMIT) {
         return;
     }
     size_t written = 0;

@@ -165,6 +165,7 @@ test-loader-audit: $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT)
 	logs="$$(find "$$directory" -type f -name '*.jsonl')"; \
 	test -n "$$logs"; \
 	test "$$(grep -F -c '"event":"process-start"' $$logs)" -eq 1; \
+	python3 -c 'import json,pathlib,sys; events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]; pid=int(pathlib.Path(sys.argv[1]).stem); assert all(event["pid"] == pid for event in events); assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))' $$logs; \
 	grep -F '"event":"process-start"' $$logs | grep -F '"executable":"$(CURDIR)/$(LOADER_AUDIT_CLIENT)"' >/dev/null; \
 	grep -F '"event":"open"' $$logs >/dev/null; \
 	grep -F '"event":"symbol-bind"' $$logs | grep -F '"symbol":"cuInit"' >/dev/null
