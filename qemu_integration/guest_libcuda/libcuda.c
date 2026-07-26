@@ -366,7 +366,8 @@ static CudartKernelRecord *cudart_kernel_record_from_handle(CUkernel kernel) {
 
 /* Debug logging */
 static int g_debug = 0;
-static int g_observation = 0;
+static FILE *g_observation_stream = NULL;
+static char *g_observation_buffer = NULL;
 #define DLOG(...)                                                                                                      \
     do {                                                                                                               \
         if (g_debug)                                                                                                   \
@@ -374,8 +375,8 @@ static int g_observation = 0;
     } while (0)
 #define OLOG(...)                                                                                                      \
     do {                                                                                                               \
-        if (g_observation)                                                                                             \
-            fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                              \
+        if (g_observation_stream)                                                                                      \
+            fprintf(g_observation_stream, "[CXL-CUDA] " __VA_ARGS__);                                                \
     } while (0)
 
 static void function_param_layouts_clear(const char *reason) {
@@ -1398,7 +1399,7 @@ static void context_storage_log_bytes(const char *label, const void *ptr) {
 }
 
 static void context_storage_log_entries(const char *label) {
-    if (!g_debug && !g_observation) {
+    if (!g_debug && !g_observation_stream) {
         return;
     }
     ContextStorageEntry entries[CONTEXT_STORAGE_MAX_ENTRIES];
@@ -2963,7 +2964,7 @@ CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size) {
 #endif
 
 static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
-    if (!g_debug && !g_observation) {
+    if (!g_debug && !g_observation_stream) {
         return;
     }
     if (!header) {
@@ -3007,7 +3008,7 @@ static void cudart_log_fatbin_file_headers(const CudartFatbinHeader *header) {
 }
 
 static void cudart_log_fatbin_headers(const void *code) {
-    if (!g_debug && !g_observation) {
+    if (!g_debug && !g_observation_stream) {
         return;
     }
     if (!code) {
@@ -5466,8 +5467,31 @@ CUresult cuCxlGetCoherentBase(CUdeviceptr *base, size_t *size, CUdevice dev) {
 
 /* Library initialization/cleanup */
 __attribute__((constructor)) static void libcuda_init(void) {
+    static const size_t observation_buffer_size = 1024 * 1024;
+    const char *observation_log = getenv("CXL_CUDA_OBSERVATION_LOG");
+
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
-    g_observation = (getenv("CXL_CUDA_OBSERVATION") != NULL);
+    if (observation_log) {
+        if (observation_log[0] != '/') {
+            fprintf(stderr, "[CXL-CUDA] CXL_CUDA_OBSERVATION_LOG must be an absolute path\n");
+            abort();
+        }
+        g_observation_stream = fopen(observation_log, "w");
+        if (!g_observation_stream) {
+            fprintf(stderr, "[CXL-CUDA] failed to open observation log %s: %s\n", observation_log, strerror(errno));
+            abort();
+        }
+        g_observation_buffer = malloc(observation_buffer_size);
+        if (!g_observation_buffer ||
+            setvbuf(g_observation_stream, g_observation_buffer, _IOFBF, observation_buffer_size) != 0) {
+            fprintf(stderr, "[CXL-CUDA] failed to buffer observation log %s\n", observation_log);
+            fclose(g_observation_stream);
+            g_observation_stream = NULL;
+            free(g_observation_buffer);
+            g_observation_buffer = NULL;
+            abort();
+        }
+    }
     DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
 }
 
@@ -5487,6 +5511,15 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
         g_bar4_fd = -1;
     }
     cxl_gpu_transport_close(&g_transport);
+    if (g_observation_stream) {
+        if (fclose(g_observation_stream) != 0) {
+            fprintf(stderr, "[CXL-CUDA] failed to flush observation log: %s\n", strerror(errno));
+            abort();
+        }
+        g_observation_stream = NULL;
+        free(g_observation_buffer);
+        g_observation_buffer = NULL;
+    }
     while ((error_name = g_cuda_error_names) != NULL) {
         g_cuda_error_names = error_name->next;
         free(error_name->name);
