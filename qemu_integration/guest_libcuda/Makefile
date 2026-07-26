@@ -135,7 +135,7 @@ $(CASE_CONTROL): cxl_gpu_case.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_
 	$(CC) $(CFLAGS) -o $@ cxl_gpu_case.c cxl_gpu_transport.c $(LDFLAGS) $(LDLIBS)
 
 $(TRANSPORT_TEST): test_cxl_gpu_transport.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -o $@ test_cxl_gpu_transport.c cxl_gpu_transport.c $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) -pthread -o $@ test_cxl_gpu_transport.c cxl_gpu_transport.c $(LDFLAGS) $(LDLIBS)
 
 $(CONTEXT_STATE_TEST): test_cxl_gpu_context_state.c cxl_gpu_context_state.c cxl_gpu_context_state.h
 	$(CC) $(CFLAGS) -pthread -o $@ test_cxl_gpu_context_state.c cxl_gpu_context_state.c $(LDFLAGS) $(LDLIBS)

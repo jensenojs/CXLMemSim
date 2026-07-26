@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -24,6 +25,14 @@ static void transport_log(const CxlGpuTransport *transport, const char *format, 
     fprintf(stderr, "[CXL-GPU-TRANSPORT] ");
     vfprintf(stderr, format, args);
     va_end(args);
+}
+
+static uint64_t monotonic_ns(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+           (uint64_t)now.tv_nsec;
 }
 
 static int read_hex_u16(const char *path, uint16_t *value) {
@@ -156,17 +165,34 @@ int cxl_gpu_transport_unlock(CxlGpuTransport *transport) {
 }
 
 uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command, uint32_t *poll_count) {
+    static const uint64_t command_timeout_ns = UINT64_C(60) * UINT64_C(1000000000);
+    static const uint32_t spin_poll_limit = 64;
+    static const struct timespec poll_pause = {.tv_nsec = 1000};
+
     cxl_gpu_transport_write32(transport, CXL_GPU_REG_CMD, command);
 
     uint32_t polls = 0;
-    int timeout = 1000000;
-    while (timeout-- > 0) {
+    uint64_t deadline_ns = 0;
+    for (;;) {
         uint32_t status = cxl_gpu_transport_read32(transport, CXL_GPU_REG_CMD_STATUS);
         polls++;
         if (status == CXL_GPU_CMD_STATUS_COMPLETE || status == CXL_GPU_CMD_STATUS_ERROR) {
             if (poll_count)
                 *poll_count = polls;
             return cxl_gpu_transport_read32(transport, CXL_GPU_REG_CMD_RESULT);
+        }
+
+        if (deadline_ns == 0) {
+            uint64_t now_ns = monotonic_ns();
+            if (now_ns == 0)
+                break;
+            deadline_ns = now_ns + command_timeout_ns;
+        }
+        if (polls >= spin_poll_limit) {
+            uint64_t now_ns = monotonic_ns();
+            if (now_ns == 0 || now_ns >= deadline_ns)
+                break;
+            nanosleep(&poll_pause, NULL);
         }
     }
     if (poll_count)
