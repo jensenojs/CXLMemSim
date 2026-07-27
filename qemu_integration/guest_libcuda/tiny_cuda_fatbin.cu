@@ -21,7 +21,7 @@ extern "C" __global__ void tiny_cuda_kernel(int *out) {
 
 /* 普通 C 导出负责建立 launch configuration，供 dlopen probe 调用。 */
 extern "C" int tiny_cuda_launch(int *out) {
-    tiny_cuda_kernel<<<1, 1>>>(out);
+    tiny_cuda_kernel<<<1, 1, 0, cudaStreamPerThread>>>(out);
     return (int)cudaGetLastError();
 }
 
@@ -204,9 +204,10 @@ extern "C" int tiny_cuda_probe_run(void) {
     (void)cudaGetLastError();
 
     failed |= print_cuda_result("launch", (cudaError_t)tiny_cuda_launch(device_out));
-    failed |= print_cuda_result("synchronize", cudaDeviceSynchronize());
-    failed |= print_cuda_result("copy_result_dtoh",
-                                cudaMemcpy(&host_out, device_out, sizeof(host_out), cudaMemcpyDeviceToHost));
+    failed |= print_cuda_result("copy_result_dtoh_async",
+                                cudaMemcpyAsync(&host_out, device_out, sizeof(host_out), cudaMemcpyDeviceToHost,
+                                                cudaStreamPerThread));
+    failed |= print_cuda_result("synchronize_per_thread", cudaStreamSynchronize(cudaStreamPerThread));
     failed |= print_cuda_result("free", cudaFree(device_out));
     failed |= run_noncontiguous_2d_device_copy();
 
