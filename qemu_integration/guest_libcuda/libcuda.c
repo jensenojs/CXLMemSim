@@ -307,6 +307,7 @@ typedef struct CudartLibraryRecord {
 CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name);
 CUresult cuModuleUnload(CUmodule hmod);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
+CUresult cuStreamSynchronize(CUstream hStream);
 static CUresult cxl_module_load_image(CUmodule *module, const void *image);
 
 static CudartLibraryRecord *g_cudart_library_records = NULL;
@@ -2633,11 +2634,14 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
 
 CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
     OLOG("cuMemcpyDtoHAsync(src=0x%lx, size=%zu, stream=%p)\n", (unsigned long)srcDevice, byteCount, hStream);
-    /* knockout: the current Type-2 command path serializes transfers and kernel
-     * launches. Completing the copy before return preserves correctness; add a
-     * stream-aware BAR2 command only when concurrent stream execution is measured. */
+    /* knockout: DtoH uses a blocking Type-2 command. Synchronize the source
+     * stream before the copy; add an async BAR2 command only when concurrent
+     * stream execution is measured. */
     async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, hStream,
                            "blocking");
+    CUresult result = cuStreamSynchronize(hStream);
+    if (result != CUDA_SUCCESS)
+        return async_copy_trace_end(result);
     return async_copy_trace_end(cuMemcpyDtoH_v2(dstHost, srcDevice, byteCount));
 }
 
