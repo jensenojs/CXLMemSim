@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -29,6 +31,7 @@ constexpr int64_t kQueryHeads = 16;
 constexpr int64_t kKeyValueTokens = 256;
 constexpr int64_t kKeyValueHeads = 1;
 constexpr size_t kContextBytes = 1024 * 1024;
+constexpr float kExpectedValue = 0.25f;
 
 void usage(FILE *stream) {
     std::fprintf(
@@ -74,9 +77,9 @@ int fail(const char *stage) {
     return 2;
 }
 
-void zero_tensor(struct ggml_tensor *tensor) {
-    std::vector<unsigned char> zeroes(ggml_nbytes(tensor), 0);
-    ggml_backend_tensor_set(tensor, zeroes.data(), 0, zeroes.size());
+void fill_tensor(struct ggml_tensor *tensor, unsigned char value) {
+    std::vector<unsigned char> bytes(ggml_nbytes(tensor), value);
+    ggml_backend_tensor_set(tensor, bytes.data(), 0, bytes.size());
 }
 
 } // namespace
@@ -159,9 +162,17 @@ int main(int argc, char **argv) {
         ggml_free(ctx);
         return fail("backend_tensor_allocation");
     }
-    zero_tensor(q);
-    zero_tensor(k_storage);
-    zero_tensor(mask);
+    fill_tensor(q, 0);
+    fill_tensor(mask, 0);
+
+    // Q is zero, so every attention score is zero. A constant, exactly
+    // representable V makes every output element equal to kExpectedValue.
+    std::vector<ggml_fp16_t> key_values(ggml_nelements(k_storage), ggml_fp32_to_fp16(kExpectedValue));
+    ggml_backend_tensor_set(k_storage, key_values.data(), 0, key_values.size() * sizeof(key_values[0]));
+
+    const float poison = std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> poisoned_output(ggml_nelements(out), poison);
+    ggml_backend_tensor_set(out, poisoned_output.data(), 0, poisoned_output.size() * sizeof(poisoned_output[0]));
     const enum ggml_status compute = ggml_backend_graph_compute(backend, graph);
     std::printf("ggml_flash_attn_ext_trigger_compute_status=%d\n", static_cast<int>(compute));
     if (compute != GGML_STATUS_SUCCESS) {
@@ -174,17 +185,22 @@ int main(int argc, char **argv) {
     std::printf("ggml_flash_attn_ext_trigger_synchronize=pass\n");
     std::vector<float> output(ggml_nelements(out));
     ggml_backend_tensor_get(out, output.data(), 0, output.size() * sizeof(float));
+    double max_abs_error = 0.0;
     for (size_t index = 0; index < output.size(); ++index) {
-        if (!std::isfinite(output[index]) || output[index] != 0.0f) {
-            std::fprintf(stderr, "ggml_flash_attn_ext_trigger_oracle_mismatch index=%zu value=%g\n", index,
-                         static_cast<double>(output[index]));
+        const double error = std::abs(static_cast<double>(output[index]) - kExpectedValue);
+        max_abs_error = std::max(max_abs_error, error);
+        if (!std::isfinite(output[index]) || error > 1.0e-5) {
+            std::fprintf(stderr,
+                         "ggml_flash_attn_ext_trigger_oracle_mismatch index=%zu value=%g expected=%g error=%g\n",
+                         index, static_cast<double>(output[index]), static_cast<double>(kExpectedValue), error);
             ggml_backend_buffer_free(buffer);
             ggml_backend_free(backend);
             ggml_free(ctx);
             return fail("numerical_oracle");
         }
     }
-    std::printf("ggml_flash_attn_ext_trigger_numerical_oracle=pass elements=%zu\n", output.size());
+    std::printf("ggml_flash_attn_ext_trigger_numerical_oracle=pass elements=%zu expected=%g max_abs_error=%g\n",
+                output.size(), static_cast<double>(kExpectedValue), max_abs_error);
     ggml_backend_buffer_free(buffer);
     ggml_backend_free(backend);
     ggml_free(ctx);
