@@ -10,6 +10,8 @@ readonly GUEST_SOURCE=${WORK}/guest-source
 readonly PAYLOAD=${WORK}/payload
 readonly EVIDENCE=${WORK}/evidence
 readonly BASELINE=4910c7cf2c813698952857f20988ac66dae7fe9d
+: "${CCACHE_DIR:?CCACHE_DIR must name the CNB compiler-cache volume}"
+export CCACHE_BASEDIR=$ROOT
 
 cd "$ROOT"
 
@@ -39,9 +41,12 @@ readonly CMAKE_DEFINITIONS=("${profile[@]:6}")
 rm -rf "$WORK"
 mkdir -p "$BUILD" "$GUEST_SOURCE" "$PAYLOAD/bin" "$PAYLOAD/guest" "$PAYLOAD/evidence/cuda-api" "$EVIDENCE"
 
+ccache --show-stats | tee "$EVIDENCE/ccache-before.txt"
 env CC="$PROFILE_CC" CXX="$PROFILE_CXX" cmake -S "$ROOT" -B "$BUILD" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_POLICY_DEFAULT_CMP0091="$CMP0091" \
+    -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     "${CMAKE_DEFINITIONS[@]}" 2>&1 | tee "$EVIDENCE/cmake-configure.log"
 
 cmake --build "$BUILD" --parallel "$PARALLEL" --target \
@@ -79,11 +84,12 @@ readonly TINY_HOST_CXX=${guest[-2]}
 readonly TINY_ARCH=${guest[-1]}
 readonly GUEST_DIR=${GUEST_SOURCE}/qemu_integration/guest_libcuda
 
-make -C "$GUEST_DIR" CC="$GUEST_CC" CFLAGS="$GUEST_CFLAGS" "${GUEST_TARGETS[@]}" \
+make -C "$GUEST_DIR" CC="ccache $GUEST_CC" CFLAGS="$GUEST_CFLAGS" "${GUEST_TARGETS[@]}" \
     2>&1 | tee "$EVIDENCE/guest-shim-build.log"
-make -C "$GUEST_DIR" CC="$GUEST_CC" CFLAGS="$GUEST_CFLAGS" \
-    NVCC="$TINY_NVCC" NVCC_HOST_CXX="$TINY_HOST_CXX" CUDA_ARCH="$TINY_ARCH" "$TINY_TARGET" \
+make -C "$GUEST_DIR" CC="ccache $GUEST_CC" CFLAGS="$GUEST_CFLAGS" \
+    NVCC="ccache $TINY_NVCC" NVCC_HOST_CXX="$TINY_HOST_CXX" CUDA_ARCH="$TINY_ARCH" "$TINY_TARGET" \
     2>&1 | tee "$EVIDENCE/tiny-cuda-build.log"
+ccache --show-stats | tee "$EVIDENCE/ccache-after.txt"
 
 install -m 0755 "$BUILD/cxlmemsim_server" "$PAYLOAD/bin/cxlmemsim_server"
 install -m 0755 "$GUEST_DIR/cuda-integrity-export-oracle" "$PAYLOAD/bin/cuda-integrity-export-oracle"

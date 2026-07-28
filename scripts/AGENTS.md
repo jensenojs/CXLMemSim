@@ -20,6 +20,8 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | --- | --- | --- | --- |
 | `verify_source_checkout.sh` | expected source SHA 与当前 Git checkout | exit status | 当前 checkout 是否可作为声明的构建输入 |
 | `build_component.sh` | `manifests/build-profile.json`、`manifests/artifact-contract.json`、当前 source | `.work/component/payload/` 与构建/测试日志 | 本仓声明的 server、shim、loader audit、case CLI 是否可由精确源码构建 |
+
+CNB组件构建通过`CCACHE_DIR`消费本仓独立的编译缓存卷。CMake目标和guest shim的C/C++编译都必须经过`ccache`，并在evidence中保存构建前后统计；`.work/component/build`仍然每次删除重建，cache不进入source、profile或artifact identity。
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |
 | `publish_component.sh PAYLOAD_DIR` | 已闭合 payload、profile、contract、CNB registry身份 | OCI双 blob 与 `component-candidate` 输出 | 该 payload 是否已被不可变 digest 发布 |
 | `pull_component.sh [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与 `.work/component/fresh-pull/` 验证记录 | 已发布的 exact bytes 能否独立恢复并通过本仓 runtime/ELF smoke |
