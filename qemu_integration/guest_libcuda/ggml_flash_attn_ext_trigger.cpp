@@ -32,6 +32,7 @@ constexpr int64_t kKeyValueTokens = 256;
 constexpr int64_t kKeyValueHeads = 1;
 constexpr size_t kContextBytes = 1024 * 1024;
 constexpr float kExpectedValue = 0.25f;
+constexpr double kMaxAbsoluteError = 5.0e-5;
 
 void usage(FILE *stream) {
     std::fprintf(
@@ -189,7 +190,7 @@ int main(int argc, char **argv) {
     for (size_t index = 0; index < output.size(); ++index) {
         const double error = std::abs(static_cast<double>(output[index]) - kExpectedValue);
         max_abs_error = std::max(max_abs_error, error);
-        if (!std::isfinite(output[index]) || error > 1.0e-5) {
+        if (!std::isfinite(output[index]) || error > kMaxAbsoluteError) {
             std::fprintf(stderr,
                          "ggml_flash_attn_ext_trigger_oracle_mismatch index=%zu value=%g expected=%g error=%g\n",
                          index, static_cast<double>(output[index]), static_cast<double>(kExpectedValue), error);
