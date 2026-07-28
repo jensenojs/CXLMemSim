@@ -378,6 +378,8 @@ static char *g_observation_buffer = NULL;
     do {                                                                                                               \
         if (g_observation_stream)                                                                                      \
             fprintf(g_observation_stream, "[CXL-CUDA] " __VA_ARGS__);                                                \
+        else if (g_debug)                                                                                              \
+            fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                              \
     } while (0)
 
 static void function_param_layouts_clear(const char *reason) {
