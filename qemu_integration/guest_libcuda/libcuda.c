@@ -4667,8 +4667,14 @@ CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteC
 }
 
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
+    /* knockout: DtoD uses a blocking Type-2 command. Synchronize the source
+     * stream before the copy; add an async BAR2 command only when concurrent
+     * stream execution is measured. */
     async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, hStream,
                            "blocking");
+    CUresult result = cuStreamSynchronize(hStream);
+    if (result != CUDA_SUCCESS)
+        return async_copy_trace_end(result);
     return async_copy_trace_end(cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount));
 }
 
