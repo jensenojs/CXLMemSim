@@ -96,6 +96,7 @@ install -m 0755 "$GUEST_DIR/cuda-integrity-export-oracle" "$PAYLOAD/bin/cuda-int
 install -m 0755 "$GUEST_DIR/libcuda.so.1" "$PAYLOAD/guest/libcuda.so.1"
 install -m 0755 "$GUEST_DIR/libcxl-loader-audit.so" "$PAYLOAD/guest/libcxl-loader-audit.so"
 install -m 0755 "$GUEST_DIR/cxl-gpu-case" "$PAYLOAD/guest/cxl-gpu-case"
+install -m 0755 "$GUEST_DIR/cxl-mem-active-gate" "$PAYLOAD/guest/cxl-mem-active-gate"
 install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe"
 install -m 0755 "$GUEST_DIR/libtiny_cuda.so" "$PAYLOAD/guest/libtiny_cuda.so"
@@ -115,6 +116,7 @@ readelf -d "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-ora
 readelf -d "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libcxl-loader-audit.so" >"$EVIDENCE/loader-audit-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/guest/cxl-mem-active-gate" >"$EVIDENCE/cxl-mem-active-gate-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
     >"$EVIDENCE/tiny-probe-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-readelf-dynamic.txt"
@@ -124,6 +126,7 @@ ldd "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-oracle-ldd
 ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
 ldd "$PAYLOAD/guest/libcxl-loader-audit.so" >"$EVIDENCE/loader-audit-ldd.txt"
 ldd "$PAYLOAD/guest/cxl-gpu-case" >"$EVIDENCE/case-control-ldd.txt"
+ldd "$PAYLOAD/guest/cxl-mem-active-gate" >"$EVIDENCE/cxl-mem-active-gate-ldd.txt"
 ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
 ldd "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-ldd.txt"
 ldd "$PAYLOAD/guest/libcublas_create_probe.so" >"$EVIDENCE/cublas-create-probe-ldd.txt"
@@ -143,7 +146,8 @@ nm -D "$PAYLOAD/guest/libcublas_create_probe.so" | grep -F ' tiny_cuda_probe_run
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
 "$PAYLOAD/bin/cuda-integrity-export-oracle" --help >"$EVIDENCE/integrity-oracle-help.txt"
 sha256sum "$PAYLOAD/bin/cxlmemsim_server" "$PAYLOAD/bin/cuda-integrity-export-oracle" "$PAYLOAD/guest/libcuda.so.1" "$PAYLOAD/guest/libcxl-loader-audit.so" \
-    "$PAYLOAD/guest/cxl-gpu-case" "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
+    "$PAYLOAD/guest/cxl-gpu-case" "$PAYLOAD/guest/cxl-mem-active-gate" \
+    "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/libtiny_cuda.so" "$PAYLOAD/guest/libcublas_create_probe.so" \
     >"$EVIDENCE/payload-sha256.txt"
 

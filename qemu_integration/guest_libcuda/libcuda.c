@@ -5353,6 +5353,10 @@ int cxlCoherentFree(void *host_ptr) {
     return 0;
 }
 
+uint64_t cxlHostToDevice(void *host_ptr) {
+    return bar4_offset_of(host_ptr);
+}
+
 void *cxlDeviceToHost(uint64_t dev_offset) {
     volatile uint8_t *bar4 = ensure_bar4();
     if (!bar4)

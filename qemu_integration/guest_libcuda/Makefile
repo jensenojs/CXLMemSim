@@ -33,7 +33,8 @@ CUDA_SHIM_OBJECTS := libcuda.instrumented.o cuda_api_provenance.o cxl_gpu_contex
 CUDA_TESTS := cuda_test cuda_advanced_test
 BAR_TESTS := cxl_bar_benchmark
 BAR_STATIC := cxl_bar_benchmark.static
-TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS)
+CXL_MEM_ACTIVE_GATE := cxl-mem-active-gate
+TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS) $(CXL_MEM_ACTIVE_GATE)
 
 .PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe test-loader-audit test-api-provenance private-export-table-probe test-private-export-probe integrity-export-oracle \
 	fatbin-cubin-load-probe fatbin-library-load-probe \
@@ -215,6 +216,9 @@ cuda_advanced_test: cuda_advanced_test.c $(CUDA_LINK)
 
 cxl_bar_benchmark: cxl_bar_benchmark.c cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
+
+$(CXL_MEM_ACTIVE_GATE): cxl_mem_active_gate.c $(CUDA_LINK)
+	$(CC) $(CFLAGS) -o $@ cxl_mem_active_gate.c -L. -lcuda -ldl -Wl,-rpath,'$$ORIGIN' $(LDFLAGS) $(LDLIBS)
 
 static: $(BAR_STATIC)
 

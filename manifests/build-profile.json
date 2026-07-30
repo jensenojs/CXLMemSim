@@ -24,6 +24,7 @@
       "libcuda.so",
       "libcxl-loader-audit.so",
       "cxl-gpu-case",
+      "cxl-mem-active-gate",
       "integrity-export-oracle",
       "test",
       "test-static-collector",
@@ -86,6 +87,11 @@
     },
     {
       "path": "guest/cxl-gpu-case",
+      "type": "file",
+      "mode": "0755"
+    },
+    {
+      "path": "guest/cxl-mem-active-gate",
       "type": "file",
       "mode": "0755"
     },
