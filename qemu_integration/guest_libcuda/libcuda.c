@@ -414,6 +414,7 @@ static void log_context_state(const char *api, CUresult result) {
 
 static inline uint64_t maybe_bar4_offset(uint64_t value);
 static inline uint64_t bar4_offset_of(void *host_ptr);
+static bool bar4_pointer_range(const void *host_ptr, size_t size, uint64_t *offset);
 
 /* The CUDA shim and cxl-gpu-case share the transport implementation.  These
  * wrappers preserve the existing call sites while keeping BAR2 ownership in
@@ -2513,6 +2514,26 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
     if (!srcHost)
         return CUDA_ERROR_INVALID_VALUE;
 
+    uint64_t bar4_offset = 0;
+    if (bar4_pointer_range(srcHost, byteCount, &bar4_offset)) {
+        size_t offset = 0;
+        while (offset < byteCount) {
+            size_t chunk = byteCount - offset;
+            if (chunk > CXL_GPU_BULK_TRANSFER_SIZE)
+                chunk = CXL_GPU_BULK_TRANSFER_SIZE;
+            cmd_lock();
+            reg_write64(CXL_GPU_REG_PARAM0, bar4_offset + offset);
+            reg_write64(CXL_GPU_REG_PARAM1, dstDevice + offset);
+            reg_write64(CXL_GPU_REG_PARAM2, chunk);
+            CUresult err = execute_cmd(CXL_GPU_CMD_BULK_HTOD);
+            cmd_unlock();
+            if (err != CUDA_SUCCESS)
+                return err;
+            offset += chunk;
+        }
+        return CUDA_SUCCESS;
+    }
+
     /* Transfer in chunks that fit in data buffer */
     size_t offset = 0;
     while (offset < byteCount) {
@@ -2597,6 +2618,26 @@ CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount)
         return CUDA_ERROR_NOT_INITIALIZED;
     if (!dstHost)
         return CUDA_ERROR_INVALID_VALUE;
+
+    uint64_t bar4_offset = 0;
+    if (bar4_pointer_range(dstHost, byteCount, &bar4_offset)) {
+        size_t offset = 0;
+        while (offset < byteCount) {
+            size_t chunk = byteCount - offset;
+            if (chunk > CXL_GPU_BULK_TRANSFER_SIZE)
+                chunk = CXL_GPU_BULK_TRANSFER_SIZE;
+            cmd_lock();
+            reg_write64(CXL_GPU_REG_PARAM0, srcDevice + offset);
+            reg_write64(CXL_GPU_REG_PARAM1, bar4_offset + offset);
+            reg_write64(CXL_GPU_REG_PARAM2, chunk);
+            CUresult err = execute_cmd(CXL_GPU_CMD_BULK_DTOH);
+            cmd_unlock();
+            if (err != CUDA_SUCCESS)
+                return err;
+            offset += chunk;
+        }
+        return CUDA_SUCCESS;
+    }
 
     /* Transfer in chunks */
     size_t offset = 0;
@@ -5305,6 +5346,18 @@ static inline uint64_t maybe_bar4_offset(uint64_t value) {
         return (uint64_t)(ptr - (uintptr_t)g_bar4_ptr);
     }
     return value;
+}
+
+static bool bar4_pointer_range(const void *host_ptr, size_t size, uint64_t *offset) {
+    uintptr_t ptr = (uintptr_t)host_ptr;
+    uintptr_t base = (uintptr_t)g_bar4_ptr;
+
+    if (!host_ptr || !offset || !g_bar4_ptr || ptr < base || ptr - base > g_bar4_size)
+        return false;
+    if (size > g_bar4_size - (ptr - base))
+        return false;
+    *offset = (uint64_t)(ptr - base);
+    return true;
 }
 
 int cxlCoherentAlloc(uint64_t size, void **host_ptr) {
