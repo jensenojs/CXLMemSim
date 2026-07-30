@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-container_runtime=docker
+container_runtime=
+work_dir=
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --container-runtime)
             [[ $# -ge 2 ]] || { printf 'error: --container-runtime requires a value\n' >&2; exit 2; }
             container_runtime=$2; shift 2 ;;
+        --work-dir)
+            [[ $# -ge 2 ]] || { printf 'error: --work-dir requires a value\n' >&2; exit 2; }
+            work_dir=$2; shift 2 ;;
         --) shift; break ;;
         -*) printf 'error: unknown argument: %s\n' "$1" >&2; exit 2 ;;
         *) break ;;
     esac
 done
 if [[ $# -ne 2 ]]; then
-    printf 'usage: %s [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR\n' "$0" >&2
+    printf 'usage: %s --container-runtime docker|podman --work-dir ABSENT_ABSOLUTE_PATH CANDIDATE_JSON OUTPUT_DIR\n' "$0" >&2
     exit 2
 fi
 
 case "$container_runtime" in
     docker|podman) ;;
+    "") printf 'error: --container-runtime is required\n' >&2; exit 2 ;;
     *) printf 'error: --container-runtime must be docker or podman\n' >&2; exit 2 ;;
 esac
+[[ -n $work_dir ]] || { printf 'error: --work-dir is required\n' >&2; exit 2; }
 command -v "$container_runtime" >/dev/null 2>&1 || {
     printf 'error: missing container runtime: %s\n' "$container_runtime" >&2
     exit 1
@@ -30,7 +36,25 @@ readonly ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly CANDIDATE=$(realpath "$1")
 readonly OUTPUT=$2
 readonly CONTRACT=${ROOT}/manifests/artifact-contract.json
-readonly WORK=${ROOT}/.work/component/fresh-pull
+[[ $work_dir == /* ]] || { printf 'error: work directory must be absolute\n' >&2; exit 1; }
+python3 - "$work_dir" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+if path.exists() or path.is_symlink():
+    raise SystemExit(f"work directory must not exist: {path}")
+if not path.parent.is_dir():
+    raise SystemExit(f"work directory parent must exist: {path.parent}")
+current = path.parent
+while True:
+    if current.is_symlink():
+        raise SystemExit(f"work directory ancestor must not be a symlink: {current}")
+    if current.parent == current:
+        break
+    current = current.parent
+PY
+readonly WORK=$(realpath -m "$work_dir")
 
 readarray -t candidate < <(python3 - "$CANDIDATE" <<'PY'
 import json, sys
@@ -52,13 +76,19 @@ import json, sys
 c=json.load(open(sys.argv[1]))
 print(c["artifact_repository"])
 print(c["oras_image"])
+print(c["toolchain_image"])
 PY
 )
 [[ $REPOSITORY == "${contract[0]}" ]]
 readonly ORAS_IMAGE=${contract[1]}
+readonly TOOLCHAIN_IMAGE=${contract[2]}
+[[ $TOOLCHAIN_IMAGE == *@sha256:* ]] || {
+    printf 'error: artifact contract toolchain_image must be pinned by digest\n' >&2
+    exit 1
+}
 
-rm -rf "$WORK"
-mkdir -p "$WORK/pulled"
+mkdir "$WORK"
+mkdir "$WORK/pulled"
 readonly ORAS_BIN=${WORK}/oras
 oras_container=$("$container_runtime" create "$ORAS_IMAGE")
 trap '"$container_runtime" rm -f "${oras_container:-}" >/dev/null 2>&1 || true' EXIT
@@ -83,33 +113,45 @@ python3 "$ROOT/scripts/component_artifact.py" verify-archive \
     --manifest "$WORK/pulled/manifest.json" \
     --extract-dir "$OUTPUT"
 
-"$OUTPUT/bin/cxlmemsim_server" --help >"$WORK/server-help.stdout" \
-    2>"$WORK/server-help.stderr"
-ldd "$OUTPUT/bin/cxlmemsim_server" >"$WORK/server-ldd.txt"
-ldd "$OUTPUT/bin/cuda-integrity-export-oracle" >"$WORK/integrity-oracle-ldd.txt"
-ldd "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-ldd.txt"
-ldd "$OUTPUT/guest/libcxl-loader-audit.so" >"$WORK/loader-audit-ldd.txt"
-ldd "$OUTPUT/guest/cxl-gpu-case" >"$WORK/case-control-ldd.txt"
-ldd "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-ldd.txt"
-ldd "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-ldd.txt"
-readelf -d "$OUTPUT/guest/libcuda.so.1" >"$WORK/shim-readelf-dynamic.txt"
-readelf -d "$OUTPUT/guest/libcxl-loader-audit.so" >"$WORK/loader-audit-readelf-dynamic.txt"
+runtime_args=(run --rm --user "$(id -u):$(id -g)")
+if [[ $container_runtime == podman ]]; then
+    runtime_args+=(--userns=keep-id --security-opt label=disable)
+fi
+runtime_args+=(
+    --mount "type=bind,src=$OUTPUT,dst=/payload,readonly"
+    --mount "type=bind,src=$WORK,dst=/work"
+    --workdir /payload
+    "$TOOLCHAIN_IMAGE"
+    bash -euo pipefail -c '
+bin/cxlmemsim_server --help >/work/server-help.stdout 2>/work/server-help.stderr
+ldd bin/cxlmemsim_server >/work/server-ldd.txt
+ldd bin/cuda-integrity-export-oracle >/work/integrity-oracle-ldd.txt
+ldd guest/libcuda.so.1 >/work/shim-ldd.txt
+ldd guest/libcxl-loader-audit.so >/work/loader-audit-ldd.txt
+ldd guest/cxl-gpu-case >/work/case-control-ldd.txt
+ldd guest/cuda-runtime-dlopen-kernel-probe >/work/tiny-probe-ldd.txt
+ldd guest/libtiny_cuda.so >/work/tiny-library-ldd.txt
+readelf -d guest/libcuda.so.1 >/work/shim-readelf-dynamic.txt
+readelf -d guest/libcxl-loader-audit.so >/work/loader-audit-readelf-dynamic.txt
 for library in liblz4.so.1 libzstd.so.1; do
-    grep -F "Shared library: [$library]" "$WORK/shim-readelf-dynamic.txt" >/dev/null
-    grep -F "$library =>" "$WORK/shim-ldd.txt" >/dev/null
+    grep -F "Shared library: [$library]" /work/shim-readelf-dynamic.txt >/dev/null
+    grep -F "$library =>" /work/shim-ldd.txt >/dev/null
 done
-readelf -d "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" >"$WORK/tiny-probe-readelf-dynamic.txt"
-! readelf -SW "$OUTPUT/guest/cuda-runtime-dlopen-kernel-probe" | grep -F '.nv_fatbin' >/dev/null
-! grep -F 'Shared library: [libcudart.so.12]' "$WORK/tiny-probe-readelf-dynamic.txt" >/dev/null
-readelf -d "$OUTPUT/guest/libtiny_cuda.so" >"$WORK/tiny-library-readelf-dynamic.txt"
-grep -F 'Shared library: [libcudart.so.12]' "$WORK/tiny-library-readelf-dynamic.txt" >/dev/null
+readelf -d guest/cuda-runtime-dlopen-kernel-probe >/work/tiny-probe-readelf-dynamic.txt
+! readelf -SW guest/cuda-runtime-dlopen-kernel-probe | grep -F .nv_fatbin >/dev/null
+! grep -F "Shared library: [libcudart.so.12]" /work/tiny-probe-readelf-dynamic.txt >/dev/null
+readelf -d guest/libtiny_cuda.so >/work/tiny-library-readelf-dynamic.txt
+grep -F "Shared library: [libcudart.so.12]" /work/tiny-library-readelf-dynamic.txt >/dev/null
 for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
-    nm -D "$OUTPUT/guest/libtiny_cuda.so" | grep -F " $symbol" >>"$WORK/tiny-library-symbol.txt"
+    nm -D guest/libtiny_cuda.so | grep -F " $symbol" >>/work/tiny-library-symbol.txt
 done
-"$OUTPUT/guest/cxl-gpu-case" --help >"$WORK/case-control-help.txt"
-"$OUTPUT/bin/cuda-integrity-export-oracle" --help >"$WORK/integrity-oracle-help.txt"
-[[ -L $OUTPUT/guest/libcuda.so ]]
-[[ $(readlink "$OUTPUT/guest/libcuda.so") == libcuda.so.1 ]]
+guest/cxl-gpu-case --help >/work/case-control-help.txt
+bin/cuda-integrity-export-oracle --help >/work/integrity-oracle-help.txt
+[[ -L guest/libcuda.so ]]
+[[ $(readlink guest/libcuda.so) == libcuda.so.1 ]]
+'
+)
+"$container_runtime" "${runtime_args[@]}"
 
 printf 'component_fresh_pull=pass\n'
 printf 'artifact_reference=%s@%s\n' "$REPOSITORY" "$DIGEST"

@@ -51,6 +51,8 @@ $:
              --work-dir "$PWD/.work/component/component-publish" \
              --candidate-out "$PWD/.work/component/outputs/candidate.json"
            bash scripts/pull_component.sh \
+             --container-runtime docker \
+             --work-dir "$PWD/.work/component/component-pull" \
              "$PWD/.work/component/outputs/candidate.json" \
              "$PWD/.work/component/verified"
 
@@ -66,6 +68,8 @@ $:
           script: |
             python3 -m unittest discover -s tests -p 'test_component_artifact.py'
             bash scripts/pull_component.sh \
+              --container-runtime docker \
+              --work-dir "$PWD/.work/restored/cxlmemsim-pull" \
               manifests/artifacts/cxlmemsim.candidate.json \
               .work/restored/cxlmemsim
 

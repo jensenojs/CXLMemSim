@@ -27,11 +27,11 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |
 | `package_component.sh --payload-dir EXISTING --source-commit 40_HEX --work-dir ABSENT --manifest-out ABSENT --archive-out ABSENT` | verified payload、clean exact HEAD、profile与contract | 原子manifest与确定性archive | artifact bytes是否在无网络边界内生成并fresh verify |
 | `publish_component.sh --manifest EXISTING --archive EXISTING --work-dir ABSENT --candidate-out ABSENT` | 已验证manifest/archive、contract与CNB registry身份 | OCI双blob、candidate文件与CNB output | exact artifact bytes是否已被不可变digest发布 |
-| `pull_component.sh [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与 `.work/component/fresh-pull/` 验证记录 | 已发布的 exact bytes 能否独立恢复并通过本仓 runtime/ELF smoke |
+| `pull_component.sh --container-runtime docker|podman --work-dir ABSENT_ABSOLUTE_PATH CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与调用者拥有的pull现场 | 已发布的 exact bytes 能否独立恢复并在exact toolchain image中通过runtime/ELF smoke |
 | `run_integrity_export_oracle.sh TABLE LOG_PREFIX` | L40真实Driver、当前guest shim、指定private export table | Driver identity与oracle输出 | 真实Driver和shim对该table的公开可比形状是否一致 |
 | `run_private_export_table_probe.sh [OUTPUT_DIR]` | L40真实Driver、tiny DSO、固定discovery/capture选择 | discovery/capture transcript与identity comparison | 自然到达的private table调用及slot 1输入是什么 |
 
-`pull_component.sh` 默认使用 CNB Docker service。只在本机已明确选择 rootless Podman 时传 `--container-runtime podman`；Docker 失败不会静默改用 Podman。参数形状错误以 exit 2 结束，已经通过解析后的 container、OCI、digest、archive、ELF 或运行时检查失败以非零运行错误结束。
+`pull_component.sh`要求显式选择Docker或Podman，并要求绝对、父目录已存在、叶子不存在且祖先无symlink的work目录。入口exclusive-create并保留失败现场，不删除或复用旧目录。OCI transport使用所选runtime；静态archive/file manifest验证由`component_artifact.py`拥有，runtime ABI与可执行gate在artifact contract的exact toolchain image中以调用用户UID/GID执行。宿主缺少组件动态库时不构成artifact失败，也不触发fallback、安装或`LD_LIBRARY_PATH`补偿。
 
 ## 证据与边界
 
