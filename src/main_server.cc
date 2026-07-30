@@ -77,6 +77,10 @@ constexpr uint8_t OP_BI_WRITEBACK = 17; // Back-invalidate dirty writeback
 constexpr uint8_t OP_BI_QUERY = 18; // Return BI fabric stats
 constexpr uint8_t OP_MAX = OP_BI_QUERY;
 
+// A fixed CXL.mem request must not hold a client thread beyond the protocol
+// boundary when the peer sends a partial frame or stops responding.
+constexpr int TCP_REQUEST_TIMEOUT_MS = 1000;
+
 // Server request/response structures (matching qemu_integration)
 struct __attribute__((packed)) ServerRequest {
     uint8_t op_type;
@@ -1106,6 +1110,17 @@ void ThreadPerConnectionServer::run() {
                 continue;
             }
             SPDLOG_ERROR("Failed to accept connection: {}", strerror(errno));
+            continue;
+        }
+
+        const timeval receive_timeout = {
+            TCP_REQUEST_TIMEOUT_MS / 1000,
+            (TCP_REQUEST_TIMEOUT_MS % 1000) * 1000,
+        };
+        if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout,
+                       sizeof(receive_timeout)) < 0) {
+            SPDLOG_ERROR("Failed to set TCP request timeout: {}", strerror(errno));
+            close(client_fd);
             continue;
         }
 
