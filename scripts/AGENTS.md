@@ -5,7 +5,9 @@
 ```text
 exact CXLMemSim checkout + manifests/build-profile.json
   → build_component.sh
-  → .work/component/payload/ 与 build evidence
+  → 调用者指定的 payload 与 build evidence
+  → package_component.sh
+  → manifest + deterministic archive
   → publish_component.sh
   → candidate JSON + OCI component
   → cxl-lab component_candidate.py
@@ -19,11 +21,12 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | 入口 | 读取什么 | 写出什么 | 用来回答的问题 |
 | --- | --- | --- | --- |
 | `verify_source_checkout.sh` | expected source SHA 与当前 Git checkout | exit status | 当前 checkout 是否可作为声明的构建输入 |
-| `build_component.sh` | `manifests/build-profile.json`、`manifests/artifact-contract.json`、当前 source | `.work/component/payload/` 与构建/测试日志 | 本仓声明的 server、shim、loader audit、case CLI 是否可由精确源码构建 |
+| `build_component.sh --work-dir ABSENT --cache-dir EXISTING --payload-dir ABSENT` | clean source、build profile与显式cache | 指定payload与work内构建证据 | 本仓声明的server、shim、loader audit、case CLI是否可由精确源码构建 |
 
-CNB组件构建通过`CCACHE_DIR`消费本仓独立的编译缓存卷。CMake目标和guest shim的C/C++编译都必须经过`ccache`，并在evidence中保存构建前后统计；`.work/component/build`仍然每次删除重建，cache不进入source、profile或artifact identity。
+组件构建通过必填`--cache-dir`消费独立编译缓存。work与payload在调用前必须不存在，脚本只创建自己声明的路径，不删除已有目录。tracked或untracked dirty状态在创建输出前失败。CMake目标和guest shim的C/C++编译都经过`ccache`，并在evidence中保存构建前后统计；cache不进入source、profile或artifact identity。
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |
-| `publish_component.sh PAYLOAD_DIR` | 已闭合 payload、profile、contract、CNB registry身份 | OCI双 blob 与 `component-candidate` 输出 | 该 payload 是否已被不可变 digest 发布 |
+| `package_component.sh --payload-dir EXISTING --source-commit 40_HEX --work-dir ABSENT --manifest-out ABSENT --archive-out ABSENT` | verified payload、clean exact HEAD、profile与contract | 原子manifest与确定性archive | artifact bytes是否在无网络边界内生成并fresh verify |
+| `publish_component.sh --manifest EXISTING --archive EXISTING --work-dir ABSENT --candidate-out ABSENT` | 已验证manifest/archive、contract与CNB registry身份 | OCI双blob、candidate文件与CNB output | exact artifact bytes是否已被不可变digest发布 |
 | `pull_component.sh [--container-runtime docker|podman] CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与 `.work/component/fresh-pull/` 验证记录 | 已发布的 exact bytes 能否独立恢复并通过本仓 runtime/ELF smoke |
 | `run_integrity_export_oracle.sh TABLE LOG_PREFIX` | L40真实Driver、当前guest shim、指定private export table | Driver identity与oracle输出 | 真实Driver和shim对该table的公开可比形状是否一致 |
 | `run_private_export_table_probe.sh [OUTPUT_DIR]` | L40真实Driver、tiny DSO、固定discovery/capture选择 | discovery/capture transcript与identity comparison | 自然到达的private table调用及slot 1输入是什么 |
@@ -33,6 +36,8 @@ CNB组件构建通过`CCACHE_DIR`消费本仓独立的编译缓存卷。CMake目
 ## 证据与边界
 
 `.work/`、build目录、下载的 archive、恢复 payload 和日志都是一次执行现场，不进入 Git。candidate 的传递、official artifact manifest 的更新、fresh-pull event 的触发和正式 run 的输入选择只通过 [cxl-lab artifact contract](https://cnb.cool/gevico.online/jensen/cxl-lab/-/blob/main/scripts/artifacts/AGENTS.md) 执行。
+
+`local-host-diagnostic`只调用build并停在payload，不创建manifest。`local-container-artifact`与CNB formal在`artifact-contract.json`的exact toolchain image中调用相同build/package；只有publish需要registry凭据和网络。三个入口失败都保留work现场，不创建对应终态输出，不接受旧位置参数或默认work路径。
 
 这个目录能证明：源码、profile 和工具链构造了指定文件；OCI 归档经 digest 与逐文件 manifest 复原后仍满足本仓的 server/shim/CLI 基础检查。
 

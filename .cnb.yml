@@ -34,11 +34,25 @@ $:
       stages:
         - name: build test and publish CXLMemSim component
           script: |
-           bash scripts/build_component.sh
-           bash scripts/publish_component.sh .work/component/payload
+           mkdir -p "$PWD/.work/component/outputs"
+           bash scripts/build_component.sh \
+             --work-dir "$PWD/.work/component/component-build" \
+             --cache-dir /cache/cxlmemsim/ccache \
+             --payload-dir "$PWD/.work/component/outputs/payload"
+           bash scripts/package_component.sh \
+             --payload-dir "$PWD/.work/component/outputs/payload" \
+             --source-commit "$(git rev-parse HEAD)" \
+             --work-dir "$PWD/.work/component/component-package" \
+             --manifest-out "$PWD/.work/component/outputs/manifest.json" \
+             --archive-out "$PWD/.work/component/outputs/component.tar.zst"
+           bash scripts/publish_component.sh \
+             --manifest "$PWD/.work/component/outputs/manifest.json" \
+             --archive "$PWD/.work/component/outputs/component.tar.zst" \
+             --work-dir "$PWD/.work/component/component-publish" \
+             --candidate-out "$PWD/.work/component/outputs/candidate.json"
            bash scripts/pull_component.sh \
-             .work/component/publish/candidate.json \
-             .work/component/verified
+             "$PWD/.work/component/outputs/candidate.json" \
+             "$PWD/.work/component/verified"
 
   # Pull the candidate artifact by digest into an empty directory and verify every file.
   api_trigger_component_fresh_pull:

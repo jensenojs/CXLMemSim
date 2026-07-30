@@ -1,16 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# agent-usage: bash scripts/build_component.sh --work-dir ABSENT_PATH --cache-dir EXISTING_PATH --payload-dir ABSENT_PATH
+# agent-context: problem=An implicit repository work tree and CCACHE_DIR make component bytes depend on hidden mutable paths and let retries delete unrelated state.
+# agent-context: mental_model=The caller owns execution and cache roots; this script owns one absent build directory and one absent payload output, after a clean source admission check.
+# agent-context: role=Build and gate the cxlmemsim component payload without creating an artifact manifest or publishing it.
+# agent-context: use_when=Use for a local host diagnostic, an exact-image local artifact build, or the CNB formal component build.
+# agent-context: inputs=Clean cxlmemsim checkout, absent absolute work and payload paths, existing absolute cache directory, build profile, and required toolchain commands.
+# agent-context: outputs=One profile-verified payload and retained build evidence under the caller-selected work directory.
+# agent-context: interpret=component_build=pass means the declared component targets and payload gate passed on this execution surface.
+# agent-context: proves=The payload matches the component build profile and passed its component-local build and test gates.
+# agent-context: does_not_prove=It does not create or sign an OCI artifact and does not prove Type-2 or Kimi correctness.
+# agent-context: next=For an exact-image artifact, pass the payload and exact HEAD to package_component.sh in the same toolchain image.
+
+usage() {
+    printf 'usage: %s --work-dir ABSENT_PATH --cache-dir EXISTING_PATH --payload-dir ABSENT_PATH\n' "$0"
+}
+
+if [[ ${1:-} == --help ]]; then usage; exit 0; fi
+if [[ ${1:-} == --hint ]]; then
+    printf 'agent_hint=self=scripts/build_component.sh\nagent_hint=usage=bash scripts/build_component.sh --work-dir ABSENT_PATH --cache-dir EXISTING_PATH --payload-dir ABSENT_PATH\nagent_hint=boundary=builds and gates payload only; does not create an artifact manifest\n'
+    exit 0
+fi
+
+work_arg= cache_arg= payload_arg=
+while (( $# )); do
+    case "$1" in
+        --work-dir|--cache-dir|--payload-dir)
+            (( $# >= 2 )) || { usage >&2; exit 2; }
+            case "$1" in
+                --work-dir) work_arg=$2 ;;
+                --cache-dir) cache_arg=$2 ;;
+                --payload-dir) payload_arg=$2 ;;
+            esac
+            shift 2 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+[[ -n $work_arg && -n $cache_arg && -n $payload_arg ]] || { usage >&2; exit 2; }
+
 readonly ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly PROFILE=${ROOT}/manifests/build-profile.json
-readonly CONTRACT=${ROOT}/manifests/artifact-contract.json
-readonly WORK=${ROOT}/.work/component
+[[ $work_arg == /* && $cache_arg == /* && $payload_arg == /* ]] || { printf 'paths must be absolute\n' >&2; exit 2; }
+[[ ! -e $work_arg && ! -L $work_arg ]] || { printf 'work directory must not exist: %s\n' "$work_arg" >&2; exit 2; }
+[[ ! -e $payload_arg && ! -L $payload_arg ]] || { printf 'payload directory must not exist: %s\n' "$payload_arg" >&2; exit 2; }
+[[ -d $cache_arg && ! -L $cache_arg ]] || { printf 'cache directory must be an existing non-symlink directory: %s\n' "$cache_arg" >&2; exit 2; }
+[[ -d $(dirname "$work_arg") && ! -L $(dirname "$work_arg") ]] || { printf 'work parent must be an existing non-symlink directory\n' >&2; exit 2; }
+[[ -d $(dirname "$payload_arg") && ! -L $(dirname "$payload_arg") ]] || { printf 'payload parent must be an existing non-symlink directory\n' >&2; exit 2; }
+readonly WORK=$(realpath -m "$work_arg")
+readonly PAYLOAD=$(realpath -m "$payload_arg")
+readonly CCACHE_DIR=$(realpath "$cache_arg")
+case "$ROOT/" in "$WORK/"*|"$PAYLOAD/"*) printf 'output path cannot be an ancestor of the repository\n' >&2; exit 2;; esac
+[[ $WORK != "$ROOT" && $PAYLOAD != "$ROOT" ]] || { printf 'output path cannot equal repository root\n' >&2; exit 2; }
+[[ -z $(git -C "$ROOT" status --porcelain=v1 --untracked-files=all) ]] || { printf 'source checkout must be clean\n' >&2; exit 1; }
 readonly BUILD=${WORK}/build
 readonly GUEST_SOURCE=${WORK}/guest-source
-readonly PAYLOAD=${WORK}/payload
 readonly EVIDENCE=${WORK}/evidence
-readonly BASELINE=4910c7cf2c813698952857f20988ac66dae7fe9d
-: "${CCACHE_DIR:?CCACHE_DIR must name the CNB compiler-cache volume}"
+export CCACHE_DIR
 export CCACHE_BASEDIR=$ROOT
 
 cd "$ROOT"
@@ -38,7 +84,6 @@ readonly CMP0091=${profile[4]}
 readonly PARALLEL=${profile[5]}
 readonly CMAKE_DEFINITIONS=("${profile[@]:6}")
 
-rm -rf "$WORK"
 mkdir -p "$BUILD" "$GUEST_SOURCE" "$PAYLOAD/bin" "$PAYLOAD/guest" "$PAYLOAD/evidence/cuda-api" "$EVIDENCE"
 
 ccache --show-stats | tee "$EVIDENCE/ccache-before.txt"
