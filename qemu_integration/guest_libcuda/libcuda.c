@@ -5730,11 +5730,12 @@ __attribute__((constructor)) static void libcuda_init(void) {
         }
     }
     htod_route_parse();
-    OLOG("htod_route_config mode=%s minimum_transfer_bytes=%zu "
-         "prefix_bytes_per_transfer=%zu total_bytes=%zu\n",
-         g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
-         g_htod_route.minimum_transfer_bytes,
-         g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
+    fprintf(stderr,
+            "[CXL-CUDA] htod_route_config mode=%s minimum_transfer_bytes=%zu "
+            "prefix_bytes_per_transfer=%zu total_bytes=%zu\n",
+            g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+            g_htod_route.minimum_transfer_bytes,
+            g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
     DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
 }
 
@@ -5750,11 +5751,12 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
         abort();
     }
     g_htod_route.staging = NULL;
-    OLOG("htod_route_summary mode=%s routed_calls=%zu routed_bytes=%zu "
-         "remaining_bytes=%zu fallback_count=%zu\n",
-         g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
-         g_htod_route.routed_calls, g_htod_route.routed_bytes,
-         g_htod_route.remaining_bytes, g_htod_route.fallback_count);
+    fprintf(stderr,
+            "[CXL-CUDA] htod_route_summary mode=%s routed_calls=%zu "
+            "routed_bytes=%zu remaining_bytes=%zu fallback_count=%zu\n",
+            g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+            g_htod_route.routed_calls, g_htod_route.routed_bytes,
+            g_htod_route.remaining_bytes, g_htod_route.fallback_count);
     if (g_bar4_ptr) {
         munmap((void *)g_bar4_ptr, g_bar4_size);
         g_bar4_ptr = NULL;
