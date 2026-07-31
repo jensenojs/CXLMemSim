@@ -416,6 +416,27 @@ static inline uint64_t maybe_bar4_offset(uint64_t value);
 static inline uint64_t bar4_offset_of(void *host_ptr);
 static bool bar4_pointer_range(const void *host_ptr, size_t size, uint64_t *offset);
 
+typedef enum CXLBar4RangeKind {
+    CXL_BAR4_RANGE_ORDINARY,
+    CXL_BAR4_RANGE_CONTAINED,
+    CXL_BAR4_RANGE_PARTIAL,
+} CXLBar4RangeKind;
+
+typedef struct CXLHtoDRoute {
+    bool enabled;
+    size_t minimum_transfer_bytes;
+    size_t prefix_bytes_per_transfer;
+    size_t total_bytes;
+    size_t remaining_bytes;
+    void *staging;
+    uint64_t staging_offset;
+} CXLHtoDRoute;
+
+static CXLHtoDRoute g_htod_route;
+static CXLBar4RangeKind bar4_range_kind(const void *host_ptr, size_t size,
+                                        uint64_t *offset);
+static CUresult htod_route_allocate_locked(void);
+
 /* The CUDA shim and cxl-gpu-case share the transport implementation.  These
  * wrappers preserve the existing call sites while keeping BAR2 ownership in
  * cxl_gpu_transport.c. */
@@ -2569,18 +2590,62 @@ CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byte
 
 CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t byteCount, CUstream hStream) {
     uint64_t stream_wire;
+    CXLBar4RangeKind source_kind;
 
     OLOG("cuMemcpyHtoDAsync(dst=0x%lx, size=%zu, stream=%p)\n", (unsigned long)dstDevice, byteCount, hStream);
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
-    if (!srcHost)
+    if (!srcHost || !byteCount)
         return CUDA_ERROR_INVALID_VALUE;
     if (!cxl_gpu_stream_wire(hStream, &stream_wire))
         return CUDA_ERROR_INVALID_HANDLE;
 
+    source_kind = bar4_range_kind(srcHost, byteCount, NULL);
+    if (source_kind == CXL_BAR4_RANGE_PARTIAL)
+        return CUDA_ERROR_INVALID_VALUE;
+
     async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, hStream,
                            "async-enqueue");
     size_t offset = 0;
+    if (g_htod_route.enabled && source_kind == CXL_BAR4_RANGE_ORDINARY &&
+        byteCount >= g_htod_route.minimum_transfer_bytes) {
+        size_t routed;
+        CUresult result;
+
+        cmd_lock();
+        routed = g_htod_route.remaining_bytes;
+        if (routed > g_htod_route.prefix_bytes_per_transfer)
+            routed = g_htod_route.prefix_bytes_per_transfer;
+        if (routed > byteCount)
+            routed = byteCount;
+        if (routed) {
+            result = htod_route_allocate_locked();
+            if (result == CUDA_SUCCESS) {
+                memcpy(g_htod_route.staging, srcHost, routed);
+                __sync_synchronize();
+                reg_write64(CXL_GPU_REG_PARAM0, g_htod_route.staging_offset);
+                reg_write64(CXL_GPU_REG_PARAM1, dstDevice);
+                reg_write64(CXL_GPU_REG_PARAM2, routed);
+                reg_write64(CXL_GPU_REG_PARAM3, stream_wire);
+                result = execute_cmd(CXL_GPU_CMD_BULK_HTOD_ASYNC);
+            }
+            if (result != CUDA_SUCCESS) {
+                cmd_unlock();
+                return async_copy_trace_end(result);
+            }
+            g_htod_route.remaining_bytes -= routed;
+            DLOG("copy_transport event=data-write transport=cxlmem-bar4 "
+                 "api=%s public_sequence=%" PRIu64 " offset=0 bytes=%zu "
+                 "bar4_offset=%" PRIu64 " stream_wire=%" PRIu64
+                 " cumulative_routed_bytes=%zu budget_bytes=%zu\n",
+                 g_async_copy_trace.api, g_async_copy_trace.public_sequence,
+                 routed, g_htod_route.staging_offset, stream_wire,
+                 g_htod_route.total_bytes - g_htod_route.remaining_bytes,
+                 g_htod_route.total_bytes);
+            offset = routed;
+        }
+        cmd_unlock();
+    }
     while (offset < byteCount) {
         size_t chunk = byteCount - offset;
         if (chunk > CXL_GPU_DATA_SIZE)
@@ -5360,6 +5425,104 @@ static bool bar4_pointer_range(const void *host_ptr, size_t size, uint64_t *offs
     return true;
 }
 
+static CXLBar4RangeKind bar4_range_kind(const void *host_ptr, size_t size,
+                                        uint64_t *offset) {
+    uintptr_t ptr = (uintptr_t)host_ptr;
+    uintptr_t base = (uintptr_t)g_bar4_ptr;
+    uintptr_t end;
+    uintptr_t bar4_end;
+
+    if (!host_ptr || !size || !g_bar4_ptr)
+        return CXL_BAR4_RANGE_ORDINARY;
+    if (size - 1 > UINTPTR_MAX - ptr || g_bar4_size - 1 > UINTPTR_MAX - base)
+        return CXL_BAR4_RANGE_PARTIAL;
+    end = ptr + size - 1;
+    bar4_end = base + g_bar4_size - 1;
+    if (ptr >= base && end <= bar4_end) {
+        if (offset)
+            *offset = (uint64_t)(ptr - base);
+        return CXL_BAR4_RANGE_CONTAINED;
+    }
+    if (ptr <= bar4_end && end >= base)
+        return CXL_BAR4_RANGE_PARTIAL;
+    return CXL_BAR4_RANGE_ORDINARY;
+}
+
+static bool parse_positive_size(const char *name, const char *value,
+                                size_t *result) {
+    char *end = NULL;
+    uintmax_t parsed;
+
+    if (!value || !value[0] || value[0] == '-' || value[0] == '+')
+        return false;
+    errno = 0;
+    parsed = strtoumax(value, &end, 10);
+    if (errno || !end || *end || !parsed || parsed > SIZE_MAX) {
+        fprintf(stderr, "[CXL-CUDA] invalid %s: %s\n", name,
+                value ? value : "<unset>");
+        return false;
+    }
+    *result = (size_t)parsed;
+    return true;
+}
+
+static void htod_route_parse(void) {
+    const char *mode = getenv("CXL_CUDA_HTOD_ROUTE_MODE");
+    const char *minimum = getenv("CXL_CUDA_HTOD_ROUTE_MIN_BYTES");
+    const char *prefix = getenv("CXL_CUDA_HTOD_ROUTE_PREFIX_BYTES");
+    const char *total = getenv("CXL_CUDA_HTOD_ROUTE_TOTAL_BYTES");
+
+    if (!mode || strcmp(mode, "disabled") == 0) {
+        if (minimum || prefix || total) {
+            fprintf(stderr, "[CXL-CUDA] disabled HtoD route has numeric fields\n");
+            abort();
+        }
+        return;
+    }
+    if (strcmp(mode, "cxlmem-bounded-prefix") != 0 ||
+        !parse_positive_size("CXL_CUDA_HTOD_ROUTE_MIN_BYTES", minimum,
+                             &g_htod_route.minimum_transfer_bytes) ||
+        !parse_positive_size("CXL_CUDA_HTOD_ROUTE_PREFIX_BYTES", prefix,
+                             &g_htod_route.prefix_bytes_per_transfer) ||
+        !parse_positive_size("CXL_CUDA_HTOD_ROUTE_TOTAL_BYTES", total,
+                             &g_htod_route.total_bytes) ||
+        g_htod_route.prefix_bytes_per_transfer > CXL_GPU_BULK_TRANSFER_SIZE ||
+        g_htod_route.minimum_transfer_bytes <
+            g_htod_route.prefix_bytes_per_transfer) {
+        fprintf(stderr, "[CXL-CUDA] invalid bounded HtoD route contract\n");
+        abort();
+    }
+    g_htod_route.enabled = true;
+    g_htod_route.remaining_bytes = g_htod_route.total_bytes;
+}
+
+/* Caller holds cmd_lock. Route staging must be acknowledged by QEMU; the
+ * allocator's local bump fallback is not valid for this transport. */
+static CUresult htod_route_allocate_locked(void) {
+    volatile uint8_t *bar4;
+    uint64_t offset;
+    CUresult result;
+
+    if (g_htod_route.staging)
+        return CUDA_SUCCESS;
+    if (!g_transport.regs)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    bar4 = ensure_bar4();
+    if (!bar4)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    reg_write64(CXL_GPU_REG_PARAM0, g_htod_route.prefix_bytes_per_transfer);
+    result = execute_cmd(CXL_GPU_CMD_COHERENT_ALLOC);
+    if (result != CUDA_SUCCESS)
+        return result;
+    offset = reg_read64(CXL_GPU_REG_RESULT0);
+    if (offset > g_bar4_size ||
+        g_htod_route.prefix_bytes_per_transfer > g_bar4_size - offset)
+        return CUDA_ERROR_INVALID_VALUE;
+    g_htod_route.staging_offset = offset;
+    g_htod_route.staging = (void *)(bar4 + offset);
+    return CUDA_SUCCESS;
+}
+
 int cxlCoherentAlloc(uint64_t size, void **host_ptr) {
     DLOG("cxlCoherentAlloc(size=%lu)\n", (unsigned long)size);
     if (!host_ptr || size == 0)
@@ -5540,6 +5703,7 @@ __attribute__((constructor)) static void libcuda_init(void) {
     const char *observation_log = getenv("CXL_CUDA_OBSERVATION_LOG");
 
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    htod_route_parse();
     if (observation_log) {
         if (observation_log[0] != '/') {
             fprintf(stderr, "[CXL-CUDA] CXL_CUDA_OBSERVATION_LOG must be an absolute path\n");
@@ -5571,6 +5735,11 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
     function_param_layouts_clear("process-exit");
     graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);
+    if (g_htod_route.staging && cxlCoherentFree(g_htod_route.staging) != 0) {
+        fprintf(stderr, "[CXL-CUDA] failed to release HtoD route staging\n");
+        abort();
+    }
+    g_htod_route.staging = NULL;
     if (g_bar4_ptr) {
         munmap((void *)g_bar4_ptr, g_bar4_size);
         g_bar4_ptr = NULL;
