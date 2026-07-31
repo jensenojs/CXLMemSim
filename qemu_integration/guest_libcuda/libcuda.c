@@ -428,6 +428,9 @@ typedef struct CXLHtoDRoute {
     size_t prefix_bytes_per_transfer;
     size_t total_bytes;
     size_t remaining_bytes;
+    size_t routed_calls;
+    size_t routed_bytes;
+    size_t fallback_count;
     void *staging;
     uint64_t staging_offset;
 } CXLHtoDRoute;
@@ -2634,6 +2637,8 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
                 return async_copy_trace_end(result);
             }
             g_htod_route.remaining_bytes -= routed;
+            g_htod_route.routed_calls++;
+            g_htod_route.routed_bytes += routed;
             DLOG("copy_transport event=data-write transport=cxlmem-bar4 "
                  "api=%s public_sequence=%" PRIu64 " offset=0 bytes=%zu "
                  "bar4_offset=%" PRIu64 " stream_wire=%" PRIu64
@@ -5703,7 +5708,6 @@ __attribute__((constructor)) static void libcuda_init(void) {
     const char *observation_log = getenv("CXL_CUDA_OBSERVATION_LOG");
 
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
-    htod_route_parse();
     if (observation_log) {
         if (observation_log[0] != '/') {
             fprintf(stderr, "[CXL-CUDA] CXL_CUDA_OBSERVATION_LOG must be an absolute path\n");
@@ -5725,6 +5729,12 @@ __attribute__((constructor)) static void libcuda_init(void) {
             abort();
         }
     }
+    htod_route_parse();
+    OLOG("htod_route_config mode=%s minimum_transfer_bytes=%zu "
+         "prefix_bytes_per_transfer=%zu total_bytes=%zu\n",
+         g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+         g_htod_route.minimum_transfer_bytes,
+         g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
     DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
 }
 
@@ -5740,6 +5750,11 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
         abort();
     }
     g_htod_route.staging = NULL;
+    OLOG("htod_route_summary mode=%s routed_calls=%zu routed_bytes=%zu "
+         "remaining_bytes=%zu fallback_count=%zu\n",
+         g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+         g_htod_route.routed_calls, g_htod_route.routed_bytes,
+         g_htod_route.remaining_bytes, g_htod_route.fallback_count);
     if (g_bar4_ptr) {
         munmap((void *)g_bar4_ptr, g_bar4_size);
         g_bar4_ptr = NULL;
