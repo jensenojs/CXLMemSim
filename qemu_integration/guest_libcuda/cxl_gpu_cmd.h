@@ -40,7 +40,8 @@
 
 /* RAM-backed command descriptor. CXL_GPU_REG_CMD is retained only as the
  * fixed-value, 32-bit doorbell for this descriptor. */
-#define CXL_GPU_DESCRIPTOR_OFFSET 0x0400
+#define CXL_GPU_DESCRIPTOR_OFFSET 0x801000
+#define CXL_GPU_DESCRIPTOR_REGION_SIZE 0x1000
 #define CXL_GPU_DESCRIPTOR_WIRE_SIZE 0x0100
 #define CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION 1U
 #define CXL_GPU_DESCRIPTOR_DOORBELL_OFFSET CXL_GPU_REG_CMD
@@ -102,7 +103,14 @@ _Static_assert(offsetof(CXLGPURAMCommandDescriptor, device_generation) == 0xb8,
  * this window independent from the decoded CUBIN size. */
 #define CXL_GPU_DATA_OFFSET 0x1000   /* Data buffer offset */
 #define CXL_GPU_DATA_SIZE 0x800000   /* Data buffer size (8 MiB) */
-#define CXL_GPU_CMD_REG_SIZE 0x801000 /* 8 MiB payload + 4 KiB registers */
+#define CXL_GPU_CMD_REG_SIZE 0x802000 /* registers + 8 MiB payload + descriptor page */
+
+_Static_assert(CXL_GPU_DESCRIPTOR_OFFSET % CXL_GPU_DESCRIPTOR_REGION_SIZE == 0,
+               "CXL GPU descriptor region must be page aligned");
+_Static_assert(CXL_GPU_DESCRIPTOR_WIRE_SIZE <= CXL_GPU_DESCRIPTOR_REGION_SIZE,
+               "CXL GPU descriptor wire does not fit in its RAM region");
+_Static_assert(CXL_GPU_DESCRIPTOR_OFFSET >= CXL_GPU_DATA_OFFSET + CXL_GPU_DATA_SIZE,
+               "CXL GPU descriptor region overlaps the payload window");
 
 /* Module payload encoding in CXL_GPU_REG_PARAM1. */
 #define CXL_GPU_MODULE_DATA_ZSTD (1U << 0)
@@ -123,7 +131,7 @@ _Static_assert(offsetof(CXLGPURAMCommandDescriptor, device_generation) == 0xb8,
 
 /* Magic number */
 #define CXL_GPU_MAGIC 0x43584C32 /* "CXL2" */
-#define CXL_GPU_VERSION 0x00010C00 /* v1.12.0: RAM command descriptor */
+#define CXL_GPU_VERSION 0x00010D00 /* v1.13.0: page-aligned RAM command descriptor */
 
 #define CXL_GPU_STREAM_WIRE_NULL 0xffffffffffffffffULL
 #define CXL_GPU_STREAM_WIRE_LEGACY 0xfffffffffffffffeULL
