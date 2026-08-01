@@ -145,18 +145,8 @@ CUresult cuLaunchKernel(CUfunction function, unsigned int gridDimX, unsigned int
                         void **kernelParams, void **extra);
 CUresult cuModuleUnload(void *module);
 CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
-typedef enum {
-    CUDA_GRAPH_INSTANTIATE_SUCCESS = 0,
-    CUDA_GRAPH_INSTANTIATE_ERROR = 1,
-} CUgraphInstantiateResult;
-typedef struct {
-    uint64_t flags;
-    CUstream hUploadStream;
-    CUgraphNode hErrNode_out;
-    CUgraphInstantiateResult result_out;
-} CUDA_GRAPH_INSTANTIATE_PARAMS;
-CUresult cuGraphInstantiateWithParams(CUgraphExec *phGraphExec, CUgraph hGraph,
-                                      CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams);
+CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -296,7 +286,7 @@ static CUresult fake_execute(uint32_t command) {
     case CXL_GPU_CMD_GRAPH_INSTANTIATE:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 6);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 0);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 1);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 0);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM3) == 0);
         cxl_cuda_test_write_result(0, 7);
         cxl_cuda_test_write_result(1, UINT64_MAX);
@@ -997,11 +987,8 @@ static int test_launch_reuses_param_layout_until_module_unload(void) {
     return 0;
 }
 
-static int test_graph_instantiate_with_params_reuses_existing_command(void) {
+static int test_graph_instantiate_with_flags_reuses_existing_command(void) {
     CUgraphExec graph_exec = NULL;
-    CUDA_GRAPH_INSTANTIATE_PARAMS params = {
-        .hUploadStream = (CUstream)(uintptr_t)2,
-    };
     CUdriverProcAddressQueryResult symbol_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
     void *resolved = NULL;
 
@@ -1010,23 +997,14 @@ static int test_graph_instantiate_with_params_reuses_existing_command(void) {
     cxl_cuda_test_set_initialized(1);
     command_count = 0;
 
-    CHECK(cuGetProcAddress("cuGraphInstantiateWithParams", &resolved, 12000, 0,
+    CHECK(cuGetProcAddress("cuGraphInstantiateWithFlags", &resolved, 11040, 0,
                            &symbol_status) == CUDA_SUCCESS);
-    CHECK(resolved == (void *)cuGraphInstantiateWithParams);
+    CHECK(resolved == (void *)cuGraphInstantiateWithFlags);
     CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
-    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
-                                       &params) == CUDA_SUCCESS);
+    CHECK(cuGraphInstantiateWithFlags(&graph_exec, (CUgraph)(uintptr_t)7, 0) == CUDA_SUCCESS);
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_GRAPH_INSTANTIATE);
     CHECK(graph_exec == (CUgraphExec)(uintptr_t)8);
-    CHECK(params.hErrNode_out == NULL);
-    CHECK(params.result_out == CUDA_GRAPH_INSTANTIATE_SUCCESS);
-
-    params.flags = 1;
-    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
-                                       &params) == CUDA_ERROR_NOT_SUPPORTED);
-    CHECK(command_count == 1);
-    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
-                                       NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(cuGraphInstantiateWithFlags(&graph_exec, (CUgraph)(uintptr_t)7, 1) == CUDA_ERROR_NOT_SUPPORTED);
     CHECK(command_count == 1);
     return 0;
 }
@@ -1043,5 +1021,5 @@ int main(void) {
            test_direct_elf_library_kernel_function_lifecycle() ||
            test_driver_version_mapping_is_reused_by_init() ||
            test_launch_reuses_param_layout_until_module_unload() ||
-           test_graph_instantiate_with_params_reuses_existing_command();
+           test_graph_instantiate_with_flags_reuses_existing_command();
 }

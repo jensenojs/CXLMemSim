@@ -57,14 +57,6 @@ typedef void *CUgraphNode;
 typedef void *CUgraphExec;
 typedef void *CUlinkState;
 typedef int CUgraphNodeType;
-typedef enum {
-    CUDA_GRAPH_INSTANTIATE_SUCCESS = 0,
-    CUDA_GRAPH_INSTANTIATE_ERROR = 1,
-    CUDA_GRAPH_INSTANTIATE_INVALID_STRUCTURE = 2,
-    CUDA_GRAPH_INSTANTIATE_NODE_OPERATION_NOT_SUPPORTED = 3,
-    CUDA_GRAPH_INSTANTIATE_MULTIPLE_CTXS_NOT_SUPPORTED = 4,
-    CUDA_GRAPH_INSTANTIATE_CONDITIONAL_HANDLE_UNUSED = 5,
-} CUgraphInstantiateResult;
 typedef void *CUlibrary;
 typedef void *CUkernel;
 typedef int CUjit_option;
@@ -128,13 +120,6 @@ typedef struct {
     CUkernel kern;
     CUcontext ctx;
 } CUDA_KERNEL_NODE_PARAMS;
-
-typedef struct {
-    cuuint64_t flags;
-    CUstream hUploadStream;
-    CUgraphNode hErrNode_out;
-    CUgraphInstantiateResult result_out;
-} CUDA_GRAPH_INSTANTIATE_PARAMS;
 
 typedef union {
     int operation;
@@ -1243,27 +1228,11 @@ CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
                               bufferSize);
 }
 
-CUresult cuGraphInstantiateWithParams(
-    CUgraphExec *phGraphExec, CUgraph hGraph,
-    CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams) {
-    if (!instantiateParams)
-        return CUDA_ERROR_INVALID_VALUE;
-    OLOG("cuGraphInstantiateWithParams(graph=%p flags=0x%llx upload_stream=%p "
-         "error_node_out=%p result_out=%d)\n",
-         hGraph, (unsigned long long)instantiateParams->flags,
-         instantiateParams->hUploadStream, instantiateParams->hErrNode_out,
-         instantiateParams->result_out);
-    if (instantiateParams->flags != 0)
+CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags) {
+    if (flags != 0)
         return CUDA_ERROR_NOT_SUPPORTED;
-
-    CUgraphNode error_node = NULL;
-    CUresult result = cuGraphInstantiate(phGraphExec, hGraph, &error_node,
-                                         NULL, 0);
-    instantiateParams->hErrNode_out = error_node;
-    instantiateParams->result_out = result == CUDA_SUCCESS
-                                        ? CUDA_GRAPH_INSTANTIATE_SUCCESS
-                                        : CUDA_GRAPH_INSTANTIATE_ERROR;
-    return result;
+    return cuGraphInstantiate(phGraphExec, hGraph, NULL, NULL, 0);
 }
 
 CUresult cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes, size_t *numNodes) {
