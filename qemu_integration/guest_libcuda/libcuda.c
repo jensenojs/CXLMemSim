@@ -1248,6 +1248,11 @@ CUresult cuGraphInstantiateWithParams(
     CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams) {
     if (!instantiateParams)
         return CUDA_ERROR_INVALID_VALUE;
+    DLOG("cuGraphInstantiateWithParams(graph=%p flags=0x%llx upload_stream=%p "
+         "error_node_out=%p result_out=%d)\n",
+         hGraph, (unsigned long long)instantiateParams->flags,
+         instantiateParams->hUploadStream, instantiateParams->hErrNode_out,
+         instantiateParams->result_out);
     if (instantiateParams->flags != 0)
         return CUDA_ERROR_NOT_SUPPORTED;
 
