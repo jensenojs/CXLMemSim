@@ -12,6 +12,9 @@ typedef void *CUcontext;
 typedef void *CUfunction;
 typedef void *CUstream;
 typedef void *CUarray;
+typedef void *CUgraph;
+typedef void *CUgraphNode;
+typedef void *CUgraphExec;
 typedef void *CUlibrary;
 typedef void *CUkernel;
 typedef int CUdriverProcAddressQueryResult;
@@ -76,6 +79,9 @@ typedef struct {
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
 
+#define CU_GET_PROC_ADDRESS_SUCCESS 0
+#define CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND 1
+
 #define CU_MEMORYTYPE_DEVICE 0x02
 #define CU_LIBRARY_BINARY_IS_PRESERVED 1
 #define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES 8
@@ -139,6 +145,18 @@ CUresult cuLaunchKernel(CUfunction function, unsigned int gridDimX, unsigned int
                         void **kernelParams, void **extra);
 CUresult cuModuleUnload(void *module);
 CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
+typedef enum {
+    CUDA_GRAPH_INSTANTIATE_SUCCESS = 0,
+    CUDA_GRAPH_INSTANTIATE_ERROR = 1,
+} CUgraphInstantiateResult;
+typedef struct {
+    uint64_t flags;
+    CUstream hUploadStream;
+    CUgraphNode hErrNode_out;
+    CUgraphInstantiateResult result_out;
+} CUDA_GRAPH_INSTANTIATE_PARAMS;
+CUresult cuGraphInstantiateWithParams(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                      CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -274,6 +292,14 @@ static CUresult fake_execute(uint32_t command) {
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MODULE_UNLOAD:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == issued_token);
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_GRAPH_INSTANTIATE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 6);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 0);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 1);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM3) == 0);
+        cxl_cuda_test_write_result(0, 7);
+        cxl_cuda_test_write_result(1, UINT64_MAX);
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MEM_COPY_2D_DTOD:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_dst_rows[0]);
@@ -971,6 +997,43 @@ static int test_launch_reuses_param_layout_until_module_unload(void) {
     return 0;
 }
 
+static int test_graph_instantiate_with_params_reuses_existing_command(void) {
+    CUgraphExec graph_exec = NULL;
+    CUDA_GRAPH_INSTANTIATE_PARAMS params = {0};
+    CUdriverProcAddressQueryResult symbol_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    void *resolved = NULL;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_initialized(1);
+    command_count = 0;
+
+    CHECK(cuGetProcAddress("cuGraphInstantiateWithParams", &resolved, 12000, 0,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuGraphInstantiateWithParams);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
+                                       &params) == CUDA_SUCCESS);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_GRAPH_INSTANTIATE);
+    CHECK(graph_exec == (CUgraphExec)(uintptr_t)8);
+    CHECK(params.hErrNode_out == NULL);
+    CHECK(params.result_out == CUDA_GRAPH_INSTANTIATE_SUCCESS);
+
+    params.flags = 1;
+    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
+                                       &params) == CUDA_ERROR_NOT_SUPPORTED);
+    CHECK(command_count == 1);
+    params.flags = 0;
+    params.hUploadStream = (CUstream)(uintptr_t)1;
+    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
+                                       &params) == CUDA_ERROR_NOT_SUPPORTED);
+    CHECK(command_count == 1);
+    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
+                                       NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 1);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -982,5 +1045,6 @@ int main(void) {
            test_library_registration_exceeds_the_previous_fixed_capacity() ||
            test_direct_elf_library_kernel_function_lifecycle() ||
            test_driver_version_mapping_is_reused_by_init() ||
-           test_launch_reuses_param_layout_until_module_unload();
+           test_launch_reuses_param_layout_until_module_unload() ||
+           test_graph_instantiate_with_params_reuses_existing_command();
 }
