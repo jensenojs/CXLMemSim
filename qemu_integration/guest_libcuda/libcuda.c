@@ -57,6 +57,7 @@ typedef void *CUgraphNode;
 typedef void *CUgraphExec;
 typedef void *CUlinkState;
 typedef int CUgraphNodeType;
+typedef int CUgraphExecUpdateResult;
 typedef void *CUlibrary;
 typedef void *CUkernel;
 typedef int CUjit_option;
@@ -120,6 +121,12 @@ typedef struct {
     CUkernel kern;
     CUcontext ctx;
 } CUDA_KERNEL_NODE_PARAMS;
+
+typedef struct {
+    CUgraphExecUpdateResult result;
+    CUgraphNode errorNode;
+    CUgraphNode errorFromNode;
+} CUgraphExecUpdateResultInfo;
 
 typedef union {
     int operation;
@@ -1233,6 +1240,31 @@ CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
     if (flags != 0)
         return CUDA_ERROR_NOT_SUPPORTED;
     return cuGraphInstantiate(phGraphExec, hGraph, NULL, NULL, 0);
+}
+
+CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+                           CUgraphExecUpdateResultInfo *resultInfo) {
+    uint64_t graph_exec_id, graph_id;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!resultInfo || !cxl_gpu_handle_id(hGraphExec, &graph_exec_id) ||
+        !cxl_gpu_handle_id(hGraph, &graph_id))
+        return CUDA_ERROR_INVALID_VALUE;
+
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, graph_exec_id);
+    reg_write64(CXL_GPU_REG_PARAM1, graph_id);
+    CUresult result = execute_cmd(CXL_GPU_CMD_GRAPH_EXEC_UPDATE);
+    resultInfo->result = (CUgraphExecUpdateResult)(int32_t)reg_read64(CXL_GPU_REG_RESULT0);
+    uint64_t error_node_id = reg_read64(CXL_GPU_REG_RESULT1);
+    uint64_t error_from_node_id = reg_read64(CXL_GPU_REG_RESULT2);
+    resultInfo->errorNode = error_node_id == UINT64_MAX ? NULL :
+                            (CUgraphNode)cxl_gpu_handle_from_id(error_node_id);
+    resultInfo->errorFromNode = error_from_node_id == UINT64_MAX ? NULL :
+                                (CUgraphNode)cxl_gpu_handle_from_id(error_from_node_id);
+    cmd_unlock();
+    return result;
 }
 
 CUresult cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes, size_t *numNodes) {

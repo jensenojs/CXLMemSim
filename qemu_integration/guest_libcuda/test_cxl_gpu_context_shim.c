@@ -147,6 +147,13 @@ CUresult cuModuleUnload(void *module);
 CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
 CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
                                      unsigned long long flags);
+typedef struct {
+    int result;
+    CUgraphNode errorNode;
+    CUgraphNode errorFromNode;
+} CUgraphExecUpdateResultInfo;
+CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+                           CUgraphExecUpdateResultInfo *resultInfo);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -291,6 +298,13 @@ static CUresult fake_execute(uint32_t command) {
         cxl_cuda_test_write_result(0, 7);
         cxl_cuda_test_write_result(1, UINT64_MAX);
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_GRAPH_EXEC_UPDATE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 7);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 6);
+        cxl_cuda_test_write_result(0, 2);
+        cxl_cuda_test_write_result(1, 9);
+        cxl_cuda_test_write_result(2, 10);
+        return 910;
     case CXL_GPU_CMD_MEM_COPY_2D_DTOD:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == memcpy2d_dst_rows[0]);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == memcpy2d_src_rows[0]);
@@ -1009,6 +1023,32 @@ static int test_graph_instantiate_with_flags_reuses_existing_command(void) {
     return 0;
 }
 
+static int test_graph_exec_update_preserves_result_info(void) {
+    CUgraphExecUpdateResultInfo info = {0};
+    CUdriverProcAddressQueryResult symbol_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    void *resolved = NULL;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_initialized(1);
+    command_count = 0;
+
+    CHECK(cuGetProcAddress("cuGraphExecUpdate", &resolved, 12000, 0,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuGraphExecUpdate);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+    CHECK(cuGraphExecUpdate((CUgraphExec)(uintptr_t)8,
+                            (CUgraph)(uintptr_t)7, &info) == 910);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_GRAPH_EXEC_UPDATE);
+    CHECK(info.result == 2);
+    CHECK(info.errorNode == (CUgraphNode)(uintptr_t)10);
+    CHECK(info.errorFromNode == (CUgraphNode)(uintptr_t)11);
+    CHECK(cuGraphExecUpdate((CUgraphExec)(uintptr_t)8,
+                            (CUgraph)(uintptr_t)7, NULL) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 1);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -1021,5 +1061,6 @@ int main(void) {
            test_direct_elf_library_kernel_function_lifecycle() ||
            test_driver_version_mapping_is_reused_by_init() ||
            test_launch_reuses_param_layout_until_module_unload() ||
-           test_graph_instantiate_with_flags_reuses_existing_command();
+           test_graph_instantiate_with_flags_reuses_existing_command() ||
+           test_graph_exec_update_preserves_result_info();
 }

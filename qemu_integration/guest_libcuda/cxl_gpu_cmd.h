@@ -131,7 +131,7 @@ _Static_assert(CXL_GPU_DESCRIPTOR_OFFSET >= CXL_GPU_DATA_OFFSET + CXL_GPU_DATA_S
 
 /* Magic number */
 #define CXL_GPU_MAGIC 0x43584C32 /* "CXL2" */
-#define CXL_GPU_VERSION 0x00010D00 /* v1.13.0: page-aligned RAM command descriptor */
+#define CXL_GPU_VERSION 0x00010E00 /* v1.14.0: CUDA 12 graph executable update */
 
 #define CXL_GPU_STREAM_WIRE_NULL 0xffffffffffffffffULL
 #define CXL_GPU_STREAM_WIRE_LEGACY 0xfffffffffffffffeULL
@@ -216,6 +216,7 @@ typedef enum {
     CXL_GPU_CMD_LINK_DESTROY = 0x45,
     CXL_GPU_CMD_FUNC_GET_ATTRIBUTE = 0x46,
     CXL_GPU_CMD_FUNC_GET_PARAM_LAYOUT = 0x47,
+    CXL_GPU_CMD_GRAPH_EXEC_UPDATE = 0x48,
 
     CXL_GPU_CMD_STREAM_CREATE = 0x50,
     CXL_GPU_CMD_STREAM_DESTROY = 0x51,
