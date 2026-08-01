@@ -23,6 +23,7 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | --- | --- | --- | --- |
 | `verify_source_checkout.sh` | expected source SHA 与当前 Git checkout | exit status | 当前 checkout 是否可作为声明的构建输入 |
 | `build_component.sh --work-dir ABSENT --cache-dir EXISTING --payload-dir ABSENT` | clean source、build profile与显式cache | 指定payload与work内构建证据 | 本仓声明的server、shim、loader audit、case CLI是否可由精确源码构建 |
+| `run_local_component.sh --profile PROFILE --execution-root ABSENT --cache-root EXISTING` | artifact contract声明的profile、clean source与cache | 既有payload、manifest和deterministic archive | 通用local workspace能否在exact image中完成本组件build与package |
 
 组件构建通过必填`--cache-dir`消费独立编译缓存。work与payload在调用前必须不存在，脚本只创建自己声明的路径，不删除已有目录。tracked或untracked dirty状态在创建输出前失败。CMake目标和guest shim的C/C++编译都经过`ccache`，并在evidence中保存构建前后统计；cache不进入source、profile或artifact identity。
 | `component_artifact.py` | payload、profile、contract、显式 archive/manifest | manifest、确定性 archive 校验结果 | payload 文件图和归档是否完整、无路径逃逸并可验证 |

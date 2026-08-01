@@ -4,6 +4,12 @@
   "source_repository": "https://cnb.cool/gevico.online/jensen/cxlmemsim.git",
   "artifact_repository": "docker.cnb.cool/gevico.online/jensen/cxlmemsim",
   "toolchain_image": "docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:ec2050e6c8038093977867503255638c37fdeffb6e4dfbf24cbd95114a3676d0",
+  "development_execution": {
+    "entrypoint": "scripts/run_local_component.sh",
+    "profile": "manifests/build-profile.json",
+    "inputs": [],
+    "output_manifest": "component/outputs/manifest.json"
+  },
   "oras_image": "ghcr.io/oras-project/oras@sha256:a4c54befd87d0366e0ba3ac3a9536a5288c8a3735acd3b635cdace59a2c559c8",
   "artifact_type": "application/vnd.gevico.cxl.component.v1",
   "archive_media_type": "application/vnd.gevico.cxl.component.layer.v1.tar+zstd",
