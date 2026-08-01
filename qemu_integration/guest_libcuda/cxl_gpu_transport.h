@@ -12,14 +12,16 @@
 typedef struct {
     volatile uint32_t *regs;
     volatile uint8_t *data;
+    volatile CXLGPURAMCommandDescriptor *descriptor;
     int pci_fd;
     size_t bar_size;
     char pci_bdf[64];
     int debug;
+    int unusable;
 } CxlGpuTransport;
 
 #define CXL_GPU_TRANSPORT_INITIALIZER                                                                                  \
-    {.regs = NULL, .data = NULL, .pci_fd = -1, .bar_size = 0, .pci_bdf = "", .debug = 0}
+    {.regs = NULL, .data = NULL, .descriptor = NULL, .pci_fd = -1, .bar_size = 0, .pci_bdf = "", .debug = 0, .unusable = 0}
 
 int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug);
 void cxl_gpu_transport_close(CxlGpuTransport *transport);

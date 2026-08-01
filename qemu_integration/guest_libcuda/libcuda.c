@@ -846,6 +846,9 @@ void cxl_cuda_test_reset(void) {
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
     g_transport.data = (volatile uint8_t *)g_test_bar2 + CXL_GPU_DATA_OFFSET;
+    g_transport.descriptor = (volatile CXLGPURAMCommandDescriptor *)
+        ((volatile uint8_t *)g_test_bar2 + CXL_GPU_DESCRIPTOR_OFFSET);
+    g_transport.descriptor->device_generation = 1;
     g_transport.bar_size = sizeof(g_test_bar2);
     g_initialized = 1;
     g_test_execute_cmd = NULL;

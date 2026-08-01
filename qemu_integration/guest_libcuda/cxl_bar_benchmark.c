@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "cxl_gpu_cmd.h"
+#include "cxl_gpu_transport.h"
 
 /*  Device Discovery  */
 
@@ -206,30 +207,38 @@ static double time_ns(void) {
     return ts.tv_sec * 1e9 + ts.tv_nsec;
 }
 
-static inline uint64_t read_reg64(cxl_dev_t *d, size_t off) { return *(volatile uint64_t *)(d->bar2 + off); }
+static CxlGpuTransport transport_for_device(cxl_dev_t *d) {
+    CxlGpuTransport transport = CXL_GPU_TRANSPORT_INITIALIZER;
+    transport.regs = (volatile uint32_t *)d->bar2;
+    transport.data = d->bar2 + CXL_GPU_DATA_OFFSET;
+    transport.descriptor = (volatile CXLGPURAMCommandDescriptor *)
+        (d->bar2 + CXL_GPU_DESCRIPTOR_OFFSET);
+    transport.pci_fd = d->bar2_fd;
+    transport.bar_size = d->bar2_size;
+    return transport;
+}
 
-static inline void write_reg64(cxl_dev_t *d, size_t off, uint64_t val) { *(volatile uint64_t *)(d->bar2 + off) = val; }
+static inline uint64_t read_reg64(cxl_dev_t *d, size_t off) {
+    CxlGpuTransport transport = transport_for_device(d);
+    return cxl_gpu_transport_read64(&transport, off);
+}
+
+static inline void write_reg64(cxl_dev_t *d, size_t off, uint64_t val) {
+    CxlGpuTransport transport = transport_for_device(d);
+    cxl_gpu_transport_write64(&transport, off, val);
+}
 
 static int issue_command(cxl_dev_t *d, uint32_t cmd) {
-    volatile uint32_t *cmd_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD);
-    volatile uint32_t *status_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD_STATUS);
-    volatile uint32_t *result_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD_RESULT);
-
-    *cmd_reg = cmd;
-    __sync_synchronize();
-
-    for (int timeout = 100000; timeout > 0; timeout--) {
-        uint32_t st = *status_reg;
-
-        if (st == CXL_GPU_CMD_STATUS_COMPLETE) {
-            return (int)*result_reg;
-        }
-        if (st == CXL_GPU_CMD_STATUS_ERROR) {
-            return -(int)*result_reg;
-        }
-    }
-
-    return -ETIMEDOUT;
+    CxlGpuTransport transport = transport_for_device(d);
+    if (cxl_gpu_transport_lock(&transport) != 0)
+        return -errno;
+    uint32_t result = cxl_gpu_transport_execute(&transport, cmd, NULL);
+    int saved_errno = errno;
+    int unlock_result = cxl_gpu_transport_unlock(&transport);
+    errno = saved_errno;
+    if (unlock_result != 0)
+        return -errno;
+    return (int)result;
 }
 
 static void measure_command_latency(cxl_dev_t *d, uint32_t cmd, const char *name, int iters) {
@@ -423,22 +432,12 @@ static void bench_bar4_bulk_bw(cxl_dev_t *d) {
 static void bench_cmd_latency(cxl_dev_t *d) {
     printf("\n--- Command Dispatch Latency (device %s) ---\n", d->bdf);
 
-    volatile uint32_t *cmd_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD);
-    volatile uint32_t *status_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD_STATUS);
-    volatile uint32_t *result_reg = (volatile uint32_t *)(d->bar2 + CXL_GPU_REG_CMD_RESULT);
-
     /* NOP command latency */
     const int ITERS = 10000;
     double t0 = time_ns();
     for (int i = 0; i < ITERS; i++) {
-        *cmd_reg = CXL_GPU_CMD_NOP;
-        __sync_synchronize();
-        int timeout = 100000;
-        while (timeout-- > 0) {
-            uint32_t st = *status_reg;
-            if (st == CXL_GPU_CMD_STATUS_COMPLETE || st == CXL_GPU_CMD_STATUS_ERROR)
-                break;
-        }
+        if (issue_command(d, CXL_GPU_CMD_NOP) != CXL_GPU_SUCCESS)
+            break;
     }
     double t1 = time_ns();
     printf("  NOP cmd round-trip:    %7.1f ns/op  (%d ops)\n", (t1 - t0) / ITERS, ITERS);
@@ -446,19 +445,12 @@ static void bench_cmd_latency(cxl_dev_t *d) {
     /* GET_DEVICE_COUNT latency */
     t0 = time_ns();
     for (int i = 0; i < ITERS; i++) {
-        *cmd_reg = CXL_GPU_CMD_GET_DEVICE_COUNT;
-        __sync_synchronize();
-        int timeout = 100000;
-        while (timeout-- > 0) {
-            uint32_t st = *status_reg;
-            if (st == CXL_GPU_CMD_STATUS_COMPLETE || st == CXL_GPU_CMD_STATUS_ERROR)
-                break;
-        }
+        if (issue_command(d, CXL_GPU_CMD_GET_DEVICE_COUNT) != CXL_GPU_SUCCESS)
+            break;
     }
     t1 = time_ns();
     printf("  GET_DEV_COUNT cmd:     %7.1f ns/op  (%d ops)\n", (t1 - t0) / ITERS, ITERS);
 
-    (void)result_reg;
 }
 
 /*  Benchmark: CXL.cache Prefetch Command  */

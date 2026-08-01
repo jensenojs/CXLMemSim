@@ -214,16 +214,16 @@ cuda_test: cuda_test.c $(CUDA_LINK)
 cuda_advanced_test: cuda_advanced_test.c $(CUDA_LINK)
 	$(CC) $(CFLAGS) -o $@ cuda_advanced_test.c -L. -lcuda -ldl -lrt -Wl,-rpath,. $(LDFLAGS) $(LDLIBS)
 
-cxl_bar_benchmark: cxl_bar_benchmark.c cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
+cxl_bar_benchmark: cxl_bar_benchmark.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -o $@ cxl_bar_benchmark.c cxl_gpu_transport.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 $(CXL_MEM_ACTIVE_GATE): cxl_mem_active_gate.c $(CUDA_LINK)
 	$(CC) $(CFLAGS) -o $@ cxl_mem_active_gate.c -L. -lcuda -ldl -Wl,-rpath,'$$ORIGIN' $(LDFLAGS) $(LDLIBS)
 
 static: $(BAR_STATIC)
 
-$(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_cmd.h
-	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
+$(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c cxl_gpu_transport.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)
