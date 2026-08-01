@@ -710,6 +710,8 @@ typedef struct CXLAsyncCopyTrace {
     uint64_t stream_wire;
     bool stream_wire_valid;
     uint32_t command_index;
+    uint32_t last_command_index;
+    uint64_t last_call_id;
     const char *implementation;
 } CXLAsyncCopyTrace;
 
@@ -767,6 +769,8 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint32_t async_command_index = 0;
     if (g_async_copy_trace.active) {
         async_command_index = ++g_async_copy_trace.command_index;
+        g_async_copy_trace.last_command_index = async_command_index;
+        g_async_copy_trace.last_call_id = call_id;
         OLOG("async_copy event=command-entry public_sequence=%" PRIu64
              " command_index=%u call_id=0x%016" PRIx64
              " api=%s command=0x%x p0=0x%016" PRIx64 " bytes=%" PRIu64
@@ -2673,6 +2677,28 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
                 reg_write64(CXL_GPU_REG_PARAM2, routed);
                 reg_write64(CXL_GPU_REG_PARAM3, stream_wire);
                 result = execute_cmd(CXL_GPU_CMD_BULK_HTOD_ASYNC);
+                if (result == CUDA_SUCCESS) {
+                    uint64_t case_epoch = g_transport.descriptor
+                        ? __atomic_load_n(&g_transport.descriptor->active_case_epoch,
+                                          __ATOMIC_ACQUIRE)
+                        : 0;
+
+                    OLOG("weight_source event=route-mapping process_id=%ld"
+                         " case_epoch=%" PRIu64
+                         " device_bdf=%s bar_index=4 public_sequence=%" PRIu64
+                         " command_index=%u call_id=0x%016" PRIx64
+                         " original_source_start=0x%016" PRIxPTR
+                         " original_source_bytes=%zu bar4_range_start=0x%016" PRIx64
+                         " bar4_range_bytes=%zu destination_cuda_start=0x%016" PRIx64
+                         " destination_cuda_bytes=%zu guest_ns=%" PRIu64 "\n",
+                         (long)getpid(), case_epoch,
+                         g_transport.pci_bdf[0] ? g_transport.pci_bdf : "unavailable",
+                         g_async_copy_trace.public_sequence,
+                         g_async_copy_trace.last_command_index,
+                         g_async_copy_trace.last_call_id, (uintptr_t)srcHost,
+                         routed, g_htod_route.staging_offset, routed,
+                         (uint64_t)dstDevice, routed, guest_monotonic_ns());
+                }
             }
             if (result != CUDA_SUCCESS) {
                 cmd_unlock();
