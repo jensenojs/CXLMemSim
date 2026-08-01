@@ -13,7 +13,8 @@ exact CXLMemSim checkout + manifests/build-profile.json
   → cxl-lab component_candidate.py
   → official manifest
   → pull_component.sh
-  → fresh payload + local runtime/ELF checks
+  → exact toolchain image中的唯一payload verifier
+  → fresh payload + runtime/ELF checks
 ```
 
 ## 入口与输入
@@ -28,6 +29,7 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | `package_component.sh --payload-dir EXISTING --source-commit 40_HEX --work-dir ABSENT --manifest-out ABSENT --archive-out ABSENT` | verified payload、clean exact HEAD、profile与contract | 原子manifest与确定性archive | artifact bytes是否在无网络边界内生成并fresh verify |
 | `publish_component.sh --manifest EXISTING --archive EXISTING --work-dir ABSENT --candidate-out ABSENT` | 已验证manifest/archive、contract与CNB registry身份 | OCI双blob、candidate文件与CNB output | exact artifact bytes是否已被不可变digest发布 |
 | `pull_component.sh --container-runtime docker|podman --work-dir ABSENT_ABSOLUTE_PATH CANDIDATE_JSON OUTPUT_DIR` | 完整 candidate digest、artifact contract | 新的输出目录与调用者拥有的pull现场 | 已发布的 exact bytes 能否独立恢复并在exact toolchain image中通过runtime/ELF smoke |
+| `verify_component_payload.sh PAYLOAD EVIDENCE` | 一个已组装或恢复的payload | 唯一runtime、ELF、symbol、CLI与文件hash证据 | build与fresh-pull是否消费同一payload语义合同 |
 | `run_integrity_export_oracle.sh TABLE LOG_PREFIX` | L40真实Driver、当前guest shim、指定private export table | Driver identity与oracle输出 | 真实Driver和shim对该table的公开可比形状是否一致 |
 | `run_private_export_table_probe.sh [OUTPUT_DIR]` | L40真实Driver、tiny DSO、固定discovery/capture选择 | discovery/capture transcript与identity comparison | 自然到达的private table调用及slot 1输入是什么 |
 

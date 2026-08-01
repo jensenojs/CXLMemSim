@@ -120,36 +120,9 @@ fi
 runtime_args+=(
     --mount "type=bind,src=$OUTPUT,dst=/payload,readonly"
     --mount "type=bind,src=$WORK,dst=/work"
-    --workdir /payload
+    --mount "type=bind,src=$ROOT/scripts/verify_component_payload.sh,dst=/verify_component_payload.sh,readonly"
     "$TOOLCHAIN_IMAGE"
-    bash -euo pipefail -c '
-bin/cxlmemsim_server --help >/work/server-help.stdout 2>/work/server-help.stderr
-ldd bin/cxlmemsim_server >/work/server-ldd.txt
-ldd bin/cuda-integrity-export-oracle >/work/integrity-oracle-ldd.txt
-ldd guest/libcuda.so.1 >/work/shim-ldd.txt
-ldd guest/libcxl-loader-audit.so >/work/loader-audit-ldd.txt
-ldd guest/cxl-gpu-case >/work/case-control-ldd.txt
-ldd guest/cuda-runtime-dlopen-kernel-probe >/work/tiny-probe-ldd.txt
-ldd guest/libtiny_cuda.so >/work/tiny-library-ldd.txt
-readelf -d guest/libcuda.so.1 >/work/shim-readelf-dynamic.txt
-readelf -d guest/libcxl-loader-audit.so >/work/loader-audit-readelf-dynamic.txt
-for library in liblz4.so.1 libzstd.so.1; do
-    grep -F "Shared library: [$library]" /work/shim-readelf-dynamic.txt >/dev/null
-    grep -F "$library =>" /work/shim-ldd.txt >/dev/null
-done
-readelf -d guest/cuda-runtime-dlopen-kernel-probe >/work/tiny-probe-readelf-dynamic.txt
-! readelf -SW guest/cuda-runtime-dlopen-kernel-probe | grep -F .nv_fatbin >/dev/null
-! grep -F "Shared library: [libcudart.so.12]" /work/tiny-probe-readelf-dynamic.txt >/dev/null
-readelf -d guest/libtiny_cuda.so >/work/tiny-library-readelf-dynamic.txt
-grep -F "Shared library: [libcudart.so.12]" /work/tiny-library-readelf-dynamic.txt >/dev/null
-for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
-    nm -D guest/libtiny_cuda.so | grep -F " $symbol" >>/work/tiny-library-symbol.txt
-done
-guest/cxl-gpu-case --help >/work/case-control-help.txt
-bin/cuda-integrity-export-oracle --help >/work/integrity-oracle-help.txt
-[[ -L guest/libcuda.so ]]
-[[ $(readlink guest/libcuda.so) == libcuda.so.1 ]]
-'
+    bash /verify_component_payload.sh /payload /work/evidence
 )
 "$container_runtime" "${runtime_args[@]}"
 
