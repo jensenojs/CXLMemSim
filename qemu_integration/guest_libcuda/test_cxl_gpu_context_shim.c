@@ -999,7 +999,9 @@ static int test_launch_reuses_param_layout_until_module_unload(void) {
 
 static int test_graph_instantiate_with_params_reuses_existing_command(void) {
     CUgraphExec graph_exec = NULL;
-    CUDA_GRAPH_INSTANTIATE_PARAMS params = {0};
+    CUDA_GRAPH_INSTANTIATE_PARAMS params = {
+        .hUploadStream = (CUstream)(uintptr_t)2,
+    };
     CUdriverProcAddressQueryResult symbol_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
     void *resolved = NULL;
 
@@ -1020,11 +1022,6 @@ static int test_graph_instantiate_with_params_reuses_existing_command(void) {
     CHECK(params.result_out == CUDA_GRAPH_INSTANTIATE_SUCCESS);
 
     params.flags = 1;
-    CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
-                                       &params) == CUDA_ERROR_NOT_SUPPORTED);
-    CHECK(command_count == 1);
-    params.flags = 0;
-    params.hUploadStream = (CUstream)(uintptr_t)1;
     CHECK(cuGraphInstantiateWithParams(&graph_exec, (CUgraph)(uintptr_t)7,
                                        &params) == CUDA_ERROR_NOT_SUPPORTED);
     CHECK(command_count == 1);
