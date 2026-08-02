@@ -22,3 +22,4 @@ README_*
 real_*
 *.so*
 .work/
+.codex-runs/
