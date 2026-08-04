@@ -3,7 +3,7 @@
   "component": "cxlmemsim",
   "source_repository": "https://cnb.cool/gevico.online/jensen/cxlmemsim.git",
   "artifact_repository": "docker.cnb.cool/gevico.online/jensen/cxlmemsim",
-  "toolchain_image": "docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:ec2050e6c8038093977867503255638c37fdeffb6e4dfbf24cbd95114a3676d0",
+  "toolchain_image": "docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:75ce78ba92bc5b62c15437d959223b962e659e95481bb7cca4d48fbc985def53",
   "development_execution": {
     "entrypoint": "scripts/run_local_component.sh",
     "profile": "manifests/build-profile.json",
