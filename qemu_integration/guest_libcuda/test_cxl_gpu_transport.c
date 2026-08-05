@@ -63,6 +63,7 @@ int main(void) {
     transport.data = bar + CXL_GPU_DATA_OFFSET;
     transport.descriptor = (volatile CXLGPURAMCommandDescriptor *)
         (bar + CXL_GPU_DESCRIPTOR_OFFSET);
+    transport.batch_data = bar + CXL_GPU_BATCH_DATA_OFFSET;
     transport.bar_size = CXL_GPU_CMD_REG_SIZE;
     transport.descriptor->device_generation = 1;
 
@@ -78,6 +79,15 @@ int main(void) {
     cxl_gpu_transport_data_write(&transport, 3, expected, sizeof(expected));
     cxl_gpu_transport_data_read(&transport, 3, actual, sizeof(actual));
     assert(memcmp(expected, actual, sizeof(expected)) == 0);
+
+    memset(actual, 0, sizeof(actual));
+    assert(cxl_gpu_transport_batch_write(&transport, 7, expected,
+                                         sizeof(expected)) == 0);
+    assert(cxl_gpu_transport_batch_read(&transport, 7, actual,
+                                        sizeof(actual)) == 0);
+    assert(memcmp(expected, actual, sizeof(expected)) == 0);
+    assert(cxl_gpu_transport_batch_write(&transport, CXL_GPU_BATCH_DATA_SIZE,
+                                         expected, sizeof(expected)) == -1);
 
     DescriptorCompletion first = {
         .transport = &transport,

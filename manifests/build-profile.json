@@ -109,6 +109,11 @@
       "path": "guest/libcublas_create_probe.so",
       "type": "file",
       "mode": "0755"
+    },
+    {
+      "path": "guest/libbatch_copy_probe.so",
+      "type": "file",
+      "mode": "0755"
     }
   ]
 }

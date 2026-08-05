@@ -73,6 +73,8 @@ typedef enum {
 typedef uint64_t CUdeviceptr;
 typedef uint64_t cuuint64_t;
 typedef uint32_t cuuint32_t;
+typedef int CUmemLocationType;
+typedef int CUmemcpySrcAccessOrder;
 typedef int CUlimit;
 typedef int CUjitInputType;
 typedef int CUstreamCaptureStatus;
@@ -87,6 +89,25 @@ typedef enum {
 typedef struct {
     unsigned char bytes[16];
 } CUuuid;
+
+typedef struct {
+    CUmemLocationType type;
+    int id;
+} CUmemLocation;
+
+typedef struct {
+    CUmemcpySrcAccessOrder srcAccessOrder;
+    CUmemLocation srcLocHint;
+    CUmemLocation dstLocHint;
+    unsigned int flags;
+} CUmemcpyAttributes;
+
+_Static_assert(sizeof(CUmemLocation) == 8,
+               "CUDA CUmemLocation ABI size mismatch");
+_Static_assert(sizeof(CUmemcpyAttributes) == 24,
+               "CUDA CUmemcpyAttributes ABI size mismatch");
+_Static_assert(offsetof(CUmemcpyAttributes, flags) == 20,
+               "CUDA CUmemcpyAttributes flags offset mismatch");
 
 typedef struct {
     size_t srcXInBytes;
@@ -173,6 +194,7 @@ typedef struct {
 
 #define CU_LIBRARY_HOST_UNIVERSAL_FUNCTION_AND_DATA_TABLE 0
 #define CU_LIBRARY_BINARY_IS_PRESERVED 1
+#define CU_MEMCPY_SRC_ACCESS_ORDER_ANY 3
 #define CUDART_FATBINC_MAGIC 0x466243B1U
 #define CUDART_FATBINC_VERSION 0x1U
 #define CUDART_FATBIN_MAGIC 0xBA55ED50U
@@ -683,6 +705,10 @@ static inline void data_read(size_t offset, void *dst, size_t len) {
     cxl_gpu_transport_data_read(&g_transport, offset, dst, len);
 }
 
+static inline int batch_data_write(size_t offset, const void *src, size_t len) {
+    return cxl_gpu_transport_batch_write(&g_transport, offset, src, len);
+}
+
 /* Cross-process lock for command serialization.
  * Multiple processes sharing the same BAR2 MMIO registers must serialize
  * their full command sequences (write params  write cmd  poll status  read result).
@@ -707,6 +733,7 @@ typedef struct CXLAsyncCopyTrace {
     uint64_t public_sequence;
     const char *api;
     size_t total_bytes;
+    size_t range_count;
     uint64_t stream_wire;
     bool stream_wire_valid;
     uint32_t command_index;
@@ -726,7 +753,8 @@ static uint64_t guest_monotonic_ns(void) {
 }
 
 static void async_copy_trace_begin(const char *api, size_t total_bytes,
-                                   CUstream stream, const char *implementation) {
+                                   size_t range_count, CUstream stream,
+                                   const char *implementation) {
     uint64_t stream_wire = 0;
     bool stream_wire_valid = cxl_gpu_stream_wire(stream, &stream_wire);
     uint64_t public_sequence = __sync_add_and_fetch(&g_async_copy_sequence, 1);
@@ -736,23 +764,26 @@ static void async_copy_trace_begin(const char *api, size_t total_bytes,
         .public_sequence = public_sequence,
         .api = api,
         .total_bytes = total_bytes,
+        .range_count = range_count,
         .stream_wire = stream_wire,
         .stream_wire_valid = stream_wire_valid,
         .implementation = implementation,
     };
     OLOG("async_copy event=public-entry public_sequence=%" PRIu64
-         " api=%s total_bytes=%zu guest_stream=%p stream_wire=%s0x%016" PRIx64
+         " api=%s total_bytes=%zu ranges=%zu guest_stream=%p stream_wire=%s0x%016" PRIx64
          " implementation=%s stream_forwarded=%u\n",
-         public_sequence, api, total_bytes, stream,
+         public_sequence, api, total_bytes, range_count, stream,
          stream_wire_valid ? "" : "invalid:", stream_wire, implementation,
-         strcmp(implementation, "async-enqueue") == 0);
+         strcmp(implementation, "async-enqueue") == 0 ||
+             strcmp(implementation, "batch-command") == 0);
 }
 
 static CUresult async_copy_trace_end(CUresult result) {
     OLOG("async_copy event=public-return public_sequence=%" PRIu64
-         " api=%s total_bytes=%zu commands=%u result=%d implementation=%s\n",
+         " api=%s total_bytes=%zu ranges=%zu commands=%u result=%d implementation=%s\n",
          g_async_copy_trace.public_sequence, g_async_copy_trace.api,
-         g_async_copy_trace.total_bytes, g_async_copy_trace.command_index,
+         g_async_copy_trace.total_bytes, g_async_copy_trace.range_count,
+         g_async_copy_trace.command_index,
          result, g_async_copy_trace.implementation);
     memset(&g_async_copy_trace, 0, sizeof(g_async_copy_trace));
     return result;
@@ -859,6 +890,8 @@ void cxl_cuda_test_reset(void) {
     g_transport.data = (volatile uint8_t *)g_test_bar2 + CXL_GPU_DATA_OFFSET;
     g_transport.descriptor = (volatile CXLGPURAMCommandDescriptor *)
         ((volatile uint8_t *)g_test_bar2 + CXL_GPU_DESCRIPTOR_OFFSET);
+    g_transport.batch_data =
+        (volatile uint8_t *)g_test_bar2 + CXL_GPU_BATCH_DATA_OFFSET;
     g_transport.descriptor->device_generation = 1;
     g_transport.bar_size = sizeof(g_test_bar2);
     g_initialized = 1;
@@ -893,6 +926,10 @@ void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length) {
 
 void cxl_cuda_test_write_data(size_t offset, const void *src, size_t length) {
     cxl_gpu_transport_data_write(&g_transport, offset, src, length);
+}
+
+void cxl_cuda_test_read_batch_data(size_t offset, void *dst, size_t length) {
+    cxl_gpu_transport_batch_read(&g_transport, offset, dst, length);
 }
 #endif
 
@@ -2653,7 +2690,7 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
     if (source_kind == CXL_BAR4_RANGE_PARTIAL)
         return CUDA_ERROR_INVALID_VALUE;
 
-    async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, hStream,
+    async_copy_trace_begin("cuMemcpyHtoDAsync", byteCount, 1, hStream,
                            "async-enqueue");
     size_t offset = 0;
     if (g_htod_route.enabled && source_kind == CXL_BAR4_RANGE_ORDINARY &&
@@ -2750,6 +2787,170 @@ CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost, size_t by
     return cuMemcpyHtoDAsync_v2(dstDevice, srcHost, byteCount, hStream);
 }
 
+typedef struct CXLBatchHtoDPlanEntry {
+    CXLGPUBatchHtoDRange wire;
+    const void *source;
+} CXLBatchHtoDPlanEntry;
+
+CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
+                            size_t *sizes, size_t count,
+                            CUmemcpyAttributes *attrs, size_t *attrsIdxs,
+                            size_t numAttrs, size_t *failIdx,
+                            CUstream hStream) {
+    CXLBatchHtoDPlanEntry *plan = NULL;
+    uint64_t stream_wire;
+    size_t table_end;
+    size_t payload_bytes;
+    size_t source_bytes = 0;
+    uint64_t lock_wait_start_ns;
+    uint64_t lock_acquired_ns;
+    uint64_t materialize_end_ns = 0;
+    uint64_t result_fail_idx = UINT64_MAX;
+    uint64_t successfully_enqueued = 0;
+    CUresult result = CUDA_SUCCESS;
+
+    if (failIdx)
+        *failIdx = SIZE_MAX;
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!dsts || !srcs || !sizes || !attrs || !attrsIdxs || !failIdx ||
+        count == 0)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+    if (stream_wire == CXL_GPU_STREAM_WIRE_NULL ||
+        stream_wire == CXL_GPU_STREAM_WIRE_LEGACY)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (numAttrs != 1 || attrsIdxs[0] != 0 ||
+        attrs[0].srcAccessOrder != CU_MEMCPY_SRC_ACCESS_ORDER_ANY ||
+        attrs[0].flags != 0)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    if (count > UINT32_MAX ||
+        count > (SIZE_MAX - sizeof(CXLGPUBatchHtoDHeader)) /
+                    sizeof(CXLGPUBatchHtoDRange))
+        return CUDA_ERROR_NOT_SUPPORTED;
+
+    table_end = sizeof(CXLGPUBatchHtoDHeader) +
+                count * sizeof(CXLGPUBatchHtoDRange);
+    if (table_end > CXL_GPU_BATCH_DATA_SIZE ||
+        table_end > SIZE_MAX - 63)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    payload_bytes = (table_end + 63) & ~(size_t)63;
+    if (payload_bytes > CXL_GPU_BATCH_DATA_SIZE)
+        return CUDA_ERROR_NOT_SUPPORTED;
+
+    plan = calloc(count, sizeof(*plan));
+    if (!plan)
+        return CUDA_ERROR_OUT_OF_MEMORY;
+
+    for (size_t index = 0; index < count; index++) {
+        size_t size = sizes[index];
+        CUdeviceptr source = srcs[index];
+        CUdeviceptr destination = dsts[index];
+
+        if (!source || !destination || !size ||
+            source > UINTPTR_MAX ||
+            size > UINTPTR_MAX - (uintptr_t)source ||
+            size > UINT64_MAX - destination) {
+            *failIdx = index;
+            result = CUDA_ERROR_INVALID_VALUE;
+            goto out;
+        }
+        if (size > CXL_GPU_BATCH_DATA_SIZE - payload_bytes) {
+            *failIdx = index;
+            result = CUDA_ERROR_NOT_SUPPORTED;
+            goto out;
+        }
+
+        plan[index].wire = (CXLGPUBatchHtoDRange){
+            .source_offset = payload_bytes,
+            .destination = destination,
+            .size = size,
+        };
+        plan[index].source = (const void *)(uintptr_t)source;
+        payload_bytes += size;
+        source_bytes += size;
+    }
+
+    CXLGPUBatchHtoDHeader header = {
+        .header_size = sizeof(header),
+        .range_count = (uint32_t)count,
+        .range_size = sizeof(CXLGPUBatchHtoDRange),
+        .payload_bytes = payload_bytes,
+    };
+
+    async_copy_trace_begin("cuMemcpyBatchAsync", source_bytes, count,
+                           hStream, "batch-command");
+    lock_wait_start_ns = guest_monotonic_ns();
+    cmd_lock();
+    lock_acquired_ns = guest_monotonic_ns();
+    if (batch_data_write(0, &header, sizeof(header)) != 0) {
+        result = CUDA_ERROR_UNKNOWN;
+        goto unlock;
+    }
+    for (size_t index = 0; index < count; index++) {
+        size_t range_offset = sizeof(header) +
+                              index * sizeof(CXLGPUBatchHtoDRange);
+        if (batch_data_write(range_offset, &plan[index].wire,
+                             sizeof(plan[index].wire)) != 0 ||
+            batch_data_write(plan[index].wire.source_offset,
+                             plan[index].source,
+                             (size_t)plan[index].wire.size) != 0) {
+            result = CUDA_ERROR_UNKNOWN;
+            goto unlock;
+        }
+    }
+    materialize_end_ns = guest_monotonic_ns();
+
+    reg_write64(CXL_GPU_REG_PARAM0, count);
+    reg_write64(CXL_GPU_REG_PARAM1, payload_bytes);
+    reg_write64(CXL_GPU_REG_PARAM2, stream_wire);
+    result = execute_cmd(CXL_GPU_CMD_BATCH_HTOD_ASYNC);
+    {
+        result_fail_idx = reg_read64(CXL_GPU_REG_RESULT0);
+        successfully_enqueued = reg_read64(CXL_GPU_REG_RESULT1);
+
+        if (result == CUDA_SUCCESS) {
+            if (result_fail_idx != UINT64_MAX ||
+                successfully_enqueued != count) {
+                result = CUDA_ERROR_UNKNOWN;
+            }
+        } else if (result_fail_idx < count) {
+            if (successfully_enqueued != result_fail_idx) {
+                result = CUDA_ERROR_UNKNOWN;
+            } else {
+                *failIdx = (size_t)result_fail_idx;
+            }
+        } else if (result_fail_idx != UINT64_MAX ||
+                   successfully_enqueued != 0) {
+            result = CUDA_ERROR_UNKNOWN;
+        }
+    }
+
+unlock:
+    if (materialize_end_ns == 0)
+        materialize_end_ns = guest_monotonic_ns();
+    OLOG("batch_htod public_sequence=%" PRIu64
+         " result=%d fail_idx=%" PRIu64
+         " successfully_enqueued=%" PRIu64
+         " ranges=%zu source_bytes=%zu payload_bytes=%zu"
+         " lock_wait_duration_ns=%" PRIu64
+         " materialize_duration_ns=%" PRIu64 "\n",
+         g_async_copy_trace.public_sequence, result, result_fail_idx,
+         successfully_enqueued, count, source_bytes, payload_bytes,
+         lock_acquired_ns >= lock_wait_start_ns
+             ? lock_acquired_ns - lock_wait_start_ns
+             : 0,
+         materialize_end_ns >= lock_acquired_ns
+             ? materialize_end_ns - lock_acquired_ns
+             : 0);
+    cmd_unlock();
+    result = async_copy_trace_end(result);
+out:
+    free(plan);
+    return result;
+}
+
 CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteCount) {
     OLOG("cuMemcpyDtoH(src=0x%lx, size=%zu)\n", (unsigned long)srcDevice, byteCount);
     if (!g_initialized)
@@ -2818,7 +3019,7 @@ CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteC
     /* knockout: DtoH uses a blocking Type-2 command. Synchronize the source
      * stream before the copy; add an async BAR2 command only when concurrent
      * stream execution is measured. */
-    async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, hStream,
+    async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, 1, hStream,
                            "blocking");
     CUresult result = cuStreamSynchronize(hStream);
     if (result != CUDA_SUCCESS)
@@ -4849,7 +5050,7 @@ CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size
     /* knockout: DtoD uses a blocking Type-2 command. Synchronize the source
      * stream before the copy; add an async BAR2 command only when concurrent
      * stream execution is measured. */
-    async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, hStream,
+    async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, 1, hStream,
                            "blocking");
     CUresult result = cuStreamSynchronize(hStream);
     if (result != CUDA_SUCCESS)
@@ -4936,7 +5137,7 @@ CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     size_t total_bytes = 0;
     if (copy && (copy->Height == 0 || copy->WidthInBytes <= SIZE_MAX / copy->Height))
         total_bytes = copy->WidthInBytes * copy->Height;
-    async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, hStream,
+    async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, 1, hStream,
                            "blocking");
     return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy));
 }

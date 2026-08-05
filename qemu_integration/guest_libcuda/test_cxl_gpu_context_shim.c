@@ -17,9 +17,24 @@ typedef void *CUgraphNode;
 typedef void *CUgraphExec;
 typedef void *CUlibrary;
 typedef void *CUkernel;
+typedef uint64_t CUdeviceptr;
 typedef int CUdriverProcAddressQueryResult;
 typedef int CUmemorytype;
 typedef int CUlibraryOption;
+typedef int CUmemLocationType;
+typedef int CUmemcpySrcAccessOrder;
+
+typedef struct {
+    CUmemLocationType type;
+    int id;
+} CUmemLocation;
+
+typedef struct {
+    CUmemcpySrcAccessOrder srcAccessOrder;
+    CUmemLocation srcLocHint;
+    CUmemLocation dstLocHint;
+    unsigned int flags;
+} CUmemcpyAttributes;
 
 typedef struct {
     unsigned char bytes[16];
@@ -85,6 +100,7 @@ typedef struct {
 #define CU_MEMORYTYPE_DEVICE 0x02
 #define CU_LIBRARY_BINARY_IS_PRESERVED 1
 #define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES 8
+#define CU_MEMCPY_SRC_ACCESS_ORDER_ANY 3
 
 #define CUDART_FATBIN_MAGIC 0xBA55ED50U
 #define CUDART_FATBIN_VERSION 0x1U
@@ -103,6 +119,7 @@ void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
 void cxl_cuda_test_write_reg32(uint32_t offset, uint32_t value);
 void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
 void cxl_cuda_test_write_data(size_t offset, const void *src, size_t length);
+void cxl_cuda_test_read_batch_data(size_t offset, void *dst, size_t length);
 CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size);
 
 CUresult cuInit(unsigned int flags);
@@ -131,6 +148,11 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction 
 CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex,
                             size_t *paramOffset, size_t *paramSize);
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
+CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
+                            size_t *sizes, size_t count,
+                            CUmemcpyAttributes *attrs, size_t *attrsIdxs,
+                            size_t numAttrs, size_t *failIdx,
+                            CUstream stream);
 CUresult cuLibraryLoadData(CUlibrary *library, const void *code, void *jitOptions, void **jitOptionsValues,
                            unsigned int numJitOptions, CUlibraryOption *libraryOptions, void **libraryOptionValues,
                            unsigned int numLibraryOptions);
@@ -181,6 +203,13 @@ static size_t cubin_expected_size = 8;
 static uint32_t cubin_expected_encoding;
 static size_t cubin_expected_decoded_size = 8;
 static unsigned char cubin_expected_first_byte = 0x80;
+static CUresult batch_result = CUDA_SUCCESS;
+static uint64_t batch_fail_idx = UINT64_MAX;
+static uint64_t batch_success_count = 3;
+
+static const uint8_t batch_source0[] = {0x10, 0x11, 0x12};
+static const uint8_t batch_source1[] = {0x20, 0x21, 0x22, 0x23, 0x24};
+static const uint8_t batch_source2[] = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36};
 
 static const CUuuid integrity_check_uuid = {
     .bytes = {0xd4, 0x08, 0x20, 0x55, 0xbd, 0xe6, 0x70, 0x4b, 0x8d, 0x34, 0xba, 0x12, 0x3c, 0x66, 0xe1, 0xf2},
@@ -230,6 +259,41 @@ static CUresult fake_execute(uint32_t command) {
         cxl_cuda_test_write_result(0, UINT64_C(0x100000000));
         cxl_cuda_test_write_result(1, UINT64_C(0x200000000));
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_BATCH_HTOD_ASYNC: {
+        CXLGPUBatchHtoDHeader header;
+        CXLGPUBatchHtoDRange ranges[3];
+        uint8_t observed[sizeof(batch_source2)];
+
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 3);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 143);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 7);
+        cxl_cuda_test_read_batch_data(0, &header, sizeof(header));
+        cxl_cuda_test_read_batch_data(sizeof(header), ranges,
+                                      sizeof(ranges));
+        CHECK(header.header_size == sizeof(header));
+        CHECK(header.range_count == 3);
+        CHECK(header.range_size == sizeof(CXLGPUBatchHtoDRange));
+        CHECK(header.reserved0 == 0 && header.reserved1 == 0);
+        CHECK(header.payload_bytes == 143);
+        CHECK(ranges[0].source_offset == 128 &&
+              ranges[0].destination == 0x1000 && ranges[0].size == 3);
+        CHECK(ranges[1].source_offset == 131 &&
+              ranges[1].destination == 0x2000 && ranges[1].size == 5);
+        CHECK(ranges[2].source_offset == 136 &&
+              ranges[2].destination == 0x3000 && ranges[2].size == 7);
+        cxl_cuda_test_read_batch_data(ranges[0].source_offset, observed,
+                                      sizeof(batch_source0));
+        CHECK(memcmp(observed, batch_source0, sizeof(batch_source0)) == 0);
+        cxl_cuda_test_read_batch_data(ranges[1].source_offset, observed,
+                                      sizeof(batch_source1));
+        CHECK(memcmp(observed, batch_source1, sizeof(batch_source1)) == 0);
+        cxl_cuda_test_read_batch_data(ranges[2].source_offset, observed,
+                                      sizeof(batch_source2));
+        CHECK(memcmp(observed, batch_source2, sizeof(batch_source2)) == 0);
+        cxl_cuda_test_write_result(0, batch_fail_idx);
+        cxl_cuda_test_write_result(1, batch_success_count);
+        return batch_result;
+    }
     case CXL_GPU_CMD_GET_TOTAL_MEM:
         cxl_cuda_test_write_result(0, UINT64_C(0x300000000));
         return CUDA_SUCCESS;
@@ -1049,6 +1113,66 @@ static int test_graph_exec_update_preserves_result_info(void) {
     return 0;
 }
 
+static int test_batch_htod_materializes_one_command(void) {
+    CUdeviceptr destinations[] = {0x1000, 0x2000, 0x3000};
+    CUdeviceptr sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+        (CUdeviceptr)(uintptr_t)batch_source1,
+        (CUdeviceptr)(uintptr_t)batch_source2,
+    };
+    size_t sizes[] = {
+        sizeof(batch_source0),
+        sizeof(batch_source1),
+        sizeof(batch_source2),
+    };
+    CUmemcpyAttributes attributes = {
+        .srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+    };
+    size_t attribute_indices[] = {0};
+    size_t fail_idx = 99;
+    CUdriverProcAddressQueryResult symbol_status =
+        CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    void *resolved = NULL;
+    CUstream stream = (CUstream)(uintptr_t)(UINT64_C(1) << 32 | 7);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    command_count = 0;
+    batch_result = CUDA_SUCCESS;
+    batch_fail_idx = UINT64_MAX;
+    batch_success_count = 3;
+
+    CHECK(cuGetProcAddress("cuMemcpyBatchAsync", &resolved, 12080, 0,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuMemcpyBatchAsync);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+    CHECK(cuMemcpyBatchAsync(destinations, sources, sizes, 3, &attributes,
+                             attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_SUCCESS);
+    CHECK(fail_idx == SIZE_MAX);
+    CHECK(command_count == 1 &&
+          commands[0] == CXL_GPU_CMD_BATCH_HTOD_ASYNC);
+
+    command_count = 0;
+    batch_result = CUDA_ERROR_INVALID_VALUE;
+    batch_fail_idx = 1;
+    batch_success_count = 1;
+    CHECK(cuMemcpyBatchAsync(destinations, sources, sizes, 3, &attributes,
+                             attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(fail_idx == 1);
+    CHECK(command_count == 1);
+
+    command_count = 0;
+    attributes.flags = 1;
+    CHECK(cuMemcpyBatchAsync(destinations, sources, sizes, 3, &attributes,
+                             attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_ERROR_NOT_SUPPORTED);
+    CHECK(fail_idx == SIZE_MAX);
+    CHECK(command_count == 0);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -1062,5 +1186,6 @@ int main(void) {
            test_driver_version_mapping_is_reused_by_init() ||
            test_launch_reuses_param_layout_until_module_unload() ||
            test_graph_instantiate_with_flags_reuses_existing_command() ||
-           test_graph_exec_update_preserves_result_info();
+           test_graph_exec_update_preserves_result_info() ||
+           test_batch_htod_materializes_one_command();
 }

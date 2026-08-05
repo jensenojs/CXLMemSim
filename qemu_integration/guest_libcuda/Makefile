@@ -16,6 +16,7 @@ CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 CUBLAS_CREATE_PROBE := libcublas_create_probe.so
+BATCH_COPY_PROBE := libbatch_copy_probe.so
 CUBLAS_CREATE_FAKE := libcublas_create_probe_fake.so
 LOADER_AUDIT := libcxl-loader-audit.so
 LOADER_AUDIT_CLIENT := test-loader-audit-client
@@ -44,7 +45,7 @@ all: $(TARGETS)
 
 test-binaries: $(CUDA_TESTS) $(BAR_TESTS) $(TRANSPORT_TEST)
 
-tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE)
+tiny-probe: $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(BATCH_COPY_PROBE)
 
 test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE)
 	@output="$$(CUBLAS_CREATE_EXPECTED_REGISTRATIONS=3346 \
@@ -188,6 +189,9 @@ $(TINY_CUDA_PROBE): cuda_runtime_dlopen_kernel_probe.c
 $(CUBLAS_CREATE_PROBE): cublas_create_probe.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
 
+$(BATCH_COPY_PROBE): batch_copy_probe.c
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl $(LDFLAGS) $(LDLIBS)
+
 $(CUBLAS_CREATE_FAKE): test_cublas_create_fake.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
 
@@ -226,4 +230,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_g
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c cxl_gpu_transport.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(BATCH_COPY_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)

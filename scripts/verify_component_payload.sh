@@ -19,6 +19,7 @@ readelf -d "$PAYLOAD/guest/cxl-mem-active-gate" >"$EVIDENCE/cxl-mem-active-gate-
 readelf -d "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-readelf-dynamic.txt"
 readelf -d "$PAYLOAD/guest/libcublas_create_probe.so" >"$EVIDENCE/cublas-create-probe-readelf-dynamic.txt"
+readelf -d "$PAYLOAD/guest/libbatch_copy_probe.so" >"$EVIDENCE/batch-copy-probe-readelf-dynamic.txt"
 ldd "$PAYLOAD/bin/cxlmemsim_server" >"$EVIDENCE/server-ldd.txt"
 ldd "$PAYLOAD/bin/cuda-integrity-export-oracle" >"$EVIDENCE/integrity-oracle-ldd.txt"
 ldd "$PAYLOAD/guest/libcuda.so.1" >"$EVIDENCE/shim-ldd.txt"
@@ -28,6 +29,7 @@ ldd "$PAYLOAD/guest/cxl-mem-active-gate" >"$EVIDENCE/cxl-mem-active-gate-ldd.txt
 ldd "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe" >"$EVIDENCE/tiny-probe-ldd.txt"
 ldd "$PAYLOAD/guest/libtiny_cuda.so" >"$EVIDENCE/tiny-library-ldd.txt"
 ldd "$PAYLOAD/guest/libcublas_create_probe.so" >"$EVIDENCE/cublas-create-probe-ldd.txt"
+ldd "$PAYLOAD/guest/libbatch_copy_probe.so" >"$EVIDENCE/batch-copy-probe-ldd.txt"
 if grep -Fh 'not found' "$EVIDENCE"/*-ldd.txt | grep -q .; then
     printf 'error: unresolved CXLMemSim payload dependency\n' >&2
     exit 1
@@ -43,6 +45,7 @@ for symbol in tiny_cuda_launch tiny_cuda_probe_run; do
     nm -D "$PAYLOAD/guest/libtiny_cuda.so" | grep -F " $symbol" >>"$EVIDENCE/tiny-library-symbol.txt"
 done
 nm -D "$PAYLOAD/guest/libcublas_create_probe.so" | grep -F ' tiny_cuda_probe_run' >"$EVIDENCE/cublas-create-probe-symbol.txt"
+nm -D "$PAYLOAD/guest/libbatch_copy_probe.so" | grep -F ' tiny_cuda_probe_run' >"$EVIDENCE/batch-copy-probe-symbol.txt"
 ! grep -F 'Shared library: [libcublas.so.12]' "$EVIDENCE/cublas-create-probe-readelf-dynamic.txt" >/dev/null
 "$PAYLOAD/guest/cxl-gpu-case" --help >"$EVIDENCE/case-control-help.txt"
 "$PAYLOAD/bin/cuda-integrity-export-oracle" --help >"$EVIDENCE/integrity-oracle-help.txt"

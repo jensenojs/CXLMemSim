@@ -186,6 +186,28 @@ void cxl_gpu_transport_data_read(const CxlGpuTransport *transport, size_t offset
 #endif
 }
 
+int cxl_gpu_transport_batch_write(CxlGpuTransport *transport, size_t offset,
+                                  const void *src, size_t len) {
+    if (!transport || !transport->batch_data || !src ||
+        offset > CXL_GPU_BATCH_DATA_SIZE ||
+        len > CXL_GPU_BATCH_DATA_SIZE - offset)
+        return -1;
+    memcpy((void *)(transport->batch_data + offset), src, len);
+    __sync_synchronize();
+    return 0;
+}
+
+int cxl_gpu_transport_batch_read(const CxlGpuTransport *transport, size_t offset,
+                                 void *dst, size_t len) {
+    if (!transport || !transport->batch_data || !dst ||
+        offset > CXL_GPU_BATCH_DATA_SIZE ||
+        len > CXL_GPU_BATCH_DATA_SIZE - offset)
+        return -1;
+    __sync_synchronize();
+    memcpy(dst, (const void *)(transport->batch_data + offset), len);
+    return 0;
+}
+
 int cxl_gpu_transport_lock(CxlGpuTransport *transport) {
     if (transport->pci_fd < 0)
         return 0;
@@ -275,6 +297,7 @@ void cxl_gpu_transport_close(CxlGpuTransport *transport) {
         transport->regs = NULL;
         transport->data = NULL;
         transport->descriptor = NULL;
+        transport->batch_data = NULL;
     }
     if (transport->pci_fd >= 0) {
         close(transport->pci_fd);
@@ -379,6 +402,8 @@ int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug) {
         transport->data = (volatile uint8_t *)mapping + CXL_GPU_DATA_OFFSET;
         transport->descriptor = (volatile CXLGPURAMCommandDescriptor *)
             ((volatile uint8_t *)mapping + CXL_GPU_DESCRIPTOR_OFFSET);
+        transport->batch_data =
+            (volatile uint8_t *)mapping + CXL_GPU_BATCH_DATA_OFFSET;
 
         uint32_t magic = cxl_gpu_transport_read32(transport, CXL_GPU_REG_MAGIC);
         if (magic != CXL_GPU_MAGIC) {

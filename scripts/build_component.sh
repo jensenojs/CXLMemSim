@@ -146,6 +146,7 @@ install -m 0755 "$GUEST_DIR/cuda-runtime-dlopen-kernel-probe" \
     "$PAYLOAD/guest/cuda-runtime-dlopen-kernel-probe"
 install -m 0755 "$GUEST_DIR/libtiny_cuda.so" "$PAYLOAD/guest/libtiny_cuda.so"
 install -m 0755 "$GUEST_DIR/libcublas_create_probe.so" "$PAYLOAD/guest/libcublas_create_probe.so"
+install -m 0755 "$GUEST_DIR/libbatch_copy_probe.so" "$PAYLOAD/guest/libbatch_copy_probe.so"
 # These are source facts consumed by cxl-lab's Q/R/N checker.  They come from
 # the same git archive as the shim binary above, so a tiny result never needs
 # to clone a floating component repository to reconstruct its API route.
