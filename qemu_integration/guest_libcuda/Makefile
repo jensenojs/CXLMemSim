@@ -13,6 +13,7 @@ CASE_CONTROL := cxl-gpu-case
 TRANSPORT_TEST := test_cxl_gpu_transport
 CONTEXT_STATE_TEST := test_cxl_gpu_context_state
 CONTEXT_SHIM_TEST := test_cxl_gpu_context_shim
+OBSERVATION_LEDGER_TEST := test_cxl_cuda_observation
 TINY_CUDA_LIBRARY := libtiny_cuda.so
 TINY_CUDA_PROBE := cuda-runtime-dlopen-kernel-probe
 CUBLAS_CREATE_PROBE := libcublas_create_probe.so
@@ -39,7 +40,7 @@ TARGETS := $(CUDA_SHIM) $(CUDA_LINK) $(CASE_CONTROL) $(CUDA_TESTS) $(BAR_TESTS) 
 
 .PHONY: all clean static test test-binaries tiny-probe test-cublas-create-probe test-loader-audit test-api-provenance private-export-table-probe test-private-export-probe integrity-export-oracle \
 	fatbin-cubin-load-probe fatbin-library-load-probe \
-	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-static-collector test-context-state test-context-shim
+	ggml-cuda-attribute-probe-tools ggml-flash-attn-ext-probe cuda-elf-static-evidence-tools cuda-debug-capture-tools test-static-collector test-context-state test-context-shim test-observation-ledger
 
 all: $(TARGETS)
 
@@ -118,7 +119,7 @@ $(CUDA_SHIM): $(CUDA_SHIM_OBJECTS)
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
 
-libcuda.instrumented.o: libcuda.c cxl_gpu_context_state.h cxl_gpu_transport.h cxl_gpu_cmd.h
+libcuda.instrumented.o: libcuda.c cxl_cuda_observation.h cxl_gpu_context_state.h cxl_gpu_transport.h cxl_gpu_cmd.h include/linux/cxl_type2_accel.h
 	$(CC) $(CFLAGS) -fPIC -finstrument-functions -c -o $@ $<
 
 cuda_api_provenance.o: cuda_api_provenance.c
@@ -145,7 +146,7 @@ $(CONTEXT_STATE_TEST): test_cxl_gpu_context_state.c cxl_gpu_context_state.c cxl_
 test-context-state: $(CONTEXT_STATE_TEST)
 	./$(CONTEXT_STATE_TEST)
 
-$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
+$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_cuda_observation.h cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h include/linux/cxl_type2_accel.h
 	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -Wl,--export-dynamic -o $@ test_cxl_gpu_context_shim.c \
 		libcuda.c -finstrument-functions cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
@@ -153,6 +154,25 @@ $(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cuda_api_provenance.
 
 test-context-shim: $(CONTEXT_SHIM_TEST)
 	./$(CONTEXT_SHIM_TEST)
+
+$(OBSERVATION_LEDGER_TEST): test_cxl_cuda_observation.c cxl_cuda_observation.h $(CUDA_LINK)
+	$(CC) $(CFLAGS) -o $@ test_cxl_cuda_observation.c -L. -lcuda -Wl,-rpath,'$$ORIGIN' $(LDFLAGS) $(LDLIBS)
+
+test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
+	@complete="$$(./$(OBSERVATION_LEDGER_TEST) complete 2>&1)"; \
+	printf '%s\n' "$$complete"; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 8; \
+	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
+	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
+	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
+	incomplete="$$(./$(OBSERVATION_LEDGER_TEST) incomplete 2>&1)"; \
+	printf '%s\n' "$$incomplete"; \
+	test "$$(printf '%s\n' "$$incomplete" | grep -c 'status=incomplete')" -eq 8; \
+	printf '%s\n' "$$incomplete" | grep 'category=all_known ' | grep 'first_error=span-pairing' >/dev/null; \
+	overflow="$$(./$(OBSERVATION_LEDGER_TEST) overflow 2>&1)"; \
+	printf '%s\n' "$$overflow"; \
+	test "$$(printf '%s\n' "$$overflow" | grep -c 'status=incomplete')" -eq 8; \
+	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null
 
 $(LOADER_AUDIT): loader_audit.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
@@ -230,4 +250,4 @@ $(BAR_STATIC): cxl_bar_benchmark.c cxl_gpu_transport.c cxl_gpu_transport.h cxl_g
 	$(CC) $(CFLAGS) -static -o $@ cxl_bar_benchmark.c cxl_gpu_transport.c -lrt -lpthread $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(BATCH_COPY_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)
+	rm -f $(TARGETS) $(BAR_STATIC) $(TRANSPORT_TEST) $(CONTEXT_STATE_TEST) $(CONTEXT_SHIM_TEST) $(OBSERVATION_LEDGER_TEST) $(TINY_CUDA_LIBRARY) $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(BATCH_COPY_PROBE) $(CUBLAS_CREATE_FAKE) $(LOADER_AUDIT) $(LOADER_AUDIT_CLIENT) $(CUDA_SHIM_OBJECTS) $(INTEGRITY_EXPORT_ORACLE) $(GGML_CUDA_ATTRIBUTE_TRIGGER) $(GGML_FLASH_ATTN_EXT_TRIGGER)

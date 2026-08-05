@@ -27,12 +27,15 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "cxl_gpu_cmd.h"
 #include "cxl_gpu_context_state.h"
 #include "cxl_gpu_transport.h"
+#include "cxl_cuda_observation.h"
+#include "include/linux/cxl_type2_accel.h"
 
 /* These symbols are linked into the shim's declared runtime dependency set. */
 extern int LZ4_decompress_safe(const char *src, char *dst, int compressed_size, int dst_capacity);
@@ -246,6 +249,7 @@ typedef struct {
 /* Global state */
 static CxlGpuTransport g_transport = CXL_GPU_TRANSPORT_INITIALIZER;
 static int g_initialized = 0;
+static int g_direct_source_enabled = 0;
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 static uint8_t g_test_bar2[CXL_GPU_CMD_REG_SIZE];
 static CUresult (*g_test_execute_cmd)(uint32_t cmd);
@@ -282,6 +286,14 @@ typedef struct CXLStreamCaptureSnapshot {
 
 static CXLLinkOutput *g_link_outputs;
 static CXLStreamCaptureSnapshot *g_stream_capture_snapshots;
+
+typedef struct CXLDirectSourcePending {
+    uint64_t source_id;
+    uint64_t stream_wire;
+    struct CXLDirectSourcePending *next;
+} CXLDirectSourcePending;
+
+static CXLDirectSourcePending *g_direct_source_pending;
 
 typedef struct CXLCudaErrorName {
     CUresult error;
@@ -338,6 +350,9 @@ CUresult cuModuleUnload(CUmodule hmod);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
 CUresult cuStreamSynchronize(CUstream hStream);
 static CUresult cxl_module_load_image(CUmodule *module, const void *image);
+static CUresult direct_source_errno_result(int error);
+static CUresult direct_sources_complete_locked(uint64_t stream_wire,
+                                               bool all_streams);
 
 static CudartLibraryRecord *g_cudart_library_records = NULL;
 static unsigned int g_cudart_library_next_id = 1;
@@ -410,6 +425,451 @@ static char *g_observation_buffer = NULL;
         else if (g_debug)                                                                                              \
             fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                              \
     } while (0)
+
+#define CXL_OBSERVATION_CATEGORY_COUNT 8
+#define CXL_OBSERVATION_OPEN_TOKEN_COUNT 4096
+
+typedef struct CXLObservationIdentity {
+    bool valid;
+    uint64_t sequence;
+    const char *owner;
+    const char *category;
+    const char *operation;
+} CXLObservationIdentity;
+
+typedef struct CXLObservationAggregate {
+    uint64_t interval_count;
+    uint64_t total_duration_ns;
+    uint64_t union_duration_ns;
+    uint64_t active_begin_ns;
+    uint64_t last_union_end_ns;
+    uint32_t active_depth;
+    bool have_last_union_end;
+    uint64_t largest_gap_begin_ns;
+    uint64_t largest_gap_end_ns;
+    bool have_largest_gap;
+    CXLObservationIdentity last_end;
+    CXLObservationIdentity largest_gap_previous;
+    CXLObservationIdentity largest_gap_next;
+} CXLObservationAggregate;
+
+typedef struct CXLObservationOpenToken {
+    uint64_t token;
+    uint64_t begin_ns;
+    uint64_t graph_ordinal;
+    uint64_t operation_sequence;
+    uint32_t category;
+    CXLObservationIdentity identity;
+} CXLObservationOpenToken;
+
+typedef struct CXLObservationLedger {
+    pthread_mutex_t lock;
+    bool active;
+    bool incomplete;
+    uint64_t case_epoch;
+    uint64_t span_begin_ns;
+    uint64_t last_clock_ns;
+    uint64_t next_token;
+    uint64_t next_sequence;
+    uint32_t open_count;
+    const char *first_error;
+    CXLObservationAggregate categories[CXL_OBSERVATION_CATEGORY_COUNT];
+    CXLObservationAggregate all_known;
+    CXLObservationOpenToken open_tokens[CXL_OBSERVATION_OPEN_TOKEN_COUNT];
+} CXLObservationLedger;
+
+static CXLObservationLedger g_observation_ledger = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+static int g_observation_fast_active;
+
+static const char *const g_observation_category_names[CXL_OBSERVATION_CATEGORY_COUNT] = {
+    "cuda_public_call",
+    "selected_range_plan",
+    "source_lease",
+    "source_materialization",
+    "resident_lookup",
+    "resident_to_compute",
+    "cuda_graph_prepare",
+    "host_result_read",
+};
+
+static uint64_t observation_clock_ns_locked(void) {
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+
+static void observation_fail_locked(const char *error) {
+    g_observation_ledger.incomplete = true;
+    if (!g_observation_ledger.first_error)
+        g_observation_ledger.first_error = error;
+}
+
+static bool observation_add_locked(uint64_t *value, uint64_t increment) {
+    if (increment > UINT64_MAX - *value) {
+        observation_fail_locked("duration-overflow");
+        return false;
+    }
+    *value += increment;
+    return true;
+}
+
+static void observation_consider_gap_locked(CXLObservationAggregate *aggregate,
+                                            uint64_t begin_ns, uint64_t end_ns,
+                                            CXLObservationIdentity previous,
+                                            CXLObservationIdentity next) {
+    if (end_ns < begin_ns) {
+        observation_fail_locked("gap-boundary");
+        return;
+    }
+    if (!aggregate->have_largest_gap ||
+        end_ns - begin_ns > aggregate->largest_gap_end_ns - aggregate->largest_gap_begin_ns) {
+        aggregate->have_largest_gap = true;
+        aggregate->largest_gap_begin_ns = begin_ns;
+        aggregate->largest_gap_end_ns = end_ns;
+        aggregate->largest_gap_previous = previous;
+        aggregate->largest_gap_next = next;
+    }
+}
+
+static void observation_aggregate_begin_locked(CXLObservationAggregate *aggregate,
+                                               uint64_t now_ns,
+                                               CXLObservationIdentity identity) {
+    if (aggregate->active_depth == 0) {
+        const uint64_t gap_begin = aggregate->have_last_union_end
+            ? aggregate->last_union_end_ns : g_observation_ledger.span_begin_ns;
+        observation_consider_gap_locked(aggregate, gap_begin, now_ns,
+                                        aggregate->last_end, identity);
+        aggregate->active_begin_ns = now_ns;
+    }
+    if (aggregate->active_depth == UINT32_MAX) {
+        observation_fail_locked("active-depth-overflow");
+        return;
+    }
+    aggregate->active_depth++;
+    observation_add_locked(&aggregate->interval_count, 1);
+}
+
+static void observation_aggregate_end_locked(CXLObservationAggregate *aggregate,
+                                             uint64_t begin_ns, uint64_t end_ns,
+                                             CXLObservationIdentity identity) {
+    if (aggregate->active_depth == 0) {
+        observation_fail_locked("active-depth-underflow");
+        return;
+    }
+    if (end_ns < begin_ns) {
+        observation_fail_locked("interval-clock-reversal");
+        end_ns = begin_ns;
+    }
+    observation_add_locked(&aggregate->total_duration_ns, end_ns - begin_ns);
+    aggregate->active_depth--;
+    if (aggregate->active_depth == 0) {
+        if (end_ns < aggregate->active_begin_ns) {
+            observation_fail_locked("union-clock-reversal");
+        } else {
+            observation_add_locked(&aggregate->union_duration_ns,
+                                   end_ns - aggregate->active_begin_ns);
+        }
+        aggregate->last_union_end_ns = end_ns;
+        aggregate->have_last_union_end = true;
+        aggregate->last_end = identity;
+    }
+}
+
+static uint64_t observation_span_begin_locked(uint32_t category,
+                                              uint64_t graph_ordinal,
+                                              uint64_t operation_sequence,
+                                              const char *owner,
+                                              const char *operation,
+                                              uint64_t *begin_ns) {
+    if (!g_observation_ledger.active)
+        return 0;
+    if (category >= CXL_OBSERVATION_CATEGORY_COUNT) {
+        observation_fail_locked("unknown-category");
+        return 0;
+    }
+
+    uint64_t now_ns = observation_clock_ns_locked();
+    if (!now_ns) {
+        observation_fail_locked("clock-read");
+        return 0;
+    }
+    if (now_ns < g_observation_ledger.span_begin_ns ||
+        now_ns < g_observation_ledger.last_clock_ns) {
+        observation_fail_locked("clock-reversal");
+        return 0;
+    }
+    g_observation_ledger.last_clock_ns = now_ns;
+
+    if (g_observation_ledger.next_token == UINT64_MAX) {
+        observation_fail_locked("token-overflow");
+        return 0;
+    }
+    const uint64_t token = ++g_observation_ledger.next_token;
+    CXLObservationOpenToken *open =
+        &g_observation_ledger.open_tokens[token % CXL_OBSERVATION_OPEN_TOKEN_COUNT];
+    if (open->token != 0) {
+        observation_fail_locked("open-token-capacity");
+        return 0;
+    }
+    if (g_observation_ledger.next_sequence == UINT64_MAX) {
+        observation_fail_locked("sequence-overflow");
+        return 0;
+    }
+    CXLObservationIdentity identity = {
+        .valid = true,
+        .sequence = ++g_observation_ledger.next_sequence,
+        .owner = owner,
+        .category = g_observation_category_names[category],
+        .operation = operation,
+    };
+    *open = (CXLObservationOpenToken) {
+        .token = token,
+        .begin_ns = now_ns,
+        .graph_ordinal = graph_ordinal,
+        .operation_sequence = operation_sequence,
+        .category = category,
+        .identity = identity,
+    };
+    g_observation_ledger.open_count++;
+    observation_aggregate_begin_locked(&g_observation_ledger.categories[category],
+                                       now_ns, identity);
+    observation_aggregate_begin_locked(&g_observation_ledger.all_known,
+                                       now_ns, identity);
+    if (begin_ns)
+        *begin_ns = now_ns;
+    return token;
+}
+
+static CUresult observation_span_end_locked(uint64_t token,
+                                            int32_t operation_status,
+                                            uint64_t *end_ns) {
+    (void)operation_status;
+    if (!g_observation_ledger.active || token == 0) {
+        observation_fail_locked("span-end-without-decode");
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    CXLObservationOpenToken *open =
+        &g_observation_ledger.open_tokens[token % CXL_OBSERVATION_OPEN_TOKEN_COUNT];
+    if (open->token != token) {
+        observation_fail_locked("span-pairing");
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    uint64_t now_ns = observation_clock_ns_locked();
+    if (!now_ns) {
+        observation_fail_locked("clock-read");
+        return CUDA_ERROR_UNKNOWN;
+    }
+    if (now_ns < g_observation_ledger.last_clock_ns)
+        observation_fail_locked("clock-reversal");
+    g_observation_ledger.last_clock_ns = now_ns;
+    observation_aggregate_end_locked(
+        &g_observation_ledger.categories[open->category], open->begin_ns,
+        now_ns, open->identity);
+    observation_aggregate_end_locked(&g_observation_ledger.all_known,
+                                     open->begin_ns, now_ns, open->identity);
+    memset(open, 0, sizeof(*open));
+    g_observation_ledger.open_count--;
+    if (end_ns)
+        *end_ns = now_ns;
+    return CUDA_SUCCESS;
+}
+
+static const char *observation_identity_field(CXLObservationIdentity identity,
+                                              const char *field) {
+    if (!identity.valid)
+        return "null";
+    if (strcmp(field, "owner") == 0)
+        return identity.owner;
+    if (strcmp(field, "category") == 0)
+        return identity.category;
+    return identity.operation;
+}
+
+static void observation_emit_summary_locked(const char *category,
+                                            const char *owner,
+                                            CXLObservationAggregate *aggregate,
+                                            uint64_t span_end_ns) {
+    CXLObservationIdentity empty = {0};
+    if (aggregate->active_depth != 0)
+        observation_fail_locked("open-span-at-terminal");
+    if (aggregate->active_depth == 0) {
+        const uint64_t gap_begin = aggregate->have_last_union_end
+            ? aggregate->last_union_end_ns : g_observation_ledger.span_begin_ns;
+        observation_consider_gap_locked(aggregate, gap_begin, span_end_ns,
+                                        aggregate->last_end, empty);
+    }
+
+    const uint64_t span_duration = span_end_ns >= g_observation_ledger.span_begin_ns
+        ? span_end_ns - g_observation_ledger.span_begin_ns : 0;
+    if (span_end_ns < g_observation_ledger.span_begin_ns)
+        observation_fail_locked("terminal-boundary");
+    if (aggregate->union_duration_ns > span_duration)
+        observation_fail_locked("union-outside-span");
+    if (aggregate->total_duration_ns < aggregate->union_duration_ns)
+        observation_fail_locked("overlap-underflow");
+    const uint64_t overlap = aggregate->total_duration_ns >= aggregate->union_duration_ns
+        ? aggregate->total_duration_ns - aggregate->union_duration_ns : 0;
+    const uint64_t gap = span_duration >= aggregate->union_duration_ns
+        ? span_duration - aggregate->union_duration_ns : 0;
+
+    fprintf(stderr,
+            "[CXL-CUDA] interval_summary schema=interval-summary-v1 producer=guest-shim"
+            " clock_domain=guest-monotonic case_epoch=%" PRIu64
+            " scope=decode category=%s owner=%s status=%s"
+            " span_begin_ns=%" PRIu64 " span_end_ns=%" PRIu64
+            " interval_count=%" PRIu64 " total_duration_ns=%" PRIu64
+            " union_duration_ns=%" PRIu64 " overlap_duration_ns=%" PRIu64
+            " gap_duration_ns=%" PRIu64,
+            g_observation_ledger.case_epoch, category, owner,
+            g_observation_ledger.incomplete ? "incomplete" : "complete",
+            g_observation_ledger.span_begin_ns, span_end_ns,
+            aggregate->interval_count, aggregate->total_duration_ns,
+            aggregate->union_duration_ns, overlap, gap);
+    if (aggregate->have_largest_gap) {
+        fprintf(stderr,
+                " largest_gap_begin_ns=%" PRIu64 " largest_gap_end_ns=%" PRIu64,
+                aggregate->largest_gap_begin_ns, aggregate->largest_gap_end_ns);
+    } else {
+        fputs(" largest_gap_begin_ns=null largest_gap_end_ns=null", stderr);
+    }
+    if (aggregate->largest_gap_previous.valid)
+        fprintf(stderr, " previous_sequence=%" PRIu64,
+                aggregate->largest_gap_previous.sequence);
+    else
+        fputs(" previous_sequence=null", stderr);
+    fprintf(stderr,
+            " previous_owner=%s previous_category=%s previous_operation=%s",
+            observation_identity_field(aggregate->largest_gap_previous, "owner"),
+            observation_identity_field(aggregate->largest_gap_previous, "category"),
+            observation_identity_field(aggregate->largest_gap_previous, "operation"));
+    if (aggregate->largest_gap_next.valid)
+        fprintf(stderr, " next_sequence=%" PRIu64,
+                aggregate->largest_gap_next.sequence);
+    else
+        fputs(" next_sequence=null", stderr);
+    fprintf(stderr,
+            " next_owner=%s next_category=%s next_operation=%s first_error=%s\n",
+            observation_identity_field(aggregate->largest_gap_next, "owner"),
+            observation_identity_field(aggregate->largest_gap_next, "category"),
+            observation_identity_field(aggregate->largest_gap_next, "operation"),
+            g_observation_ledger.first_error
+                ? g_observation_ledger.first_error : "none");
+}
+
+static void observation_emit_terminal_locked(uint64_t span_end_ns) {
+    for (uint32_t category = CXL_CUDA_OBS_SELECTED_RANGE_PLAN;
+         category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
+        observation_emit_summary_locked(g_observation_category_names[category],
+                                        "llama",
+                                        &g_observation_ledger.categories[category],
+                                        span_end_ns);
+    }
+    observation_emit_summary_locked("all_known", "guest-shim",
+                                    &g_observation_ledger.all_known,
+                                    span_end_ns);
+    fflush(stderr);
+}
+
+CUresult cuCxlObservationDecodeBeginV1(uint64_t case_epoch) {
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    if (g_observation_ledger.active || case_epoch == 0) {
+        if (g_observation_ledger.active)
+            observation_fail_locked("decode-begin-while-active");
+        pthread_mutex_unlock(&g_observation_ledger.lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    memset((char *)&g_observation_ledger + offsetof(CXLObservationLedger, active),
+           0, sizeof(g_observation_ledger) - offsetof(CXLObservationLedger, active));
+    g_observation_ledger.active = true;
+    g_observation_ledger.case_epoch = case_epoch;
+    g_observation_ledger.span_begin_ns = observation_clock_ns_locked();
+    g_observation_ledger.last_clock_ns = g_observation_ledger.span_begin_ns;
+    if (!g_observation_ledger.span_begin_ns)
+        observation_fail_locked("clock-read");
+    __atomic_store_n(&g_observation_fast_active, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return g_observation_ledger.span_begin_ns ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
+}
+
+CUresult cuCxlObservationSpanBeginV1(uint32_t category,
+                                    uint64_t graph_ordinal,
+                                    uint64_t operation_sequence,
+                                    uint64_t *token) {
+    if (!token) {
+        pthread_mutex_lock(&g_observation_ledger.lock);
+        if (g_observation_ledger.active)
+            observation_fail_locked("null-token-output");
+        pthread_mutex_unlock(&g_observation_ledger.lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    *token = 0;
+    if (category < CXL_CUDA_OBS_SELECTED_RANGE_PLAN ||
+        category > CXL_CUDA_OBS_HOST_RESULT_READ) {
+        pthread_mutex_lock(&g_observation_ledger.lock);
+        if (g_observation_ledger.active)
+            observation_fail_locked("unknown-category");
+        pthread_mutex_unlock(&g_observation_ledger.lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    *token = observation_span_begin_locked(category, graph_ordinal,
+                                           operation_sequence, "llama",
+                                           g_observation_category_names[category],
+                                           NULL);
+    CUresult result = *token ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return result;
+}
+
+CUresult cuCxlObservationSpanEndV1(uint64_t token,
+                                  int32_t operation_status) {
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    CUresult result = observation_span_end_locked(token, operation_status, NULL);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return result;
+}
+
+CUresult cuCxlObservationDecodeEndV1(uint64_t case_epoch) {
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    if (!g_observation_ledger.active ||
+        case_epoch != g_observation_ledger.case_epoch) {
+        if (g_observation_ledger.active)
+            observation_fail_locked("decode-epoch-mismatch");
+        pthread_mutex_unlock(&g_observation_ledger.lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+    uint64_t span_end_ns = observation_clock_ns_locked();
+    if (!span_end_ns) {
+        observation_fail_locked("clock-read");
+        span_end_ns = g_observation_ledger.last_clock_ns;
+    }
+    if (g_observation_ledger.open_count != 0)
+        observation_fail_locked("open-span-at-terminal");
+    observation_emit_terminal_locked(span_end_ns);
+    g_observation_ledger.active = false;
+    __atomic_store_n(&g_observation_fast_active, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return CUDA_SUCCESS;
+}
+
+static void observation_abandon_active_decode(void) {
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    if (g_observation_ledger.active) {
+        observation_fail_locked("decode-terminal-missing");
+        uint64_t span_end_ns = observation_clock_ns_locked();
+        if (!span_end_ns)
+            span_end_ns = g_observation_ledger.last_clock_ns;
+        observation_emit_terminal_locked(span_end_ns);
+        g_observation_ledger.active = false;
+        __atomic_store_n(&g_observation_fast_active, 0, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+}
 
 static void function_param_layouts_clear(const char *reason) {
     uint64_t cleared = 0;
@@ -752,6 +1212,29 @@ static uint64_t guest_monotonic_ns(void) {
     return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
 }
 
+static uint64_t observation_cuda_call_begin(const char *symbol,
+                                            uint64_t call_id,
+                                            uint64_t *begin_ns) {
+    if (!__atomic_load_n(&g_observation_fast_active, __ATOMIC_ACQUIRE))
+        return 0;
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    uint64_t token = observation_span_begin_locked(
+        0, 0, call_id, "guest-shim", symbol, begin_ns);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return token;
+}
+
+static uint64_t observation_cuda_call_end(uint64_t token, CUresult result,
+                                          uint64_t fallback_ns) {
+    if (!token)
+        return fallback_ns;
+    uint64_t end_ns = fallback_ns;
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    (void)observation_span_end_locked(token, result, &end_ns);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return end_ns;
+}
+
 static void async_copy_trace_begin(const char *api, size_t total_bytes,
                                    size_t range_count, CUstream stream,
                                    const char *implementation) {
@@ -792,7 +1275,11 @@ static CUresult async_copy_trace_end(CUresult result) {
 static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint32_t sequence = __sync_add_and_fetch(&g_api_chain_sequence, 1);
     uint64_t call_id = ((uint64_t)(uint32_t)getpid() << 32) | sequence;
-    uint64_t start_ns = guest_monotonic_ns();
+    uint64_t start_ns = 0;
+    uint64_t observation_token = observation_cuda_call_begin(
+        symbol, call_id, &start_ns);
+    if (!start_ns)
+        start_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, call_id);
     OLOG("api_chain event=guest-entry call_id=0x%016" PRIx64
          " symbol=%s command=0x%x guest_ns=%" PRIu64 "\n",
@@ -816,7 +1303,8 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
     if (g_test_execute_cmd) {
         CUresult result = g_test_execute_cmd(cmd);
-        uint64_t end_ns = guest_monotonic_ns();
+        uint64_t end_ns = observation_cuda_call_end(
+            observation_token, result, guest_monotonic_ns());
         reg_write64(CXL_GPU_REG_CALL_ID, 0);
         OLOG("api_chain event=guest-return call_id=0x%016" PRIx64
              " symbol=%s command=0x%x guest_ns=%" PRIu64
@@ -836,7 +1324,8 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 #endif
     uint32_t poll_count = 0;
     CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd, &poll_count);
-    uint64_t end_ns = guest_monotonic_ns();
+    uint64_t end_ns = observation_cuda_call_end(
+        observation_token, result, guest_monotonic_ns());
     reg_write64(CXL_GPU_REG_CALL_ID, 0);
     OLOG("api_chain event=guest-return call_id=0x%016" PRIx64
          " symbol=%s command=0x%x guest_ns=%" PRIu64
@@ -2266,6 +2755,11 @@ CUresult cuInit(unsigned int flags) {
     if (find_and_map_device() < 0) {
         return CUDA_ERROR_NO_DEVICE;
     }
+    if (g_direct_source_enabled &&
+        cxl_gpu_transport_open_source(&g_transport) != 0) {
+        DLOG("direct source device unavailable: %s\n", strerror(errno));
+        return direct_source_errno_result(errno);
+    }
 
     /* Check device status */
     uint32_t status = reg_read32(CXL_GPU_REG_STATUS);
@@ -2580,6 +3074,8 @@ CUresult cuCtxSynchronize(void) {
         return CUDA_ERROR_NOT_INITIALIZED;
     cmd_lock();
     CUresult err = execute_cmd(CXL_GPU_CMD_CTX_SYNC);
+    if (err == CUDA_SUCCESS && g_direct_source_enabled)
+        err = direct_sources_complete_locked(0, true);
     cmd_unlock();
     return err;
 }
@@ -2792,6 +3288,236 @@ typedef struct CXLBatchHtoDPlanEntry {
     const void *source;
 } CXLBatchHtoDPlanEntry;
 
+static CUresult direct_source_errno_result(int error) {
+    switch (error) {
+    case EINVAL:
+    case EFAULT:
+        return CUDA_ERROR_INVALID_VALUE;
+    case ENOMEM:
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    case ENODEV:
+    case ENOTTY:
+    case EOPNOTSUPP:
+        return CUDA_ERROR_NOT_SUPPORTED;
+    default:
+        return CUDA_ERROR_UNKNOWN;
+    }
+}
+
+static CUresult direct_source_unregister_locked(uint64_t source_id) {
+    reg_write64(CXL_GPU_REG_PARAM0, source_id);
+    return execute_cmd(CXL_GPU_CMD_SOURCE_UNREGISTER);
+}
+
+static CUresult direct_sources_complete_locked(uint64_t stream_wire,
+                                               bool all_streams) {
+    CXLDirectSourcePending **link = &g_direct_source_pending;
+
+    while (*link) {
+        CXLDirectSourcePending *pending = *link;
+        if (!all_streams && pending->stream_wire != stream_wire) {
+            link = &pending->next;
+            continue;
+        }
+        CUresult result = direct_source_unregister_locked(pending->source_id);
+        if (result != CUDA_SUCCESS)
+            return result;
+        *link = pending->next;
+        free(pending);
+    }
+    return CUDA_SUCCESS;
+}
+
+static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
+                                         CUdeviceptr *srcs,
+                                         size_t *sizes, size_t count,
+                                         size_t *failIdx,
+                                         uint64_t stream_wire) {
+    struct cxl_type2_source_range_v1 *kernel_ranges = NULL;
+    struct cxl_type2_source_run_v1 *kernel_runs = NULL;
+    CXLGPUSourceRangeV1 *wire_ranges = NULL;
+    CXLGPUSourceRunV1 *wire_runs = NULL;
+    CXLGPUDirectRangeV1 *direct_ranges = NULL;
+    CXLDirectSourcePending *pending = NULL;
+    struct cxl_type2_source_acquire_v1 acquire = {0};
+    struct cxl_type2_source_release_v1 release = {0};
+    uint64_t source_id = 0;
+    size_t register_bytes;
+    size_t direct_bytes;
+    CUresult result = CUDA_SUCCESS;
+
+    if (g_transport.source_fd < 0 || count > CXL_TYPE2_SOURCE_MAX_RANGES)
+        return CUDA_ERROR_NOT_SUPPORTED;
+    kernel_ranges = calloc(count, sizeof(*kernel_ranges));
+    kernel_runs = calloc(CXL_TYPE2_SOURCE_MAX_RUNS, sizeof(*kernel_runs));
+    wire_ranges = calloc(count, sizeof(*wire_ranges));
+    direct_ranges = calloc(count, sizeof(*direct_ranges));
+    if (!kernel_ranges || !kernel_runs || !wire_ranges || !direct_ranges) {
+        result = CUDA_ERROR_OUT_OF_MEMORY;
+        goto out;
+    }
+    for (size_t index = 0; index < count; index++) {
+        if (!srcs[index] || !dsts[index] || !sizes[index] ||
+            srcs[index] > UINTPTR_MAX ||
+            sizes[index] > UINTPTR_MAX - (uintptr_t)srcs[index] ||
+            sizes[index] > UINT64_MAX - dsts[index]) {
+            *failIdx = index;
+            result = CUDA_ERROR_INVALID_VALUE;
+            goto out;
+        }
+        kernel_ranges[index].user_address = srcs[index];
+        kernel_ranges[index].length = sizes[index];
+    }
+    acquire.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
+    acquire.ranges_ptr = (uintptr_t)kernel_ranges;
+    acquire.runs_ptr = (uintptr_t)kernel_runs;
+    acquire.range_count = count;
+    acquire.run_capacity = CXL_TYPE2_SOURCE_MAX_RUNS;
+    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_ACQUIRE, &acquire) != 0) {
+        result = direct_source_errno_result(errno);
+        goto out;
+    }
+    release.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
+    release.lease_handle = acquire.lease_handle;
+
+    if (!acquire.run_count || acquire.run_count > CXL_TYPE2_SOURCE_MAX_RUNS ||
+        count > (SIZE_MAX - sizeof(CXLGPUSourceRegisterV1)) /
+                    sizeof(*wire_ranges)) {
+        result = CUDA_ERROR_UNKNOWN;
+        goto release_lease;
+    }
+    register_bytes = sizeof(CXLGPUSourceRegisterV1) +
+                     count * sizeof(*wire_ranges);
+    if (acquire.run_count >
+            (CXL_GPU_BATCH_DATA_SIZE - register_bytes) / sizeof(*wire_runs)) {
+        result = CUDA_ERROR_NOT_SUPPORTED;
+        goto release_lease;
+    }
+    register_bytes += acquire.run_count * sizeof(*wire_runs);
+    direct_bytes = count * sizeof(*direct_ranges);
+    wire_runs = calloc(acquire.run_count, sizeof(*wire_runs));
+    pending = calloc(1, sizeof(*pending));
+    if (!wire_runs || !pending) {
+        result = CUDA_ERROR_OUT_OF_MEMORY;
+        goto release_lease;
+    }
+
+    CXLGPUSourceRegisterV1 header = {
+        .range_count = count,
+        .run_count = acquire.run_count,
+        .lease_handle = acquire.lease_handle,
+        .logical_bytes = acquire.logical_bytes,
+        .unique_dmap_bytes = acquire.unique_dmap_bytes,
+    };
+    for (size_t index = 0; index < count; index++) {
+        wire_ranges[index] = (CXLGPUSourceRangeV1){
+            .first_run = kernel_ranges[index].first_run,
+            .run_count = kernel_ranges[index].run_count,
+            .first_run_byte_offset =
+                kernel_ranges[index].first_run_byte_offset,
+            .length = kernel_ranges[index].length,
+        };
+        direct_ranges[index] = (CXLGPUDirectRangeV1){
+            .destination = dsts[index],
+            .size = sizes[index],
+            .source_range = index,
+        };
+    }
+    for (size_t index = 0; index < acquire.run_count; index++) {
+        wire_runs[index] = (CXLGPUSourceRunV1){
+            .guest_phys_addr = kernel_runs[index].guest_phys_addr,
+            .length = kernel_runs[index].length,
+        };
+    }
+
+    cmd_lock();
+    if (batch_data_write(0, &header, sizeof(header)) != 0 ||
+        batch_data_write(sizeof(header), wire_ranges,
+                         count * sizeof(*wire_ranges)) != 0 ||
+        batch_data_write(sizeof(header) + count * sizeof(*wire_ranges),
+                         wire_runs, acquire.run_count * sizeof(*wire_runs)) != 0) {
+        result = CUDA_ERROR_UNKNOWN;
+        goto unlock_release;
+    }
+    reg_write64(CXL_GPU_REG_PARAM0, register_bytes);
+    result = execute_cmd(CXL_GPU_CMD_SOURCE_REGISTER);
+    source_id = reg_read64(CXL_GPU_REG_RESULT0);
+    if (result != CUDA_SUCCESS || !source_id) {
+        if (result == CUDA_SUCCESS)
+            result = CUDA_ERROR_UNKNOWN;
+        goto unlock_release;
+    }
+
+    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0) {
+        result = direct_source_errno_result(errno);
+        CUresult unregister_result = direct_source_unregister_locked(source_id);
+        if (unregister_result != CUDA_SUCCESS)
+            result = unregister_result;
+        source_id = 0;
+        release.lease_handle = 0;
+        goto unlock_release;
+    }
+    release.lease_handle = 0;
+    for (size_t index = 0; index < count; index++)
+        direct_ranges[index].source_id = source_id;
+    if (batch_data_write(0, direct_ranges, direct_bytes) != 0) {
+        result = CUDA_ERROR_UNKNOWN;
+        goto unregister_source;
+    }
+    reg_write64(CXL_GPU_REG_PARAM0, count);
+    reg_write64(CXL_GPU_REG_PARAM1, direct_bytes);
+    reg_write64(CXL_GPU_REG_PARAM2, stream_wire);
+    result = execute_cmd(CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC);
+    if (result != CUDA_SUCCESS) {
+        uint64_t failed = reg_read64(CXL_GPU_REG_RESULT0);
+        uint64_t fragments_enqueued = reg_read64(CXL_GPU_REG_RESULT2);
+        if (failed < count)
+            *failIdx = failed;
+        if (fragments_enqueued) {
+            pending->source_id = source_id;
+            pending->stream_wire = stream_wire;
+            pending->next = g_direct_source_pending;
+            g_direct_source_pending = pending;
+            pending = NULL;
+            source_id = 0;
+            cmd_unlock();
+            goto out;
+        }
+        goto unregister_source;
+    }
+    pending->source_id = source_id;
+    pending->stream_wire = stream_wire;
+    pending->next = g_direct_source_pending;
+    g_direct_source_pending = pending;
+    pending = NULL;
+    source_id = 0;
+    cmd_unlock();
+    goto out;
+
+unregister_source:
+    {
+        CUresult unregister_result = direct_source_unregister_locked(source_id);
+        if (unregister_result != CUDA_SUCCESS)
+            result = unregister_result;
+        source_id = 0;
+    }
+unlock_release:
+    cmd_unlock();
+release_lease:
+    if (release.lease_handle &&
+        ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0 &&
+        result == CUDA_SUCCESS)
+        result = direct_source_errno_result(errno);
+out:
+    free(pending);
+    free(direct_ranges);
+    free(wire_runs);
+    free(wire_ranges);
+    free(kernel_runs);
+    free(kernel_ranges);
+    return result;
+}
+
 CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
                             size_t *sizes, size_t count,
                             CUmemcpyAttributes *attrs, size_t *attrsIdxs,
@@ -2829,6 +3555,26 @@ CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
         count > (SIZE_MAX - sizeof(CXLGPUBatchHtoDHeader)) /
                     sizeof(CXLGPUBatchHtoDRange))
         return CUDA_ERROR_NOT_SUPPORTED;
+
+    if (g_direct_source_enabled) {
+        for (size_t index = 0; index < count; index++) {
+            if (source_bytes > SIZE_MAX - sizes[index]) {
+                *failIdx = index;
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+            source_bytes += sizes[index];
+        }
+        async_copy_trace_begin("cuMemcpyBatchAsync", source_bytes, count,
+                               hStream, "direct-source");
+        result = cuMemcpyBatchDirectAsync(dsts, srcs, sizes, count, failIdx,
+                                          stream_wire);
+        OLOG("batch_htod_direct public_sequence=%" PRIu64
+             " result=%d fail_idx=%zu ranges=%zu source_bytes=%zu"
+             " payload_bytes=0 stream_wire=%" PRIu64 "\n",
+             g_async_copy_trace.public_sequence, result, *failIdx, count,
+             source_bytes, stream_wire);
+        return async_copy_trace_end(result);
+    }
 
     table_end = sizeof(CXLGPUBatchHtoDHeader) +
                 count * sizeof(CXLGPUBatchHtoDRange);
@@ -4528,14 +5274,17 @@ CUresult cuStreamCreate(CUstream *phStream, unsigned int Flags) {
 }
 
 CUresult cuStreamDestroy_v2(CUstream hStream) {
-    uint64_t id;
+    uint64_t id, wire;
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
-    if (!cxl_gpu_stream_handle_id(hStream, &id))
+    if (!cxl_gpu_stream_handle_id(hStream, &id) ||
+        !cxl_gpu_stream_wire(hStream, &wire))
         return CUDA_ERROR_INVALID_HANDLE;
     cmd_lock();
     reg_write64(CXL_GPU_REG_PARAM0, id);
     CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_DESTROY);
+    if (result == CUDA_SUCCESS && g_direct_source_enabled)
+        result = direct_sources_complete_locked(wire, false);
     cmd_unlock();
     return result;
 }
@@ -4549,6 +5298,8 @@ CUresult cuStreamSynchronize(CUstream hStream) {
     cmd_lock();
     reg_write64(CXL_GPU_REG_PARAM0, wire);
     CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_SYNC);
+    if (result == CUDA_SUCCESS && g_direct_source_enabled)
+        result = direct_sources_complete_locked(wire, false);
     cmd_unlock();
     return result;
 }
@@ -5975,8 +6726,20 @@ CUresult cuCxlGetCoherentBase(CUdeviceptr *base, size_t *size, CUdevice dev) {
 __attribute__((constructor)) static void libcuda_init(void) {
     static const size_t observation_buffer_size = 1024 * 1024;
     const char *observation_log = getenv("CXL_CUDA_OBSERVATION_LOG");
+    const char *direct_source = getenv("CXL_CUDA_DIRECT_SOURCE");
 
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
+    if (direct_source) {
+        if (strcmp(direct_source, "0") == 0)
+            g_direct_source_enabled = 0;
+        else if (strcmp(direct_source, "1") == 0)
+            g_direct_source_enabled = 1;
+        else {
+            fprintf(stderr,
+                    "[CXL-CUDA] CXL_CUDA_DIRECT_SOURCE must be 0 or 1\n");
+            abort();
+        }
+    }
     if (observation_log) {
         if (observation_log[0] != '/') {
             fprintf(stderr, "[CXL-CUDA] CXL_CUDA_OBSERVATION_LOG must be an absolute path\n");
@@ -6005,6 +6768,8 @@ __attribute__((constructor)) static void libcuda_init(void) {
             g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
             g_htod_route.minimum_transfer_bytes,
             g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
+    fprintf(stderr, "[CXL-CUDA] direct_source_config enabled=%d\n",
+            g_direct_source_enabled);
     DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
 }
 
@@ -6012,6 +6777,7 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
     CXLCudaErrorName *error_name;
 
     DLOG("libcuda.so unloading\n");
+    observation_abandon_active_decode();
     function_param_layouts_clear("process-exit");
     graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);

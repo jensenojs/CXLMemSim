@@ -152,6 +152,10 @@ install -m 0755 "$GUEST_DIR/libbatch_copy_probe.so" "$PAYLOAD/guest/libbatch_cop
 # to clone a floating component repository to reconstruct its API route.
 install -m 0644 "$GUEST_DIR/libcuda.c" "$PAYLOAD/evidence/cuda-api/libcuda.c"
 install -m 0644 "$GUEST_DIR/cxl_gpu_cmd.h" "$PAYLOAD/evidence/cuda-api/cxl_gpu_cmd.h"
+install -m 0644 "$GUEST_DIR/include/linux/cxl_type2_accel.h" \
+    "$PAYLOAD/evidence/cuda-api/cxl_type2_accel.h"
+install -m 0644 "$GUEST_DIR/cxl_cuda_observation.h" \
+    "$PAYLOAD/evidence/cuda-api/cxl_cuda_observation.h"
 install -m 0755 "$GUEST_DIR/collect_cuda_elf_static_evidence.py" \
     "$PAYLOAD/evidence/cuda-api/collect_cuda_elf_static_evidence.py"
 ln -s libcuda.so.1 "$PAYLOAD/guest/libcuda.so"
