@@ -3374,7 +3374,18 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     acquire.range_count = count;
     acquire.run_capacity = CXL_TYPE2_SOURCE_MAX_RUNS;
     if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_ACQUIRE, &acquire) != 0) {
-        result = direct_source_errno_result(errno);
+        int source_errno = errno;
+        fprintf(stderr,
+                "[CXL-CUDA] direct_source_acquire_failed errno=%d"
+                " range_count=%zu\n",
+                source_errno, count);
+        for (size_t index = 0; index < count; index++) {
+            fprintf(stderr,
+                    "[CXL-CUDA] direct_source_acquire_range index=%zu"
+                    " source=0x%" PRIx64 " length=%zu\n",
+                    index, (uint64_t)srcs[index], sizes[index]);
+        }
+        result = direct_source_errno_result(source_errno);
         goto out;
     }
     release.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
