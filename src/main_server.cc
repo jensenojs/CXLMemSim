@@ -75,7 +75,9 @@ constexpr uint8_t OP_BI_DISABLE = 15; // Endpoint BI disable notification
 constexpr uint8_t OP_BI_INVALIDATE = 16; // Back-invalidate range
 constexpr uint8_t OP_BI_WRITEBACK = 17; // Back-invalidate dirty writeback
 constexpr uint8_t OP_BI_QUERY = 18; // Return BI fabric stats
-constexpr uint8_t OP_MAX = OP_BI_QUERY;
+constexpr uint8_t OP_RANGE_READ = 19; // Range-level CXL.mem read notification
+constexpr uint8_t OP_RANGE_WRITE = 20; // Range-level CXL.mem write notification
+constexpr uint8_t OP_MAX = OP_RANGE_WRITE;
 
 // A fixed CXL.mem request must not hold a client thread beyond the protocol
 // boundary when the peer sends a partial frame or stops responding.
@@ -1324,8 +1326,8 @@ uint64_t ThreadPerConnectionServer::calculate_total_latency(uint64_t base_latenc
         latency += 50;
     }
 
-    // Add transfer time based on bandwidth (64GB/s)
-    double transfer_time_ns = (size * 8.0) / (64.0 * 1e9) * 1e9;
+    // Add transfer time based on bandwidth (64 GB/s == 64 bytes/ns)
+    double transfer_time_ns = static_cast<double>(size) / 64.0;
     latency += transfer_time_ns;
 
     return static_cast<uint64_t>(latency);
@@ -1446,6 +1448,33 @@ void ThreadPerConnectionServer::handle_request(int client_fd, int thread_id, Ser
 
     if (is_bi_op(req.op_type)) {
         handle_bi_request(thread_id, req, resp);
+        return;
+    }
+
+    if (req.op_type == OP_RANGE_READ || req.op_type == OP_RANGE_WRITE) {
+        double fabric_latency_ns = 0.0;
+        if (req.size == 0 || !check_fabric_access(
+                                 thread_id, req, req.op_type == OP_RANGE_WRITE,
+                                 false, fabric_latency_ns, resp)) {
+            return;
+        }
+        congestion_info.active_requests++;
+        double congestion_factor = calculate_congestion_factor();
+        update_congestion_stats(req.size);
+        resp.status = 0;
+        resp.latency_ns = calculate_total_latency(
+            controller->dramlatency + fabric_latency_ns, congestion_factor,
+            false, req.size);
+        total_latency_ns += resp.latency_ns;
+        if (req.op_type == OP_RANGE_READ) {
+            total_reads++;
+        } else {
+            total_writes++;
+        }
+        controller->record_cxl_access(req.timestamp,
+                                      static_cast<uint64_t>(thread_id),
+                                      req.addr, req.op_type == OP_RANGE_WRITE);
+        congestion_info.active_requests--;
         return;
     }
 
