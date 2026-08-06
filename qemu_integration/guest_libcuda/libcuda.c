@@ -1093,6 +1093,7 @@ typedef enum CXLBar4RangeKind {
 
 typedef struct CXLHtoDRoute {
     bool enabled;
+    bool full_transfer;
     size_t minimum_transfer_bytes;
     size_t prefix_bytes_per_transfer;
     size_t total_bytes;
@@ -1108,6 +1109,13 @@ static CXLHtoDRoute g_htod_route;
 static CXLBar4RangeKind bar4_range_kind(const void *host_ptr, size_t size,
                                         uint64_t *offset);
 static CUresult htod_route_allocate_locked(void);
+
+static const char *htod_route_mode(void) {
+    if (!g_htod_route.enabled)
+        return "disabled";
+    return g_htod_route.full_transfer ? "cxlmem-bounded-full-transfer"
+                                      : "cxlmem-bounded-prefix";
+}
 
 /* The CUDA shim and cxl-gpu-case share the transport implementation.  These
  * wrappers preserve the existing call sites while keeping BAR2 ownership in
@@ -3384,22 +3392,32 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
     size_t offset = 0;
     if (g_htod_route.enabled && source_kind == CXL_BAR4_RANGE_ORDINARY &&
         byteCount >= g_htod_route.minimum_transfer_bytes) {
-        size_t routed;
+        size_t route_target;
         CUresult result;
 
         cmd_lock();
-        routed = g_htod_route.remaining_bytes;
-        if (routed > g_htod_route.prefix_bytes_per_transfer)
-            routed = g_htod_route.prefix_bytes_per_transfer;
-        if (routed > byteCount)
-            routed = byteCount;
-        if (routed) {
+        route_target = g_htod_route.full_transfer ? byteCount
+                                                  : g_htod_route.prefix_bytes_per_transfer;
+        if (route_target > byteCount)
+            route_target = byteCount;
+        if (route_target > g_htod_route.remaining_bytes) {
+            if (g_htod_route.full_transfer) {
+                cmd_unlock();
+                return async_copy_trace_end(CUDA_ERROR_OUT_OF_MEMORY);
+            }
+            route_target = g_htod_route.remaining_bytes;
+        }
+        while (offset < route_target) {
+            size_t routed = route_target - offset;
+            if (routed > g_htod_route.prefix_bytes_per_transfer)
+                routed = g_htod_route.prefix_bytes_per_transfer;
             result = htod_route_allocate_locked();
             if (result == CUDA_SUCCESS) {
-                memcpy(g_htod_route.staging, srcHost, routed);
+                memcpy(g_htod_route.staging, (const uint8_t *)srcHost + offset,
+                       routed);
                 __sync_synchronize();
                 reg_write64(CXL_GPU_REG_PARAM0, g_htod_route.staging_offset);
-                reg_write64(CXL_GPU_REG_PARAM1, dstDevice);
+                reg_write64(CXL_GPU_REG_PARAM1, dstDevice + offset);
                 reg_write64(CXL_GPU_REG_PARAM2, routed);
                 reg_write64(CXL_GPU_REG_PARAM3, stream_wire);
                 result = execute_cmd(CXL_GPU_CMD_BULK_HTOD_ASYNC);
@@ -3421,9 +3439,11 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
                          g_transport.pci_bdf[0] ? g_transport.pci_bdf : "unavailable",
                          g_async_copy_trace.public_sequence,
                          g_async_copy_trace.last_command_index,
-                         g_async_copy_trace.last_call_id, (uintptr_t)srcHost,
+                         g_async_copy_trace.last_call_id,
+                         (uintptr_t)srcHost + offset,
                          routed, g_htod_route.staging_offset, routed,
-                         (uint64_t)dstDevice, routed, guest_monotonic_ns());
+                         (uint64_t)dstDevice + offset, routed,
+                         guest_monotonic_ns());
                 }
             }
             if (result != CUDA_SUCCESS) {
@@ -3441,7 +3461,7 @@ CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t
                  routed, g_htod_route.staging_offset, stream_wire,
                  g_htod_route.total_bytes - g_htod_route.remaining_bytes,
                  g_htod_route.total_bytes);
-            offset = routed;
+            offset += routed;
         }
         cmd_unlock();
     }
@@ -6772,7 +6792,9 @@ static void htod_route_parse(void) {
         }
         return;
     }
-    if (strcmp(mode, "cxlmem-bounded-prefix") != 0 ||
+    bool prefix_mode = strcmp(mode, "cxlmem-bounded-prefix") == 0;
+    bool full_mode = strcmp(mode, "cxlmem-bounded-full-transfer") == 0;
+    if ((!prefix_mode && !full_mode) ||
         !parse_positive_size("CXL_CUDA_HTOD_ROUTE_MIN_BYTES", minimum,
                              &g_htod_route.minimum_transfer_bytes) ||
         !parse_positive_size("CXL_CUDA_HTOD_ROUTE_PREFIX_BYTES", prefix,
@@ -6780,12 +6802,13 @@ static void htod_route_parse(void) {
         !parse_positive_size("CXL_CUDA_HTOD_ROUTE_TOTAL_BYTES", total,
                              &g_htod_route.total_bytes) ||
         g_htod_route.prefix_bytes_per_transfer > CXL_GPU_BULK_TRANSFER_SIZE ||
-        g_htod_route.minimum_transfer_bytes <
-            g_htod_route.prefix_bytes_per_transfer) {
+        (prefix_mode && g_htod_route.minimum_transfer_bytes <
+                            g_htod_route.prefix_bytes_per_transfer)) {
         fprintf(stderr, "[CXL-CUDA] invalid bounded HtoD route contract\n");
         abort();
     }
     g_htod_route.enabled = true;
+    g_htod_route.full_transfer = full_mode;
     g_htod_route.remaining_bytes = g_htod_route.total_bytes;
 }
 
@@ -7033,7 +7056,7 @@ __attribute__((constructor)) static void libcuda_init(void) {
     fprintf(stderr,
             "[CXL-CUDA] htod_route_config mode=%s minimum_transfer_bytes=%zu "
             "prefix_bytes_per_transfer=%zu total_bytes=%zu\n",
-            g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+            htod_route_mode(),
             g_htod_route.minimum_transfer_bytes,
             g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
     fprintf(stderr, "[CXL-CUDA] direct_source_config enabled=%d\n",
@@ -7057,7 +7080,7 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
     fprintf(stderr,
             "[CXL-CUDA] htod_route_summary mode=%s routed_calls=%zu "
             "routed_bytes=%zu remaining_bytes=%zu fallback_count=%zu\n",
-            g_htod_route.enabled ? "cxlmem-bounded-prefix" : "disabled",
+            htod_route_mode(),
             g_htod_route.routed_calls, g_htod_route.routed_bytes,
             g_htod_route.remaining_bytes, g_htod_route.fallback_count);
     if (g_bar4_ptr) {
