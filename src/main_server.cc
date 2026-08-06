@@ -757,8 +757,10 @@ int main(int argc, char *argv[]) {
                 topo_file.close();
             }
         } else {
-            SPDLOG_WARN("Topology file {} not found, using default topology", topology);
-            // Create a default topology: one switch with the expander
+            SPDLOG_WARN("Topology file {} not found; using built-in topology '(1);' "
+                        "(one switch, one memory expander)",
+                        topology);
+            // Create the built-in topology: one switch with the expander.
             controller->construct_topo("(1);");
         }
     } catch (const std::exception &e) {
@@ -790,7 +792,7 @@ int main(int argc, char *argv[]) {
     }
 
     SPDLOG_INFO("========================================");
-    SPDLOG_INFO("CXLMemSim CXL Type3 Memory Server");
+    SPDLOG_INFO("CXLMemSim CXL Memory Backing Server");
     SPDLOG_INFO("========================================");
     SPDLOG_INFO("Server Configuration:");
     const char *mode_str = (comm_mode == CommMode::TCP)        ? "TCP"
