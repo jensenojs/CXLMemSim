@@ -429,6 +429,7 @@ static char *g_observation_buffer = NULL;
     } while (0)
 
 #define CXL_OBSERVATION_CATEGORY_COUNT 8
+#define CXL_OBSERVATION_PUBLIC_CALL 0
 #define CXL_OBSERVATION_OPEN_TOKEN_COUNT 4096
 #define CXL_OBSERVATION_GAP_BOUNDARY CXL_OBSERVATION_CATEGORY_COUNT
 #define CXL_OBSERVATION_GAP_IDENTITY_COUNT (CXL_OBSERVATION_CATEGORY_COUNT + 1)
@@ -470,6 +471,7 @@ typedef struct CXLObservationOpenToken {
     uint64_t graph_ordinal;
     uint64_t operation_sequence;
     uint32_t category;
+    uint32_t command;
     CXLObservationIdentity identity;
 } CXLObservationOpenToken;
 
@@ -486,6 +488,8 @@ typedef struct CXLObservationLedger {
     const char *first_error;
     CXLObservationAggregate categories[CXL_OBSERVATION_CATEGORY_COUNT];
     CXLObservationAggregate all_known;
+    uint64_t command_calls[256];
+    uint64_t command_total_duration_ns[256];
     CXLObservationGapAggregate
         all_known_gaps[CXL_OBSERVATION_GAP_IDENTITY_COUNT]
                       [CXL_OBSERVATION_GAP_IDENTITY_COUNT];
@@ -632,6 +636,7 @@ static void observation_aggregate_end_locked(CXLObservationAggregate *aggregate,
 static uint64_t observation_span_begin_locked(uint32_t category,
                                               uint64_t graph_ordinal,
                                               uint64_t operation_sequence,
+                                              uint32_t command,
                                               const char *owner,
                                               const char *operation,
                                               uint64_t *begin_ns) {
@@ -683,6 +688,7 @@ static uint64_t observation_span_begin_locked(uint32_t category,
         .graph_ordinal = graph_ordinal,
         .operation_sequence = operation_sequence,
         .category = category,
+        .command = command,
         .identity = identity,
     };
     g_observation_ledger.open_count++;
@@ -723,6 +729,13 @@ static CUresult observation_span_end_locked(uint64_t token,
         now_ns, open->identity);
     observation_aggregate_end_locked(&g_observation_ledger.all_known,
                                      open->begin_ns, now_ns, open->identity);
+    if (open->category == CXL_OBSERVATION_PUBLIC_CALL && open->command < 256) {
+        observation_add_locked(
+            &g_observation_ledger.command_calls[open->command], 1);
+        observation_add_locked(
+            &g_observation_ledger.command_total_duration_ns[open->command],
+            now_ns - open->begin_ns);
+    }
     memset(open, 0, sizeof(*open));
     g_observation_ledger.open_count--;
     if (end_ns)
@@ -893,8 +906,29 @@ static void observation_validate_terminal_gaps_locked(uint64_t span_end_ns) {
         observation_fail_locked("gap-total-mismatch");
 }
 
+static void observation_validate_command_totals_locked(void) {
+    uint64_t calls = 0;
+    uint64_t duration_ns = 0;
+
+    for (uint32_t command = 0; command < 256; command++) {
+        if (!observation_add_locked(
+                &calls, g_observation_ledger.command_calls[command]) ||
+            !observation_add_locked(
+                &duration_ns,
+                g_observation_ledger.command_total_duration_ns[command]))
+            return;
+    }
+    if (calls != g_observation_ledger.categories[CXL_OBSERVATION_PUBLIC_CALL]
+                     .interval_count ||
+        duration_ns !=
+            g_observation_ledger.categories[CXL_OBSERVATION_PUBLIC_CALL]
+                .total_duration_ns)
+        observation_fail_locked("command-total-mismatch");
+}
+
 static void observation_emit_terminal_locked(uint64_t span_end_ns) {
     observation_validate_terminal_gaps_locked(span_end_ns);
+    observation_validate_command_totals_locked();
     for (uint32_t category = 0;
          category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
         observation_emit_summary_locked(g_observation_category_names[category],
@@ -905,6 +939,18 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns) {
     observation_emit_summary_locked("all_known", "guest-shim",
                                     &g_observation_ledger.all_known,
                                     span_end_ns);
+    for (uint32_t command = 0; command < 256; command++) {
+        if (g_observation_ledger.command_calls[command] == 0)
+            continue;
+        fprintf(stderr,
+                "[CXL-CUDA] command_summary schema=guest-command-summary-v1"
+                " producer=guest-shim clock_domain=guest-monotonic"
+                " case_epoch=%" PRIu64 " scope=decode command=0x%x"
+                " calls=%" PRIu64 " total_duration_ns=%" PRIu64 "\n",
+                g_observation_ledger.case_epoch, command,
+                g_observation_ledger.command_calls[command],
+                g_observation_ledger.command_total_duration_ns[command]);
+    }
     observation_emit_gap_summaries_locked();
     fflush(stderr);
 }
@@ -952,7 +998,7 @@ CUresult cuCxlObservationSpanBeginV1(uint32_t category,
     }
     pthread_mutex_lock(&g_observation_ledger.lock);
     *token = observation_span_begin_locked(category, graph_ordinal,
-                                           operation_sequence, "llama",
+                                           operation_sequence, UINT32_MAX, "llama",
                                            g_observation_category_names[category],
                                            NULL);
     CUresult result = *token ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
@@ -1347,13 +1393,15 @@ static uint64_t guest_monotonic_ns(void) {
 }
 
 static uint64_t observation_cuda_call_begin(const char *symbol,
+                                            uint32_t command,
                                             uint64_t call_id,
                                             uint64_t *begin_ns) {
     if (!__atomic_load_n(&g_observation_fast_active, __ATOMIC_ACQUIRE))
         return 0;
     pthread_mutex_lock(&g_observation_ledger.lock);
     uint64_t token = observation_span_begin_locked(
-        0, 0, call_id, "guest-shim", symbol, begin_ns);
+        CXL_OBSERVATION_PUBLIC_CALL, 0, call_id, command,
+        "guest-shim", symbol, begin_ns);
     pthread_mutex_unlock(&g_observation_ledger.lock);
     return token;
 }
@@ -1411,7 +1459,7 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     uint64_t call_id = ((uint64_t)(uint32_t)getpid() << 32) | sequence;
     uint64_t start_ns = 0;
     uint64_t observation_token = observation_cuda_call_begin(
-        symbol, call_id, &start_ns);
+        symbol, cmd, call_id, &start_ns);
     if (!start_ns)
         start_ns = guest_monotonic_ns();
     reg_write64(CXL_GPU_REG_CALL_ID, call_id);
