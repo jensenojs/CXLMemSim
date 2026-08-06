@@ -93,6 +93,7 @@ typedef struct {
 #define CUDA_ERROR_PRIMARY_CONTEXT_ACTIVE 708
 #define CUDA_ERROR_CONTEXT_IS_DESTROYED 709
 #define CUDA_ERROR_NOT_SUPPORTED 801
+#define CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED 900
 
 #define CU_GET_PROC_ADDRESS_SUCCESS 0
 #define CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND 1
@@ -156,6 +157,8 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction 
 CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex,
                             size_t *paramOffset, size_t *paramSize);
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dst, CUdeviceptr src, size_t bytes,
+                              CUstream stream);
 CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
                             size_t *sizes, size_t count,
                             CUmemcpyAttributes *attrs, size_t *attrsIdxs,
@@ -215,6 +218,7 @@ static CUresult batch_result = CUDA_SUCCESS;
 static uint64_t batch_fail_idx = UINT64_MAX;
 static uint64_t batch_success_count = 3;
 static CUresult source_unregister_result = CUDA_SUCCESS;
+static CUresult dtod_async_result = CUDA_SUCCESS;
 static CUresult lease_release_result = CUDA_SUCCESS;
 static uint64_t released_lease;
 static unsigned int lease_release_count;
@@ -392,6 +396,8 @@ static CUresult fake_execute(uint32_t command) {
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM5) == memcpy2d_row_count);
         memcpy2d_phase = memcpy2d_row_count;
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_MEM_COPY_DTOD_ASYNC:
+        return dtod_async_result;
     case CXL_GPU_CMD_MODULE_LOAD_CUBIN: {
         unsigned char observed[8] = {0};
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == cubin_expected_size);
@@ -831,6 +837,42 @@ static int test_memcpy2d_device_route(void) {
     return 0;
 }
 
+static int test_dtod_async_preserves_stream_without_synchronizing(void) {
+    const CUdeviceptr dst = UINT64_C(0x100000);
+    const CUdeviceptr src = UINT64_C(0x200000);
+    const size_t bytes = 4096;
+    const uint64_t stream_wire = 7;
+    CUstream stream = (CUstream)(uintptr_t)(UINT64_C(1) << 32 | stream_wire);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_initialized(1);
+    command_count = 0;
+    dtod_async_result = CUDA_SUCCESS;
+
+    CHECK(cuMemcpyDtoDAsync_v2(dst, src, bytes, stream) == CUDA_SUCCESS);
+    CHECK(command_count == 1 &&
+          commands[0] == CXL_GPU_CMD_MEM_COPY_DTOD_ASYNC);
+    CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == dst);
+    CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == src);
+    CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == bytes);
+    CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM3) == stream_wire);
+
+    command_count = 0;
+    dtod_async_result = CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
+    CHECK(cuMemcpyDtoDAsync_v2(dst, src, bytes, stream) ==
+          CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED);
+    CHECK(command_count == 1 &&
+          commands[0] == CXL_GPU_CMD_MEM_COPY_DTOD_ASYNC);
+
+    command_count = 0;
+    CHECK(cuMemcpyDtoDAsync_v2(dst, src, bytes,
+                               (CUstream)(uintptr_t)3) ==
+          CUDA_ERROR_INVALID_HANDLE);
+    CHECK(command_count == 0);
+    return 0;
+}
+
 static int test_library_fatbin_prefers_highest_compatible_cubin(void) {
     unsigned char fatbin[sizeof(CudartFatbinHeader) + 3 * (sizeof(CudartFatbinFileHeader) + 8)] = {0};
     CudartFatbinHeader header = {
@@ -1239,7 +1281,8 @@ int main(void) {
            test_context_local_storage_keeps_managers_separate() || test_context_check_preserves_result2() ||
            test_cublas_context_stream_export_table() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
-           test_memcpy2d_device_route() || test_library_fatbin_prefers_highest_compatible_cubin() ||
+           test_memcpy2d_device_route() || test_dtod_async_preserves_stream_without_synchronizing() ||
+           test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity() ||
            test_direct_elf_library_kernel_function_lifecycle() ||

@@ -5876,15 +5876,25 @@ CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteC
 }
 
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
-    /* knockout: DtoD uses a blocking Type-2 command. Synchronize the source
-     * stream before the copy; add an async BAR2 command only when concurrent
-     * stream execution is measured. */
+    uint64_t stream_wire;
+
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!dstDevice || !srcDevice)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return CUDA_ERROR_INVALID_HANDLE;
+
     async_copy_trace_begin("cuMemcpyDtoDAsync", byteCount, 1, hStream,
-                           "blocking");
-    CUresult result = cuStreamSynchronize(hStream);
-    if (result != CUDA_SUCCESS)
-        return async_copy_trace_end(result);
-    return async_copy_trace_end(cuMemcpyDtoD_v2(dstDevice, srcDevice, byteCount));
+                           "stream-forwarded");
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, dstDevice);
+    reg_write64(CXL_GPU_REG_PARAM1, srcDevice);
+    reg_write64(CXL_GPU_REG_PARAM2, byteCount);
+    reg_write64(CXL_GPU_REG_PARAM3, stream_wire);
+    CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_DTOD_ASYNC);
+    cmd_unlock();
+    return async_copy_trace_end(result);
 }
 
 CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
