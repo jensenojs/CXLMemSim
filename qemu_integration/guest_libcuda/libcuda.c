@@ -253,6 +253,7 @@ static int g_direct_source_enabled = 0;
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 static uint8_t g_test_bar2[CXL_GPU_CMD_REG_SIZE];
 static CUresult (*g_test_execute_cmd)(uint32_t cmd);
+static CUresult (*g_test_direct_source_lease_releaser)(uint64_t lease_handle);
 #endif
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLIBRY" diagnostic placeholder */
@@ -289,6 +290,7 @@ static CXLStreamCaptureSnapshot *g_stream_capture_snapshots;
 
 typedef struct CXLDirectSourcePending {
     uint64_t source_id;
+    uint64_t lease_handle;
     uint64_t stream_wire;
     struct CXLDirectSourcePending *next;
 } CXLDirectSourcePending;
@@ -1373,6 +1375,11 @@ void cxl_cuda_test_reset(void) {
         free(snapshot->dependencies);
         free(snapshot);
     }
+    while (g_direct_source_pending) {
+        CXLDirectSourcePending *pending = g_direct_source_pending;
+        g_direct_source_pending = pending->next;
+        free(pending);
+    }
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -1385,11 +1392,17 @@ void cxl_cuda_test_reset(void) {
     g_transport.bar_size = sizeof(g_test_bar2);
     g_initialized = 1;
     g_test_execute_cmd = NULL;
+    g_test_direct_source_lease_releaser = NULL;
     cxl_cuda_context_state_reset();
     context_storage_test_reset();
 }
 
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
+
+void cxl_cuda_test_set_direct_source_lease_releaser(
+    CUresult (*releaser)(uint64_t lease_handle)) {
+    g_test_direct_source_lease_releaser = releaser;
+}
 
 void cxl_cuda_test_set_initialized(int initialized) { g_initialized = initialized; }
 
@@ -3309,6 +3322,20 @@ static CUresult direct_source_unregister_locked(uint64_t source_id) {
     return execute_cmd(CXL_GPU_CMD_SOURCE_UNREGISTER);
 }
 
+static CUresult direct_source_lease_release(uint64_t lease_handle) {
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+    if (g_test_direct_source_lease_releaser)
+        return g_test_direct_source_lease_releaser(lease_handle);
+#endif
+    struct cxl_type2_source_release_v1 release = {
+        .version = CXL_TYPE2_SOURCE_UAPI_VERSION,
+        .lease_handle = lease_handle,
+    };
+    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0)
+        return direct_source_errno_result(errno);
+    return CUDA_SUCCESS;
+}
+
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                                                bool all_streams) {
     CXLDirectSourcePending **link = &g_direct_source_pending;
@@ -3319,7 +3346,14 @@ static CUresult direct_sources_complete_locked(uint64_t stream_wire,
             link = &pending->next;
             continue;
         }
-        CUresult result = direct_source_unregister_locked(pending->source_id);
+        CUresult result;
+        if (pending->source_id) {
+            result = direct_source_unregister_locked(pending->source_id);
+            if (result != CUDA_SUCCESS)
+                return result;
+            pending->source_id = 0;
+        }
+        result = direct_source_lease_release(pending->lease_handle);
         if (result != CUDA_SUCCESS)
             return result;
         *link = pending->next;
@@ -3459,16 +3493,6 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         goto unlock_release;
     }
 
-    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0) {
-        result = direct_source_errno_result(errno);
-        CUresult unregister_result = direct_source_unregister_locked(source_id);
-        if (unregister_result != CUDA_SUCCESS)
-            result = unregister_result;
-        source_id = 0;
-        release.lease_handle = 0;
-        goto unlock_release;
-    }
-    release.lease_handle = 0;
     for (size_t index = 0; index < count; index++)
         direct_ranges[index].source_id = source_id;
     if (batch_data_write(0, direct_ranges, direct_bytes) != 0) {
@@ -3486,30 +3510,42 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             *failIdx = failed;
         if (fragments_enqueued) {
             pending->source_id = source_id;
+            pending->lease_handle = release.lease_handle;
             pending->stream_wire = stream_wire;
             pending->next = g_direct_source_pending;
             g_direct_source_pending = pending;
             pending = NULL;
             source_id = 0;
+            release.lease_handle = 0;
             cmd_unlock();
             goto out;
         }
         goto unregister_source;
     }
     pending->source_id = source_id;
+    pending->lease_handle = release.lease_handle;
     pending->stream_wire = stream_wire;
     pending->next = g_direct_source_pending;
     g_direct_source_pending = pending;
     pending = NULL;
     source_id = 0;
+    release.lease_handle = 0;
     cmd_unlock();
     goto out;
 
 unregister_source:
     {
         CUresult unregister_result = direct_source_unregister_locked(source_id);
-        if (unregister_result != CUDA_SUCCESS)
+        if (unregister_result != CUDA_SUCCESS) {
             result = unregister_result;
+            pending->source_id = source_id;
+            pending->lease_handle = release.lease_handle;
+            pending->stream_wire = stream_wire;
+            pending->next = g_direct_source_pending;
+            g_direct_source_pending = pending;
+            pending = NULL;
+            release.lease_handle = 0;
+        }
         source_id = 0;
     }
 unlock_release:
@@ -3528,6 +3564,37 @@ out:
     free(kernel_ranges);
     return result;
 }
+
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
+                                             uint64_t lease_handle,
+                                             uint64_t stream_wire) {
+    CXLDirectSourcePending *pending = calloc(1, sizeof(*pending));
+    if (!pending)
+        abort();
+    pending->source_id = source_id;
+    pending->lease_handle = lease_handle;
+    pending->stream_wire = stream_wire;
+    pending->next = g_direct_source_pending;
+    g_direct_source_pending = pending;
+}
+
+CUresult cxl_cuda_test_complete_direct_sources(uint64_t stream_wire,
+                                               bool all_streams) {
+    cmd_lock();
+    CUresult result = direct_sources_complete_locked(stream_wire, all_streams);
+    cmd_unlock();
+    return result;
+}
+
+size_t cxl_cuda_test_direct_source_pending_count(void) {
+    size_t count = 0;
+    for (CXLDirectSourcePending *pending = g_direct_source_pending; pending;
+         pending = pending->next)
+        count++;
+    return count;
+}
+#endif
 
 CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
                             size_t *sizes, size_t count,

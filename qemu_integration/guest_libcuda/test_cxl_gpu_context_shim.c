@@ -113,6 +113,14 @@ typedef struct {
 
 void cxl_cuda_test_reset(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
+void cxl_cuda_test_set_direct_source_lease_releaser(
+    CUresult (*releaser)(uint64_t lease_handle));
+void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
+                                             uint64_t lease_handle,
+                                             uint64_t stream_wire);
+CUresult cxl_cuda_test_complete_direct_sources(uint64_t stream_wire,
+                                               bool all_streams);
+size_t cxl_cuda_test_direct_source_pending_count(void);
 void cxl_cuda_test_set_initialized(int initialized);
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
@@ -206,6 +214,10 @@ static unsigned char cubin_expected_first_byte = 0x80;
 static CUresult batch_result = CUDA_SUCCESS;
 static uint64_t batch_fail_idx = UINT64_MAX;
 static uint64_t batch_success_count = 3;
+static CUresult source_unregister_result = CUDA_SUCCESS;
+static CUresult lease_release_result = CUDA_SUCCESS;
+static uint64_t released_lease;
+static unsigned int lease_release_count;
 
 static const uint8_t batch_source0[] = {0x10, 0x11, 0x12};
 static const uint8_t batch_source1[] = {0x20, 0x21, 0x22, 0x23, 0x24};
@@ -248,6 +260,8 @@ typedef struct DestroyedContextThread {
 static CUresult fake_execute(uint32_t command) {
     commands[command_count++] = command;
     switch (command) {
+    case CXL_GPU_CMD_SOURCE_UNREGISTER:
+        return source_unregister_result;
     case CXL_GPU_CMD_CTX_CREATE:
         cxl_cuda_test_write_result(0, issued_token);
         return CUDA_SUCCESS;
@@ -392,6 +406,12 @@ static CUresult fake_execute(uint32_t command) {
     default:
         return CUDA_ERROR_INVALID_CONTEXT;
     }
+}
+
+static CUresult fake_lease_release(uint64_t lease_handle) {
+    released_lease = lease_handle;
+    lease_release_count++;
+    return lease_release_result;
 }
 
 static int test_query_and_context_sequence(void) {
@@ -1173,6 +1193,46 @@ static int test_batch_htod_materializes_one_command(void) {
     return 0;
 }
 
+static int test_direct_source_completion_orders_and_retries_release(void) {
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
+    command_count = 0;
+    source_unregister_result = CUDA_SUCCESS;
+    lease_release_result = CUDA_SUCCESS;
+    lease_release_count = 0;
+    released_lease = 0;
+
+    cxl_cuda_test_add_direct_source_pending(17, 23, 5);
+    CHECK(cxl_cuda_test_complete_direct_sources(5, false) == CUDA_SUCCESS);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_SOURCE_UNREGISTER);
+    CHECK(lease_release_count == 1 && released_lease == 23);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
+
+    command_count = 0;
+    lease_release_count = 0;
+    source_unregister_result = CUDA_ERROR_INVALID_CONTEXT;
+    cxl_cuda_test_add_direct_source_pending(29, 31, 7);
+    CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_ERROR_INVALID_CONTEXT);
+    CHECK(command_count == 1);
+    CHECK(lease_release_count == 0);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 1);
+
+    source_unregister_result = CUDA_SUCCESS;
+    lease_release_result = CUDA_ERROR_INVALID_VALUE;
+    CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2);
+    CHECK(lease_release_count == 1 && released_lease == 31);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 1);
+
+    lease_release_result = CUDA_SUCCESS;
+    CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_SUCCESS);
+    CHECK(command_count == 2);
+    CHECK(lease_release_count == 2 && released_lease == 31);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -1187,5 +1247,6 @@ int main(void) {
            test_launch_reuses_param_layout_until_module_unload() ||
            test_graph_instantiate_with_flags_reuses_existing_command() ||
            test_graph_exec_update_preserves_result_info() ||
-           test_batch_htod_materializes_one_command();
+           test_batch_htod_materializes_one_command() ||
+           test_direct_source_completion_orders_and_retries_release();
 }
