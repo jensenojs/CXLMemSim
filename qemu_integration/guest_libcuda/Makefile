@@ -162,6 +162,9 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	@complete="$$(./$(OBSERVATION_LEDGER_TEST) complete 2>&1)"; \
 	printf '%s\n' "$$complete"; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 9; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_pair_summary schema=interval-pair-summary-v1')" -eq 28; \
+	printf '%s\n' "$$complete" | grep 'category_a=selected_range_plan category_b=host_result_read ' | grep 'status=complete' >/dev/null; \
+	printf '%s\n' "$$complete" | awk '/interval_pair_summary/ && /category_a=selected_range_plan category_b=host_result_read / { for (i = 1; i <= NF; i++) { if ($$i ~ /^intersection_union_ns=/) { split($$i, intersection, "=") } if ($$i ~ /^category_b_exclusive_ns=/) { split($$i, exclusive, "=") } } if (intersection[2] > 0 && exclusive[2] == 0) found = 1 } END { exit found ? 0 : 1 }'; \
 	printf '%s\n' "$$complete" | grep 'category=cuda_public_call ' | grep 'status=complete' | grep 'interval_count=0 ' >/dev/null; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'gap_summary schema=gap-summary-v1')" -gt 0; \
 	all_known_gap="$$(printf '%s\n' "$$complete" | awk '/interval_summary/ && /category=all_known / { for (i = 1; i <= NF; i++) if ($$i ~ /^gap_duration_ns=/) { split($$i, field, "="); print field[2] } }')"; \
@@ -172,11 +175,13 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
 	incomplete="$$(./$(OBSERVATION_LEDGER_TEST) incomplete 2>&1)"; \
 	printf '%s\n' "$$incomplete"; \
-	test "$$(printf '%s\n' "$$incomplete" | grep -c 'status=incomplete')" -eq 9; \
+	test "$$(printf '%s\n' "$$incomplete" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
+	test "$$(printf '%s\n' "$$incomplete" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 28; \
 	printf '%s\n' "$$incomplete" | grep 'category=all_known ' | grep 'first_error=span-pairing' >/dev/null; \
 	overflow="$$(./$(OBSERVATION_LEDGER_TEST) overflow 2>&1)"; \
 	printf '%s\n' "$$overflow"; \
-	test "$$(printf '%s\n' "$$overflow" | grep -c 'status=incomplete')" -eq 9; \
+	test "$$(printf '%s\n' "$$overflow" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
+	test "$$(printf '%s\n' "$$overflow" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 28; \
 	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null
 
 $(LOADER_AUDIT): loader_audit.c

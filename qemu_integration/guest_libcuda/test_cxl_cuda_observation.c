@@ -29,10 +29,10 @@ static int run_complete(void) {
         cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_SELECTED_RANGE_PLAN,
                                     3, 2, &inner) != CUDA_SUCCESS ||
         cuCxlObservationSpanEndV1(inner, 0) != CUDA_SUCCESS ||
-        cuCxlObservationSpanEndV1(outer, 0) != CUDA_SUCCESS ||
         cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_HOST_RESULT_READ,
                                     3, 3, &read) != CUDA_SUCCESS ||
         cuCxlObservationSpanEndV1(read, 0) != CUDA_SUCCESS ||
+        cuCxlObservationSpanEndV1(outer, 0) != CUDA_SUCCESS ||
         cuCxlObservationDecodeEndV1(17) != CUDA_SUCCESS)
         return 1;
     return 0;

@@ -429,6 +429,8 @@ static char *g_observation_buffer = NULL;
     } while (0)
 
 #define CXL_OBSERVATION_CATEGORY_COUNT 8
+#define CXL_OBSERVATION_PAIR_COUNT \
+    ((CXL_OBSERVATION_CATEGORY_COUNT * (CXL_OBSERVATION_CATEGORY_COUNT - 1)) / 2)
 #define CXL_OBSERVATION_PUBLIC_CALL 0
 #define CXL_OBSERVATION_OPEN_TOKEN_COUNT 4096
 #define CXL_OBSERVATION_GAP_BOUNDARY CXL_OBSERVATION_CATEGORY_COUNT
@@ -465,6 +467,12 @@ typedef struct CXLObservationAggregate {
     CXLObservationIdentity largest_gap_next;
 } CXLObservationAggregate;
 
+typedef struct CXLObservationPairAggregate {
+    uint64_t union_duration_ns;
+    uint64_t active_begin_ns;
+    bool active;
+} CXLObservationPairAggregate;
+
 typedef struct CXLObservationOpenToken {
     uint64_t token;
     uint64_t begin_ns;
@@ -487,6 +495,9 @@ typedef struct CXLObservationLedger {
     uint32_t open_count;
     const char *first_error;
     CXLObservationAggregate categories[CXL_OBSERVATION_CATEGORY_COUNT];
+    CXLObservationPairAggregate
+        category_pairs[CXL_OBSERVATION_CATEGORY_COUNT]
+                      [CXL_OBSERVATION_CATEGORY_COUNT];
     CXLObservationAggregate all_known;
     uint64_t command_calls[256];
     uint64_t command_total_duration_ns[256];
@@ -533,6 +544,35 @@ static bool observation_add_locked(uint64_t *value, uint64_t increment) {
     }
     *value += increment;
     return true;
+}
+
+static void observation_update_category_pairs_locked(uint32_t category,
+                                                     uint64_t now_ns) {
+    for (uint32_t other = 0; other < CXL_OBSERVATION_CATEGORY_COUNT; other++) {
+        if (other == category)
+            continue;
+        const uint32_t category_a = category < other ? category : other;
+        const uint32_t category_b = category < other ? other : category;
+        CXLObservationPairAggregate *pair =
+            &g_observation_ledger.category_pairs[category_a][category_b];
+        const bool active =
+            g_observation_ledger.categories[category_a].active_depth != 0 &&
+            g_observation_ledger.categories[category_b].active_depth != 0;
+        if (active == pair->active)
+            continue;
+        if (active) {
+            pair->active = true;
+            pair->active_begin_ns = now_ns;
+            continue;
+        }
+        if (now_ns < pair->active_begin_ns) {
+            observation_fail_locked("pair-clock-reversal");
+        } else {
+            observation_add_locked(&pair->union_duration_ns,
+                                   now_ns - pair->active_begin_ns);
+        }
+        pair->active = false;
+    }
 }
 
 static uint32_t observation_gap_identity_index_locked(
@@ -692,8 +732,12 @@ static uint64_t observation_span_begin_locked(uint32_t category,
         .identity = identity,
     };
     g_observation_ledger.open_count++;
-    observation_aggregate_begin_locked(&g_observation_ledger.categories[category],
-                                       now_ns, identity);
+    CXLObservationAggregate *category_aggregate =
+        &g_observation_ledger.categories[category];
+    const bool category_became_active = category_aggregate->active_depth == 0;
+    observation_aggregate_begin_locked(category_aggregate, now_ns, identity);
+    if (category_became_active && category_aggregate->active_depth != 0)
+        observation_update_category_pairs_locked(category, now_ns);
     observation_aggregate_begin_locked(&g_observation_ledger.all_known,
                                        now_ns, identity);
     if (begin_ns)
@@ -724,9 +768,13 @@ static CUresult observation_span_end_locked(uint64_t token,
     if (now_ns < g_observation_ledger.last_clock_ns)
         observation_fail_locked("clock-reversal");
     g_observation_ledger.last_clock_ns = now_ns;
-    observation_aggregate_end_locked(
-        &g_observation_ledger.categories[open->category], open->begin_ns,
-        now_ns, open->identity);
+    CXLObservationAggregate *category_aggregate =
+        &g_observation_ledger.categories[open->category];
+    const bool category_will_become_inactive = category_aggregate->active_depth == 1;
+    observation_aggregate_end_locked(category_aggregate, open->begin_ns,
+                                     now_ns, open->identity);
+    if (category_will_become_inactive && category_aggregate->active_depth == 0)
+        observation_update_category_pairs_locked(open->category, now_ns);
     observation_aggregate_end_locked(&g_observation_ledger.all_known,
                                      open->begin_ns, now_ns, open->identity);
     if (open->category == CXL_OBSERVATION_PUBLIC_CALL && open->command < 256) {
@@ -926,9 +974,74 @@ static void observation_validate_command_totals_locked(void) {
         observation_fail_locked("command-total-mismatch");
 }
 
+static void observation_validate_category_pairs_locked(void) {
+    uint32_t pair_count = 0;
+
+    for (uint32_t category_a = 0;
+         category_a < CXL_OBSERVATION_CATEGORY_COUNT; category_a++) {
+        for (uint32_t category_b = category_a + 1;
+             category_b < CXL_OBSERVATION_CATEGORY_COUNT; category_b++) {
+            const CXLObservationPairAggregate *pair =
+                &g_observation_ledger.category_pairs[category_a][category_b];
+            pair_count++;
+            if (pair->active) {
+                observation_fail_locked("pair-active-at-terminal");
+                continue;
+            }
+            if (pair->union_duration_ns >
+                    g_observation_ledger.categories[category_a].union_duration_ns ||
+                pair->union_duration_ns >
+                    g_observation_ledger.categories[category_b].union_duration_ns)
+                observation_fail_locked("pair-union-exceeds-category");
+        }
+    }
+    if (pair_count != CXL_OBSERVATION_PAIR_COUNT)
+        observation_fail_locked("pair-count-mismatch");
+}
+
+static void observation_emit_category_pairs_locked(uint64_t span_end_ns) {
+    for (uint32_t category_a = 0;
+         category_a < CXL_OBSERVATION_CATEGORY_COUNT; category_a++) {
+        for (uint32_t category_b = category_a + 1;
+             category_b < CXL_OBSERVATION_CATEGORY_COUNT; category_b++) {
+            const uint64_t category_a_union_ns =
+                g_observation_ledger.categories[category_a].union_duration_ns;
+            const uint64_t category_b_union_ns =
+                g_observation_ledger.categories[category_b].union_duration_ns;
+            const uint64_t intersection_union_ns =
+                g_observation_ledger.category_pairs[category_a][category_b]
+                    .union_duration_ns;
+            fprintf(stderr,
+                    "[CXL-CUDA] interval_pair_summary"
+                    " schema=interval-pair-summary-v1 producer=guest-shim"
+                    " clock_domain=guest-monotonic case_epoch=%" PRIu64
+                    " scope=decode category_a=%s category_b=%s status=%s"
+                    " span_begin_ns=%" PRIu64 " span_end_ns=%" PRIu64
+                    " intersection_union_ns=%" PRIu64
+                    " category_a_union_ns=%" PRIu64
+                    " category_b_union_ns=%" PRIu64
+                    " category_a_exclusive_ns=%" PRIu64
+                    " category_b_exclusive_ns=%" PRIu64
+                    " first_error=%s\n",
+                    g_observation_ledger.case_epoch,
+                    g_observation_category_names[category_a],
+                    g_observation_category_names[category_b],
+                    g_observation_ledger.incomplete ? "incomplete" : "complete",
+                    g_observation_ledger.span_begin_ns, span_end_ns,
+                    intersection_union_ns, category_a_union_ns,
+                    category_b_union_ns,
+                    category_a_union_ns - intersection_union_ns,
+                    category_b_union_ns - intersection_union_ns,
+                    g_observation_ledger.first_error
+                        ? g_observation_ledger.first_error : "none");
+        }
+    }
+}
+
 static void observation_emit_terminal_locked(uint64_t span_end_ns) {
     observation_validate_terminal_gaps_locked(span_end_ns);
     observation_validate_command_totals_locked();
+    observation_validate_category_pairs_locked();
     for (uint32_t category = 0;
          category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
         observation_emit_summary_locked(g_observation_category_names[category],
@@ -939,6 +1052,7 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns) {
     observation_emit_summary_locked("all_known", "guest-shim",
                                     &g_observation_ledger.all_known,
                                     span_end_ns);
+    observation_emit_category_pairs_locked(span_end_ns);
     for (uint32_t command = 0; command < 256; command++) {
         if (g_observation_ledger.command_calls[command] == 0)
             continue;
