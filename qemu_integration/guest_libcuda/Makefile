@@ -161,17 +161,22 @@ $(OBSERVATION_LEDGER_TEST): test_cxl_cuda_observation.c cxl_cuda_observation.h $
 test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	@complete="$$(./$(OBSERVATION_LEDGER_TEST) complete 2>&1)"; \
 	printf '%s\n' "$$complete"; \
-	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 8; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 9; \
+	printf '%s\n' "$$complete" | grep 'category=cuda_public_call ' | grep 'status=complete' | grep 'interval_count=0 ' >/dev/null; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'gap_summary schema=gap-summary-v1')" -gt 0; \
+	all_known_gap="$$(printf '%s\n' "$$complete" | awk '/interval_summary/ && /category=all_known / { for (i = 1; i <= NF; i++) if ($$i ~ /^gap_duration_ns=/) { split($$i, field, "="); print field[2] } }')"; \
+	gap_total="$$(printf '%s\n' "$$complete" | awk '/gap_summary/ { for (i = 1; i <= NF; i++) if ($$i ~ /^total_duration_ns=/) { split($$i, field, "="); total += field[2] } } END { print total + 0 }')"; \
+	test "$$gap_total" -eq "$$all_known_gap"; \
 	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
 	incomplete="$$(./$(OBSERVATION_LEDGER_TEST) incomplete 2>&1)"; \
 	printf '%s\n' "$$incomplete"; \
-	test "$$(printf '%s\n' "$$incomplete" | grep -c 'status=incomplete')" -eq 8; \
+	test "$$(printf '%s\n' "$$incomplete" | grep -c 'status=incomplete')" -eq 9; \
 	printf '%s\n' "$$incomplete" | grep 'category=all_known ' | grep 'first_error=span-pairing' >/dev/null; \
 	overflow="$$(./$(OBSERVATION_LEDGER_TEST) overflow 2>&1)"; \
 	printf '%s\n' "$$overflow"; \
-	test "$$(printf '%s\n' "$$overflow" | grep -c 'status=incomplete')" -eq 8; \
+	test "$$(printf '%s\n' "$$overflow" | grep -c 'status=incomplete')" -eq 9; \
 	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null
 
 $(LOADER_AUDIT): loader_audit.c

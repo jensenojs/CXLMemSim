@@ -430,6 +430,8 @@ static char *g_observation_buffer = NULL;
 
 #define CXL_OBSERVATION_CATEGORY_COUNT 8
 #define CXL_OBSERVATION_OPEN_TOKEN_COUNT 4096
+#define CXL_OBSERVATION_GAP_BOUNDARY CXL_OBSERVATION_CATEGORY_COUNT
+#define CXL_OBSERVATION_GAP_IDENTITY_COUNT (CXL_OBSERVATION_CATEGORY_COUNT + 1)
 
 typedef struct CXLObservationIdentity {
     bool valid;
@@ -437,7 +439,14 @@ typedef struct CXLObservationIdentity {
     const char *owner;
     const char *category;
     const char *operation;
+    uint32_t category_index;
 } CXLObservationIdentity;
+
+typedef struct CXLObservationGapAggregate {
+    uint64_t count;
+    uint64_t total_duration_ns;
+    uint64_t max_duration_ns;
+} CXLObservationGapAggregate;
 
 typedef struct CXLObservationAggregate {
     uint64_t interval_count;
@@ -477,6 +486,9 @@ typedef struct CXLObservationLedger {
     const char *first_error;
     CXLObservationAggregate categories[CXL_OBSERVATION_CATEGORY_COUNT];
     CXLObservationAggregate all_known;
+    CXLObservationGapAggregate
+        all_known_gaps[CXL_OBSERVATION_GAP_IDENTITY_COUNT]
+                      [CXL_OBSERVATION_GAP_IDENTITY_COUNT];
     CXLObservationOpenToken open_tokens[CXL_OBSERVATION_OPEN_TOKEN_COUNT];
 } CXLObservationLedger;
 
@@ -519,6 +531,39 @@ static bool observation_add_locked(uint64_t *value, uint64_t increment) {
     return true;
 }
 
+static uint32_t observation_gap_identity_index_locked(
+    CXLObservationIdentity identity) {
+    if (!identity.valid)
+        return CXL_OBSERVATION_GAP_BOUNDARY;
+    if (identity.category_index >= CXL_OBSERVATION_CATEGORY_COUNT) {
+        observation_fail_locked("gap-category-out-of-range");
+        return CXL_OBSERVATION_GAP_BOUNDARY;
+    }
+    return identity.category_index;
+}
+
+static void observation_record_all_known_gap_locked(
+    uint64_t begin_ns, uint64_t end_ns, CXLObservationIdentity previous,
+    CXLObservationIdentity next) {
+    if (end_ns <= begin_ns)
+        return;
+    const uint32_t previous_index =
+        observation_gap_identity_index_locked(previous);
+    const uint32_t next_index = observation_gap_identity_index_locked(next);
+    CXLObservationGapAggregate *gap =
+        &g_observation_ledger.all_known_gaps[previous_index][next_index];
+    if (gap->count == UINT64_MAX) {
+        observation_fail_locked("gap-count-overflow");
+        return;
+    }
+    gap->count++;
+    const uint64_t duration_ns = end_ns - begin_ns;
+    if (!observation_add_locked(&gap->total_duration_ns, duration_ns))
+        return;
+    if (duration_ns > gap->max_duration_ns)
+        gap->max_duration_ns = duration_ns;
+}
+
 static void observation_consider_gap_locked(CXLObservationAggregate *aggregate,
                                             uint64_t begin_ns, uint64_t end_ns,
                                             CXLObservationIdentity previous,
@@ -545,6 +590,9 @@ static void observation_aggregate_begin_locked(CXLObservationAggregate *aggregat
             ? aggregate->last_union_end_ns : g_observation_ledger.span_begin_ns;
         observation_consider_gap_locked(aggregate, gap_begin, now_ns,
                                         aggregate->last_end, identity);
+        if (aggregate == &g_observation_ledger.all_known)
+            observation_record_all_known_gap_locked(
+                gap_begin, now_ns, aggregate->last_end, identity);
         aggregate->active_begin_ns = now_ns;
     }
     if (aggregate->active_depth == UINT32_MAX) {
@@ -627,6 +675,7 @@ static uint64_t observation_span_begin_locked(uint32_t category,
         .owner = owner,
         .category = g_observation_category_names[category],
         .operation = operation,
+        .category_index = category,
     };
     *open = (CXLObservationOpenToken) {
         .token = token,
@@ -704,6 +753,9 @@ static void observation_emit_summary_locked(const char *category,
             ? aggregate->last_union_end_ns : g_observation_ledger.span_begin_ns;
         observation_consider_gap_locked(aggregate, gap_begin, span_end_ns,
                                         aggregate->last_end, empty);
+        if (aggregate == &g_observation_ledger.all_known)
+            observation_record_all_known_gap_locked(
+                gap_begin, span_end_ns, aggregate->last_end, empty);
     }
 
     const uint64_t span_duration = span_end_ns >= g_observation_ledger.span_begin_ns
@@ -718,6 +770,21 @@ static void observation_emit_summary_locked(const char *category,
         ? aggregate->total_duration_ns - aggregate->union_duration_ns : 0;
     const uint64_t gap = span_duration >= aggregate->union_duration_ns
         ? span_duration - aggregate->union_duration_ns : 0;
+    if (aggregate == &g_observation_ledger.all_known) {
+        uint64_t recorded_gap_ns = 0;
+        for (uint32_t previous = 0;
+             previous < CXL_OBSERVATION_GAP_IDENTITY_COUNT; previous++) {
+            for (uint32_t next = 0;
+                 next < CXL_OBSERVATION_GAP_IDENTITY_COUNT; next++) {
+                observation_add_locked(
+                    &recorded_gap_ns,
+                    g_observation_ledger.all_known_gaps[previous][next]
+                        .total_duration_ns);
+            }
+        }
+        if (recorded_gap_ns != gap)
+            observation_fail_locked("gap-total-mismatch");
+    }
 
     fprintf(stderr,
             "[CXL-CUDA] interval_summary schema=interval-summary-v1 producer=guest-shim"
@@ -763,17 +830,82 @@ static void observation_emit_summary_locked(const char *category,
                 ? g_observation_ledger.first_error : "none");
 }
 
+static const char *observation_gap_category_name(uint32_t index) {
+    return index == CXL_OBSERVATION_GAP_BOUNDARY
+        ? "decode_boundary" : g_observation_category_names[index];
+}
+
+static void observation_emit_gap_summaries_locked(void) {
+    for (uint32_t previous = 0;
+         previous < CXL_OBSERVATION_GAP_IDENTITY_COUNT; previous++) {
+        for (uint32_t next = 0;
+             next < CXL_OBSERVATION_GAP_IDENTITY_COUNT; next++) {
+            const CXLObservationGapAggregate *gap =
+                &g_observation_ledger.all_known_gaps[previous][next];
+            if (gap->count == 0)
+                continue;
+            fprintf(stderr,
+                    "[CXL-CUDA] gap_summary schema=gap-summary-v1"
+                    " producer=guest-shim clock_domain=guest-monotonic"
+                    " case_epoch=%" PRIu64 " scope=decode"
+                    " previous_category=%s next_category=%s"
+                    " gap_count=%" PRIu64 " total_duration_ns=%" PRIu64
+                    " max_duration_ns=%" PRIu64 "\n",
+                    g_observation_ledger.case_epoch,
+                    observation_gap_category_name(previous),
+                    observation_gap_category_name(next), gap->count,
+                    gap->total_duration_ns, gap->max_duration_ns);
+        }
+    }
+}
+
+static void observation_validate_terminal_gaps_locked(uint64_t span_end_ns) {
+    const CXLObservationAggregate *aggregate = &g_observation_ledger.all_known;
+    if (span_end_ns < g_observation_ledger.span_begin_ns ||
+        aggregate->union_duration_ns >
+            span_end_ns - g_observation_ledger.span_begin_ns) {
+        observation_fail_locked("gap-terminal-boundary");
+        return;
+    }
+    uint64_t recorded_gap_ns = 0;
+    for (uint32_t previous = 0;
+         previous < CXL_OBSERVATION_GAP_IDENTITY_COUNT; previous++) {
+        for (uint32_t next = 0;
+             next < CXL_OBSERVATION_GAP_IDENTITY_COUNT; next++) {
+            observation_add_locked(
+                &recorded_gap_ns,
+                g_observation_ledger.all_known_gaps[previous][next]
+                    .total_duration_ns);
+        }
+    }
+    const uint64_t final_gap_begin = aggregate->have_last_union_end
+        ? aggregate->last_union_end_ns : g_observation_ledger.span_begin_ns;
+    if (span_end_ns < final_gap_begin ||
+        !observation_add_locked(&recorded_gap_ns,
+                                span_end_ns - final_gap_begin)) {
+        observation_fail_locked("gap-terminal-boundary");
+        return;
+    }
+    const uint64_t expected_gap_ns =
+        span_end_ns - g_observation_ledger.span_begin_ns -
+        aggregate->union_duration_ns;
+    if (recorded_gap_ns != expected_gap_ns)
+        observation_fail_locked("gap-total-mismatch");
+}
+
 static void observation_emit_terminal_locked(uint64_t span_end_ns) {
-    for (uint32_t category = CXL_CUDA_OBS_SELECTED_RANGE_PLAN;
+    observation_validate_terminal_gaps_locked(span_end_ns);
+    for (uint32_t category = 0;
          category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
         observation_emit_summary_locked(g_observation_category_names[category],
-                                        "llama",
+                                        category == 0 ? "guest-shim" : "llama",
                                         &g_observation_ledger.categories[category],
                                         span_end_ns);
     }
     observation_emit_summary_locked("all_known", "guest-shim",
                                     &g_observation_ledger.all_known,
                                     span_end_ns);
+    observation_emit_gap_summaries_locked();
     fflush(stderr);
 }
 
