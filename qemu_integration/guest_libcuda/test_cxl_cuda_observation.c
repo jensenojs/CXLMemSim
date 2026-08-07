@@ -65,9 +65,25 @@ static int run_overflow(void) {
     return 0;
 }
 
+static int run_interval_overflow(void) {
+    uint64_t token = 0;
+
+    if (cuCxlObservationDecodeBeginV1(31) != CUDA_SUCCESS)
+        return 1;
+    for (uint64_t operation = 1; operation <= 65537; operation++) {
+        if (cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_SOURCE_LEASE,
+                                        1, operation, &token) != CUDA_SUCCESS ||
+            cuCxlObservationSpanEndV1(token, 0) != CUDA_SUCCESS)
+            return 1;
+    }
+    return cuCxlObservationDecodeEndV1(31) == CUDA_SUCCESS ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
-        fprintf(stderr, "usage: %s complete|incomplete|overflow\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s complete|incomplete|overflow|interval-overflow\n",
+                argv[0]);
         return 2;
     }
     if (strcmp(argv[1], "complete") == 0)
@@ -76,5 +92,7 @@ int main(int argc, char **argv) {
         return run_incomplete();
     if (strcmp(argv[1], "overflow") == 0)
         return run_overflow();
+    if (strcmp(argv[1], "interval-overflow") == 0)
+        return run_interval_overflow();
     return 2;
 }

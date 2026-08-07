@@ -9,10 +9,10 @@ die() {
 usage() {
     cat <<'EOF'
 用法：
-  run_cuda_debug_capture.sh --output-dir DIR [--debugger PATH] --command-file FILE ... \
+  run_cuda_debug_capture.sh --output-dir DIR [--debugger PATH] [--sysroot DIR] --command-file FILE ... \
       --program ELF -- [PROGRAM_ARGS...]
 
-  run_cuda_debug_capture.sh --output-dir DIR [--debugger PATH] --command-file FILE ... \
+  run_cuda_debug_capture.sh --output-dir DIR [--debugger PATH] [--sysroot DIR] --command-file FILE ... \
       --executable ELF --core CORE
 
 用途与边界：
@@ -50,6 +50,7 @@ EOF
 
 output_dir=
 debugger=gdb
+sysroot=
 program=
 executable=
 core=
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --output-dir) output_dir=${2:-}; shift 2 ;;
         --debugger) debugger=${2:-}; shift 2 ;;
+        --sysroot) sysroot=${2:-}; shift 2 ;;
         --command-file) command_files+=("${2:-}"); shift 2 ;;
         --program) program=${2:-}; shift 2 ;;
         --executable) executable=${2:-}; shift 2 ;;
@@ -75,6 +77,9 @@ done
 for command_file in "${command_files[@]}"; do
     [[ -f $command_file ]] || die "command file is not a regular file: $command_file"
 done
+if [[ -n $sysroot ]]; then
+    [[ -d $sysroot ]] || die "sysroot is not a directory: $sysroot"
+fi
 
 if [[ -n $program || $# -gt 0 ]]; then
     [[ -n $program && -z $executable && -z $core ]] || die "program mode requires --program and no --executable/--core"
@@ -115,9 +120,15 @@ debugger_path=$(readlink -f "$debugger_path")
         printf 'command_file_path=%s\n' "$(readlink -f "$command_file")"
         sha256sum "$command_file"
     done
+    if [[ -n $sysroot ]]; then
+        printf 'sysroot_path=%s\n' "$(readlink -f "$sysroot")"
+    fi
 } >"$output_dir/input-identity.txt"
 
 declare -a command=("$debugger_path" --batch -ex 'set pagination off')
+if [[ -n $sysroot ]]; then
+    command+=(-iex "set sysroot $(readlink -f "$sysroot")")
+fi
 for command_file in "${command_files[@]}"; do
     command+=(-x "$command_file")
 done

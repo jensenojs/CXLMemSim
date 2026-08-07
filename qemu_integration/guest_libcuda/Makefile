@@ -176,6 +176,8 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$complete" | grep 'next_operation=selected_range_plan ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'category_interval schema=category-interval-v1')" -eq 2; \
+	printf '%s\n' "$$complete" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=available' | grep 'interval_count=2 ' | grep 'emitted_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1')" -eq 2; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1.*status=unavailable.*reason=transport-unavailable')" -eq 2; \
@@ -188,7 +190,11 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$overflow"; \
 	test "$$(printf '%s\n' "$$overflow" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
 	test "$$(printf '%s\n' "$$overflow" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 28; \
-	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null
+	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null; \
+	interval_overflow="$$(./$(OBSERVATION_LEDGER_TEST) interval-overflow 2>&1)"; \
+	printf '%s\n' "$$interval_overflow"; \
+	test "$$(printf '%s\n' "$$interval_overflow" | grep -c 'category_interval schema=category-interval-v1')" -eq 0; \
+	printf '%s\n' "$$interval_overflow" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=unavailable' | grep 'interval_count=65537 ' | grep 'emitted_count=0 ' | grep 'capacity=65536 ' | grep 'reason=capacity-exceeded' >/dev/null
 
 $(LOADER_AUDIT): loader_audit.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
