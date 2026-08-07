@@ -253,8 +253,6 @@ static int g_direct_source_enabled = 0;
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 static uint8_t g_test_bar2[CXL_GPU_CMD_REG_SIZE];
 static CUresult (*g_test_execute_cmd)(uint32_t cmd);
-static int (*g_test_direct_source_acquirer)(
-    struct cxl_type2_source_acquire_v1 *acquire);
 static CUresult (*g_test_direct_source_lease_releaser)(uint64_t lease_handle);
 #endif
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
@@ -298,45 +296,6 @@ typedef struct CXLDirectSourcePending {
 } CXLDirectSourcePending;
 
 static CXLDirectSourcePending *g_direct_source_pending;
-
-typedef struct CXLDirectSourceCacheOwner {
-    uint64_t source_id;
-    uint64_t lease_handle;
-    uint64_t pinned_bytes;
-    struct CXLDirectSourceCacheOwner *next;
-} CXLDirectSourceCacheOwner;
-
-typedef struct CXLDirectSourceCacheRange {
-    uintptr_t address;
-    size_t length;
-    uintptr_t prefix_max_end;
-    uint32_t source_range;
-    CXLDirectSourceCacheOwner *owner;
-    struct CXLDirectSourceCacheRange *next;
-} CXLDirectSourceCacheRange;
-
-typedef enum CXLDirectSourceCacheAdmission {
-    CXL_DIRECT_SOURCE_CACHE_ADMITTED,
-    CXL_DIRECT_SOURCE_CACHE_CAPACITY,
-    CXL_DIRECT_SOURCE_CACHE_OUT_OF_MEMORY,
-} CXLDirectSourceCacheAdmission;
-
-static CXLDirectSourceCacheOwner *g_direct_source_cache_owners;
-static CXLDirectSourceCacheRange *g_direct_source_cache_ranges;
-static CXLDirectSourceCacheRange **g_direct_source_cache_index;
-static size_t g_direct_source_cache_range_count;
-enum { CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP = 64 };
-static CXLDirectSourceCacheRange *g_direct_source_cache_pending_index[
-    CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP];
-static size_t g_direct_source_cache_pending_index_count;
-static size_t g_direct_source_cache_limit_bytes;
-static size_t g_direct_source_cache_bytes;
-static uint64_t g_direct_source_cache_hits;
-static uint64_t g_direct_source_cache_misses;
-static uint64_t g_direct_source_cache_admissions;
-static uint64_t g_direct_source_cache_capacity_bypasses;
-static uint64_t g_direct_source_cache_lookup_steps;
-static uint64_t g_direct_source_cache_merge_steps;
 
 typedef struct CXLCudaErrorName {
     CUresult error;
@@ -396,9 +355,6 @@ static CUresult cxl_module_load_image(CUmodule *module, const void *image);
 static CUresult direct_source_errno_result(int error);
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                                                bool all_streams);
-static CUresult direct_source_cache_clear_locked(void);
-static void direct_source_cache_reset(void);
-static bool direct_source_owners_exist(void);
 
 static CudartLibraryRecord *g_cudart_library_records = NULL;
 static unsigned int g_cudart_library_next_id = 1;
@@ -2047,15 +2003,6 @@ void cxl_cuda_test_reset(void) {
         g_direct_source_pending = pending->next;
         free(pending);
     }
-    direct_source_cache_reset();
-    g_direct_source_cache_limit_bytes = 0;
-    g_direct_source_cache_hits = 0;
-    g_direct_source_cache_misses = 0;
-    g_direct_source_cache_admissions = 0;
-    g_direct_source_cache_capacity_bypasses = 0;
-    g_direct_source_cache_lookup_steps = 0;
-    g_direct_source_cache_merge_steps = 0;
-    g_direct_source_enabled = 0;
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
     g_transport.regs = (volatile uint32_t *)g_test_bar2;
@@ -2068,7 +2015,6 @@ void cxl_cuda_test_reset(void) {
     g_transport.bar_size = sizeof(g_test_bar2);
     g_initialized = 1;
     g_test_execute_cmd = NULL;
-    g_test_direct_source_acquirer = NULL;
     g_test_direct_source_lease_releaser = NULL;
     cxl_cuda_context_state_reset();
     context_storage_test_reset();
@@ -2079,18 +2025,6 @@ void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_exe
 void cxl_cuda_test_set_direct_source_lease_releaser(
     CUresult (*releaser)(uint64_t lease_handle)) {
     g_test_direct_source_lease_releaser = releaser;
-}
-
-void cxl_cuda_test_set_direct_source_acquirer(
-        int (*acquirer)(struct cxl_type2_source_acquire_v1 *acquire)) {
-    g_test_direct_source_acquirer = acquirer;
-}
-
-void cxl_cuda_test_enable_direct_source(int source_fd,
-                                        size_t cache_limit_bytes) {
-    g_direct_source_enabled = 1;
-    g_transport.source_fd = source_fd;
-    g_direct_source_cache_limit_bytes = cache_limit_bytes;
 }
 
 void cxl_cuda_test_set_initialized(int initialized) { g_initialized = initialized; }
@@ -3758,16 +3692,7 @@ CUresult cuCtxDestroy_v2(CUcontext ctx) {
         return state_err;
 
     cmd_lock();
-    CUresult err = CUDA_SUCCESS;
-    if (direct_source_owners_exist()) {
-        err = execute_cmd(CXL_GPU_CMD_CTX_SYNC);
-        if (err == CUDA_SUCCESS)
-            err = direct_sources_complete_locked(0, true);
-        if (err == CUDA_SUCCESS)
-            err = direct_source_cache_clear_locked();
-    }
-    if (err == CUDA_SUCCESS)
-        err = execute_cmd(CXL_GPU_CMD_CTX_DESTROY);
+    CUresult err = execute_cmd(CXL_GPU_CMD_CTX_DESTROY);
     bool context_destroyed = err == CUDA_SUCCESS;
     if (err == CUDA_SUCCESS) {
         context_storage_clear_context(ctx, 1);
@@ -4056,265 +3981,6 @@ static CUresult direct_source_lease_release(uint64_t lease_handle) {
     return result;
 }
 
-static int direct_source_cache_range_order(
-        const CXLDirectSourceCacheRange *left,
-        const CXLDirectSourceCacheRange *right) {
-    if (left->address != right->address)
-        return left->address < right->address ? -1 : 1;
-    if (left->length != right->length)
-        return left->length < right->length ? -1 : 1;
-    if (left->source_range != right->source_range)
-        return left->source_range < right->source_range ? -1 : 1;
-    return 0;
-}
-
-static int direct_source_cache_range_compare(const void *left,
-                                             const void *right) {
-    const CXLDirectSourceCacheRange *left_range =
-        *(CXLDirectSourceCacheRange *const *)left;
-    const CXLDirectSourceCacheRange *right_range =
-        *(CXLDirectSourceCacheRange *const *)right;
-    return direct_source_cache_range_order(left_range, right_range);
-}
-
-static bool direct_source_cache_merge_index(
-        CXLDirectSourceCacheRange **new_index, size_t new_count) {
-    CXLDirectSourceCacheRange **merged;
-    size_t old_index = 0;
-    size_t new_index_pos = 0;
-    size_t merged_count;
-
-    if (g_direct_source_cache_range_count >
-            SIZE_MAX / sizeof(*merged) - new_count)
-        return false;
-    merged_count = g_direct_source_cache_range_count + new_count;
-    merged = malloc(merged_count * sizeof(*merged));
-    if (!merged)
-        return false;
-
-    qsort(new_index, new_count, sizeof(*new_index),
-          direct_source_cache_range_compare);
-
-    size_t index = 0;
-    while (old_index < g_direct_source_cache_range_count &&
-           new_index_pos < new_count) {
-        if (direct_source_cache_range_order(
-                g_direct_source_cache_index[old_index],
-                new_index[new_index_pos]) <= 0)
-            merged[index++] = g_direct_source_cache_index[old_index++];
-        else
-            merged[index++] = new_index[new_index_pos++];
-    }
-    while (old_index < g_direct_source_cache_range_count)
-        merged[index++] = g_direct_source_cache_index[old_index++];
-    while (new_index_pos < new_count)
-        merged[index++] = new_index[new_index_pos++];
-
-    uintptr_t prefix_max_end = 0;
-    for (index = 0; index < merged_count; index++) {
-        CXLDirectSourceCacheRange *range = merged[index];
-        uintptr_t range_end = range->address + range->length;
-        if (range_end > prefix_max_end)
-            prefix_max_end = range_end;
-        range->prefix_max_end = prefix_max_end;
-    }
-    g_direct_source_cache_merge_steps += merged_count;
-
-    free(g_direct_source_cache_index);
-    g_direct_source_cache_index = merged;
-    g_direct_source_cache_range_count = merged_count;
-    return true;
-}
-
-static bool direct_source_cache_flush_pending_index(void) {
-    if (!g_direct_source_cache_pending_index_count)
-        return true;
-    if (!direct_source_cache_merge_index(
-            g_direct_source_cache_pending_index,
-            g_direct_source_cache_pending_index_count))
-        return false;
-    g_direct_source_cache_pending_index_count = 0;
-    return true;
-}
-
-static bool direct_source_cache_admit_index(
-        CXLDirectSourceCacheRange *new_ranges, size_t new_count) {
-    if (new_count > CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP) {
-        CXLDirectSourceCacheRange **new_index;
-        size_t index = 0;
-
-        if (!direct_source_cache_flush_pending_index() ||
-            new_count > SIZE_MAX / sizeof(*new_index))
-            return false;
-        new_index = malloc(new_count * sizeof(*new_index));
-        if (!new_index)
-            return false;
-        for (CXLDirectSourceCacheRange *range = new_ranges; range;
-             range = range->next)
-            new_index[index++] = range;
-        bool merged = direct_source_cache_merge_index(new_index, new_count);
-        free(new_index);
-        return merged;
-    }
-
-    if (g_direct_source_cache_pending_index_count >
-            CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP - new_count &&
-        !direct_source_cache_flush_pending_index())
-        return false;
-    for (CXLDirectSourceCacheRange *range = new_ranges; range;
-         range = range->next) {
-        g_direct_source_cache_pending_index[
-            g_direct_source_cache_pending_index_count++] = range;
-    }
-    return true;
-}
-
-static CXLDirectSourceCacheRange *direct_source_cache_find(uintptr_t address,
-                                                            size_t length) {
-    if (!length || length > UINTPTR_MAX - address)
-        return NULL;
-    uintptr_t end = address + length;
-
-    /*
-     * knockout: the bounded pending scan caps admission rebuild cost for the
-     * current Kimi range scale; use an augmented tree if this scan owns wall.
-     */
-    for (size_t index = 0;
-         index < g_direct_source_cache_pending_index_count; index++) {
-        CXLDirectSourceCacheRange *range =
-            g_direct_source_cache_pending_index[index];
-        g_direct_source_cache_lookup_steps++;
-        if (address >= range->address &&
-            end <= range->address + range->length)
-            return range;
-    }
-
-    size_t low = 0;
-    size_t high = g_direct_source_cache_range_count;
-    while (low < high) {
-        size_t middle = low + (high - low) / 2;
-        g_direct_source_cache_lookup_steps++;
-        if (g_direct_source_cache_index[middle]->address <= address)
-            low = middle + 1;
-        else
-            high = middle;
-    }
-    while (low > 0) {
-        CXLDirectSourceCacheRange *range =
-            g_direct_source_cache_index[--low];
-        g_direct_source_cache_lookup_steps++;
-        if (end <= range->address + range->length)
-            return range;
-        if (low == 0 ||
-            g_direct_source_cache_index[low - 1]->prefix_max_end < end)
-            break;
-    }
-    return NULL;
-}
-
-static bool direct_source_owners_exist(void) {
-    return g_direct_source_pending || g_direct_source_cache_owners;
-}
-
-static void direct_source_cache_reset(void) {
-    while (g_direct_source_cache_ranges) {
-        CXLDirectSourceCacheRange *range = g_direct_source_cache_ranges;
-        g_direct_source_cache_ranges = range->next;
-        free(range);
-    }
-    while (g_direct_source_cache_owners) {
-        CXLDirectSourceCacheOwner *owner = g_direct_source_cache_owners;
-        g_direct_source_cache_owners = owner->next;
-        free(owner);
-    }
-    free(g_direct_source_cache_index);
-    g_direct_source_cache_index = NULL;
-    g_direct_source_cache_range_count = 0;
-    g_direct_source_cache_pending_index_count = 0;
-    g_direct_source_cache_bytes = 0;
-}
-
-static CUresult direct_source_cache_clear_locked(void) {
-    for (CXLDirectSourceCacheOwner *owner = g_direct_source_cache_owners;
-         owner; owner = owner->next) {
-        if (owner->source_id) {
-            CUresult result = direct_source_unregister_locked(owner->source_id);
-            if (result != CUDA_SUCCESS)
-                return result;
-            owner->source_id = 0;
-        }
-        if (owner->lease_handle) {
-            CUresult result = direct_source_lease_release(owner->lease_handle);
-            if (result != CUDA_SUCCESS)
-                return result;
-            owner->lease_handle = 0;
-        }
-    }
-    direct_source_cache_reset();
-    return CUDA_SUCCESS;
-}
-
-static CXLDirectSourceCacheAdmission direct_source_cache_admit(
-        uint64_t source_id, uint64_t lease_handle, uint64_t pinned_bytes,
-        const CUdeviceptr *srcs, const size_t *sizes,
-        const size_t *original_indices, size_t count) {
-    CXLDirectSourceCacheOwner *owner;
-    CXLDirectSourceCacheRange *new_ranges = NULL;
-
-    if (!g_direct_source_cache_limit_bytes ||
-        pinned_bytes > g_direct_source_cache_limit_bytes ||
-        g_direct_source_cache_bytes >
-            g_direct_source_cache_limit_bytes - pinned_bytes) {
-        g_direct_source_cache_capacity_bypasses++;
-        return CXL_DIRECT_SOURCE_CACHE_CAPACITY;
-    }
-    owner = calloc(1, sizeof(*owner));
-    if (!owner)
-        return CXL_DIRECT_SOURCE_CACHE_OUT_OF_MEMORY;
-    owner->source_id = source_id;
-    owner->lease_handle = lease_handle;
-    owner->pinned_bytes = pinned_bytes;
-    for (size_t source_range = 0; source_range < count; source_range++) {
-        size_t original = original_indices[source_range];
-        CXLDirectSourceCacheRange *range = calloc(1, sizeof(*range));
-        if (!range) {
-            while (new_ranges) {
-                CXLDirectSourceCacheRange *next = new_ranges->next;
-                free(new_ranges);
-                new_ranges = next;
-            }
-            free(owner);
-            return CXL_DIRECT_SOURCE_CACHE_OUT_OF_MEMORY;
-        }
-        range->address = (uintptr_t)srcs[original];
-        range->length = sizes[original];
-        range->source_range = source_range;
-        range->owner = owner;
-        range->next = new_ranges;
-        new_ranges = range;
-    }
-    if (!direct_source_cache_admit_index(new_ranges, count)) {
-        while (new_ranges) {
-            CXLDirectSourceCacheRange *next = new_ranges->next;
-            free(new_ranges);
-            new_ranges = next;
-        }
-        free(owner);
-        return CXL_DIRECT_SOURCE_CACHE_OUT_OF_MEMORY;
-    }
-    owner->next = g_direct_source_cache_owners;
-    g_direct_source_cache_owners = owner;
-    while (new_ranges) {
-        CXLDirectSourceCacheRange *next = new_ranges->next;
-        new_ranges->next = g_direct_source_cache_ranges;
-        g_direct_source_cache_ranges = new_ranges;
-        new_ranges = next;
-    }
-    g_direct_source_cache_bytes += pinned_bytes;
-    g_direct_source_cache_admissions++;
-    return CXL_DIRECT_SOURCE_CACHE_ADMITTED;
-}
-
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                                                bool all_streams) {
     CXLDirectSourcePending **link = &g_direct_source_pending;
@@ -4351,16 +4017,12 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     CXLGPUSourceRangeV1 *wire_ranges = NULL;
     CXLGPUSourceRunV1 *wire_runs = NULL;
     CXLGPUDirectRangeV1 *direct_ranges = NULL;
-    size_t *missing_indices = NULL;
     CXLDirectSourcePending *pending = NULL;
     struct cxl_type2_source_acquire_v1 acquire = {0};
     struct cxl_type2_source_release_v1 release = {0};
     uint64_t source_id = 0;
-    size_t missing_count = 0;
-    size_t register_bytes = 0;
-    size_t direct_bytes = count * sizeof(*direct_ranges);
-    bool cached_owner = false;
-    bool command_locked = false;
+    size_t register_bytes;
+    size_t direct_bytes;
     CUresult result = CUDA_SUCCESS;
 
     if (g_transport.source_fd < 0 || count > CXL_TYPE2_SOURCE_MAX_RANGES)
@@ -4369,9 +4031,7 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     kernel_runs = malloc(CXL_TYPE2_SOURCE_MAX_RUNS * sizeof(*kernel_runs));
     wire_ranges = malloc(count * sizeof(*wire_ranges));
     direct_ranges = malloc(count * sizeof(*direct_ranges));
-    missing_indices = malloc(count * sizeof(*missing_indices));
-    if (!kernel_ranges || !kernel_runs || !wire_ranges || !direct_ranges ||
-        !missing_indices) {
+    if (!kernel_ranges || !kernel_runs || !wire_ranges || !direct_ranges) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
         goto out;
     }
@@ -4384,99 +4044,71 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             result = CUDA_ERROR_INVALID_VALUE;
             goto out;
         }
-    }
-
-    cmd_lock();
-    command_locked = true;
-    for (size_t index = 0; index < count; index++) {
-        CXLDirectSourceCacheRange *cached = direct_source_cache_find(
-            (uintptr_t)srcs[index], sizes[index]);
-        if (cached) {
-            g_direct_source_cache_hits++;
-            direct_ranges[index] = (CXLGPUDirectRangeV1) {
-                .destination = dsts[index],
-                .size = sizes[index],
-                .source_id = cached->owner->source_id,
-                .source_range = cached->source_range,
-                .source_offset = (uintptr_t)srcs[index] - cached->address,
-            };
-            continue;
-        }
-        g_direct_source_cache_misses++;
-        missing_indices[missing_count] = index;
-        kernel_ranges[missing_count] = (struct cxl_type2_source_range_v1) {
+        kernel_ranges[index] = (struct cxl_type2_source_range_v1) {
             .user_address = srcs[index],
             .length = sizes[index],
         };
-        missing_count++;
     }
-
-    if (!missing_count)
-        goto submit_batch;
-
     acquire.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
     acquire.ranges_ptr = (uintptr_t)kernel_ranges;
     acquire.runs_ptr = (uintptr_t)kernel_runs;
-    acquire.range_count = missing_count;
+    acquire.range_count = count;
     acquire.run_capacity = CXL_TYPE2_SOURCE_MAX_RUNS;
     uint64_t lease_observation_token = observation_guest_span_begin(
         CXL_CUDA_OBS_SOURCE_LEASE, "source_lease_acquire");
-    int acquire_result;
-#ifdef CXL_GPU_CONTEXT_SHIM_TEST
-    if (g_test_direct_source_acquirer)
-        acquire_result = g_test_direct_source_acquirer(&acquire);
-    else
-#endif
-        acquire_result = ioctl(g_transport.source_fd,
-                               CXL_TYPE2_SOURCE_ACQUIRE, &acquire);
-    if (acquire_result != 0) {
+    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_ACQUIRE, &acquire) != 0) {
         int source_errno = errno;
         observation_guest_span_end(
             lease_observation_token, direct_source_errno_result(source_errno));
         fprintf(stderr,
                 "[CXL-CUDA] direct_source_acquire_failed errno=%d"
                 " range_count=%zu\n",
-                source_errno, missing_count);
-        for (size_t index = 0; index < missing_count; index++) {
+                source_errno, count);
+        for (size_t index = 0; index < count; index++) {
             fprintf(stderr,
                     "[CXL-CUDA] direct_source_acquire_range index=%zu"
                     " source=0x%" PRIx64 " length=%zu\n",
-                    index, (uint64_t)kernel_ranges[index].user_address,
-                    (size_t)kernel_ranges[index].length);
+                    index, (uint64_t)srcs[index], sizes[index]);
         }
         result = direct_source_errno_result(source_errno);
-        goto unlock_out;
+        goto out;
     }
     observation_guest_span_end(lease_observation_token, CUDA_SUCCESS);
     release.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
     release.lease_handle = acquire.lease_handle;
 
     if (!acquire.run_count || acquire.run_count > CXL_TYPE2_SOURCE_MAX_RUNS ||
-        missing_count > (SIZE_MAX - sizeof(CXLGPUSourceRegisterV1)) /
+        count > (SIZE_MAX - sizeof(CXLGPUSourceRegisterV1)) /
                     sizeof(*wire_ranges)) {
         result = CUDA_ERROR_UNKNOWN;
         goto release_lease;
     }
     register_bytes = sizeof(CXLGPUSourceRegisterV1) +
-                     missing_count * sizeof(*wire_ranges);
+                     count * sizeof(*wire_ranges);
     if (acquire.run_count >
             (CXL_GPU_BATCH_DATA_SIZE - register_bytes) / sizeof(*wire_runs)) {
         result = CUDA_ERROR_NOT_SUPPORTED;
         goto release_lease;
     }
     register_bytes += acquire.run_count * sizeof(*wire_runs);
+    direct_bytes = count * sizeof(*direct_ranges);
     _Static_assert(sizeof(*kernel_runs) == sizeof(*wire_runs),
                    "source run wire layout mismatch");
     wire_runs = (CXLGPUSourceRunV1 *)kernel_runs;
+    pending = malloc(sizeof(*pending));
+    if (!pending) {
+        result = CUDA_ERROR_OUT_OF_MEMORY;
+        goto release_lease;
+    }
 
     CXLGPUSourceRegisterV1 header = {
-        .range_count = missing_count,
+        .range_count = count,
         .run_count = acquire.run_count,
         .lease_handle = acquire.lease_handle,
         .logical_bytes = acquire.logical_bytes,
         .unique_dmap_bytes = acquire.unique_dmap_bytes,
     };
-    for (size_t index = 0; index < missing_count; index++) {
+    for (size_t index = 0; index < count; index++) {
         wire_ranges[index] = (CXLGPUSourceRangeV1){
             .first_run = kernel_ranges[index].first_run,
             .run_count = kernel_ranges[index].run_count,
@@ -4484,14 +4116,20 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
                 kernel_ranges[index].first_run_byte_offset,
             .length = kernel_ranges[index].length,
         };
+        direct_ranges[index] = (CXLGPUDirectRangeV1){
+            .destination = dsts[index],
+            .size = sizes[index],
+            .source_range = index,
+        };
     }
+    cmd_lock();
     if (batch_data_write(0, &header, sizeof(header)) != 0 ||
         batch_data_write(sizeof(header), wire_ranges,
-                         missing_count * sizeof(*wire_ranges)) != 0 ||
-        batch_data_write(sizeof(header) + missing_count * sizeof(*wire_ranges),
+                         count * sizeof(*wire_ranges)) != 0 ||
+        batch_data_write(sizeof(header) + count * sizeof(*wire_ranges),
                          wire_runs, acquire.run_count * sizeof(*wire_runs)) != 0) {
         result = CUDA_ERROR_UNKNOWN;
-        goto release_lease;
+        goto unlock_release;
     }
     reg_write64(CXL_GPU_REG_PARAM0, register_bytes);
     result = execute_cmd(CXL_GPU_CMD_SOURCE_REGISTER);
@@ -4499,46 +4137,14 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     if (result != CUDA_SUCCESS || !source_id) {
         if (result == CUDA_SUCCESS)
             result = CUDA_ERROR_UNKNOWN;
-        goto release_lease;
+        goto unlock_release;
     }
 
-    for (size_t source_range = 0; source_range < missing_count;
-         source_range++) {
-        size_t index = missing_indices[source_range];
-        direct_ranges[index] = (CXLGPUDirectRangeV1) {
-            .destination = dsts[index],
-            .size = sizes[index],
-            .source_id = source_id,
-            .source_range = source_range,
-        };
-    }
-
-    CXLDirectSourceCacheAdmission admission = CXL_DIRECT_SOURCE_CACHE_CAPACITY;
-    if (g_direct_source_cache_limit_bytes) {
-        admission = direct_source_cache_admit(
-            source_id, release.lease_handle, acquire.unique_dmap_bytes,
-            srcs, sizes, missing_indices, missing_count);
-    }
-    if (admission == CXL_DIRECT_SOURCE_CACHE_ADMITTED) {
-        cached_owner = true;
-        source_id = 0;
-        release.lease_handle = 0;
-    } else if (admission == CXL_DIRECT_SOURCE_CACHE_OUT_OF_MEMORY) {
-        result = CUDA_ERROR_OUT_OF_MEMORY;
-        goto unregister_source;
-    }
-    if (!cached_owner) {
-        pending = calloc(1, sizeof(*pending));
-        if (!pending) {
-            result = CUDA_ERROR_OUT_OF_MEMORY;
-            goto unregister_source;
-        }
-    }
-
-submit_batch:
+    for (size_t index = 0; index < count; index++)
+        direct_ranges[index].source_id = source_id;
     if (batch_data_write(0, direct_ranges, direct_bytes) != 0) {
         result = CUDA_ERROR_UNKNOWN;
-        goto submit_failed;
+        goto unregister_source;
     }
     reg_write64(CXL_GPU_REG_PARAM0, count);
     reg_write64(CXL_GPU_REG_PARAM1, direct_bytes);
@@ -4549,7 +4155,7 @@ submit_batch:
         uint64_t fragments_enqueued = reg_read64(CXL_GPU_REG_RESULT2);
         if (failed < count)
             *failIdx = failed;
-        if (fragments_enqueued && pending) {
+        if (fragments_enqueued) {
             pending->source_id = source_id;
             pending->lease_handle = release.lease_handle;
             pending->stream_wire = stream_wire;
@@ -4558,42 +4164,39 @@ submit_batch:
             pending = NULL;
             source_id = 0;
             release.lease_handle = 0;
-            goto unlock_out;
+            cmd_unlock();
+            goto out;
         }
-        goto submit_failed;
+        goto unregister_source;
     }
-    if (pending) {
-        pending->source_id = source_id;
-        pending->lease_handle = release.lease_handle;
-        pending->stream_wire = stream_wire;
-        pending->next = g_direct_source_pending;
-        g_direct_source_pending = pending;
-        pending = NULL;
-        source_id = 0;
-        release.lease_handle = 0;
-    }
-    goto unlock_out;
+    pending->source_id = source_id;
+    pending->lease_handle = release.lease_handle;
+    pending->stream_wire = stream_wire;
+    pending->next = g_direct_source_pending;
+    g_direct_source_pending = pending;
+    pending = NULL;
+    source_id = 0;
+    release.lease_handle = 0;
+    cmd_unlock();
+    goto out;
 
-submit_failed:
-    if (cached_owner || !missing_count)
-        goto unlock_out;
 unregister_source:
     {
         CUresult unregister_result = direct_source_unregister_locked(source_id);
         if (unregister_result != CUDA_SUCCESS) {
             result = unregister_result;
-            if (pending) {
-                pending->source_id = source_id;
-                pending->lease_handle = release.lease_handle;
-                pending->stream_wire = stream_wire;
-                pending->next = g_direct_source_pending;
-                g_direct_source_pending = pending;
-                pending = NULL;
-                release.lease_handle = 0;
-            }
+            pending->source_id = source_id;
+            pending->lease_handle = release.lease_handle;
+            pending->stream_wire = stream_wire;
+            pending->next = g_direct_source_pending;
+            g_direct_source_pending = pending;
+            pending = NULL;
+            release.lease_handle = 0;
         }
         source_id = 0;
     }
+unlock_release:
+    cmd_unlock();
 release_lease:
     if (release.lease_handle) {
         CUresult release_result =
@@ -4602,12 +4205,8 @@ release_lease:
         if (release_result != CUDA_SUCCESS && result == CUDA_SUCCESS)
             result = release_result;
     }
-unlock_out:
-    if (command_locked)
-        cmd_unlock();
 out:
     free(pending);
-    free(missing_indices);
     free(direct_ranges);
     free(wire_ranges);
     free(kernel_runs);
@@ -4643,68 +4242,6 @@ size_t cxl_cuda_test_direct_source_pending_count(void) {
          pending = pending->next)
         count++;
     return count;
-}
-
-void cxl_cuda_test_set_direct_source_cache_limit(size_t limit_bytes) {
-    g_direct_source_cache_limit_bytes = limit_bytes;
-}
-
-bool cxl_cuda_test_add_direct_source_cache_owner(
-        uint64_t source_id, uint64_t lease_handle, uint64_t pinned_bytes,
-        const CUdeviceptr *sources, const size_t *sizes, size_t count) {
-    size_t *indices = malloc(count * sizeof(*indices));
-    if (!indices)
-        abort();
-    for (size_t index = 0; index < count; index++)
-        indices[index] = index;
-    CXLDirectSourceCacheAdmission admission = direct_source_cache_admit(
-        source_id, lease_handle, pinned_bytes, sources, sizes, indices, count);
-    free(indices);
-    return admission == CXL_DIRECT_SOURCE_CACHE_ADMITTED;
-}
-
-bool cxl_cuda_test_find_direct_source_cache(
-        CUdeviceptr source, size_t size, uint64_t *source_id,
-        uint32_t *source_range, uint64_t *source_offset) {
-    CXLDirectSourceCacheRange *cached = direct_source_cache_find(
-        (uintptr_t)source, size);
-    if (!cached)
-        return false;
-    if (source_id)
-        *source_id = cached->owner->source_id;
-    if (source_range)
-        *source_range = cached->source_range;
-    if (source_offset)
-        *source_offset = (uintptr_t)source - cached->address;
-    return true;
-}
-
-size_t cxl_cuda_test_direct_source_cache_owner_count(void) {
-    size_t count = 0;
-    for (CXLDirectSourceCacheOwner *owner = g_direct_source_cache_owners;
-         owner; owner = owner->next)
-        count++;
-    return count;
-}
-
-size_t cxl_cuda_test_direct_source_cache_bytes(void) {
-    return g_direct_source_cache_bytes;
-}
-
-uint64_t cxl_cuda_test_direct_source_cache_capacity_bypasses(void) {
-    return g_direct_source_cache_capacity_bypasses;
-}
-
-void cxl_cuda_test_reset_direct_source_cache_lookup_steps(void) {
-    g_direct_source_cache_lookup_steps = 0;
-}
-
-size_t cxl_cuda_test_direct_source_cache_lookup_steps(void) {
-    return g_direct_source_cache_lookup_steps;
-}
-
-size_t cxl_cuda_test_direct_source_cache_merge_steps(void) {
-    return g_direct_source_cache_merge_steps;
 }
 #endif
 
@@ -7691,23 +7228,6 @@ static bool parse_positive_size(const char *name, const char *value,
     return true;
 }
 
-static bool parse_nonnegative_size(const char *name, const char *value,
-                                   size_t *result) {
-    char *end = NULL;
-    uintmax_t parsed;
-
-    if (!value || !value[0] || value[0] == '-' || value[0] == '+')
-        return false;
-    errno = 0;
-    parsed = strtoumax(value, &end, 10);
-    if (errno || !end || *end || parsed > SIZE_MAX) {
-        fprintf(stderr, "[CXL-CUDA] invalid %s: %s\n", name, value);
-        return false;
-    }
-    *result = (size_t)parsed;
-    return true;
-}
-
 static void htod_route_parse(void) {
     const char *mode = getenv("CXL_CUDA_HTOD_ROUTE_MODE");
     const char *minimum = getenv("CXL_CUDA_HTOD_ROUTE_MIN_BYTES");
@@ -7947,8 +7467,6 @@ __attribute__((constructor)) static void libcuda_init(void) {
     static const size_t observation_buffer_size = 1024 * 1024;
     const char *observation_log = getenv("CXL_CUDA_OBSERVATION_LOG");
     const char *direct_source = getenv("CXL_CUDA_DIRECT_SOURCE");
-    const char *direct_source_cache_bytes =
-        getenv("CXL_CUDA_DIRECT_SOURCE_CACHE_BYTES");
 
     g_debug = (getenv("CXL_CUDA_DEBUG") != NULL);
     if (direct_source) {
@@ -7961,18 +7479,6 @@ __attribute__((constructor)) static void libcuda_init(void) {
                     "[CXL-CUDA] CXL_CUDA_DIRECT_SOURCE must be 0 or 1\n");
             abort();
         }
-    }
-    if (direct_source_cache_bytes &&
-        !parse_nonnegative_size("CXL_CUDA_DIRECT_SOURCE_CACHE_BYTES",
-                                direct_source_cache_bytes,
-                                &g_direct_source_cache_limit_bytes)) {
-        abort();
-    }
-    if (g_direct_source_cache_limit_bytes && !g_direct_source_enabled) {
-        fprintf(stderr,
-                "[CXL-CUDA] direct source cache requires "
-                "CXL_CUDA_DIRECT_SOURCE=1\n");
-        abort();
     }
     if (observation_log) {
         if (observation_log[0] != '/') {
@@ -8002,53 +7508,19 @@ __attribute__((constructor)) static void libcuda_init(void) {
             htod_route_mode(),
             g_htod_route.minimum_transfer_bytes,
             g_htod_route.prefix_bytes_per_transfer, g_htod_route.total_bytes);
-    fprintf(stderr,
-            "[CXL-CUDA] direct_source_config enabled=%d cache_bytes=%zu\n",
-            g_direct_source_enabled, g_direct_source_cache_limit_bytes);
+    fprintf(stderr, "[CXL-CUDA] direct_source_config enabled=%d\n",
+            g_direct_source_enabled);
     DLOG("libcuda.so loaded (CXL Type 2 shim)\n");
 }
 
 __attribute__((destructor)) static void libcuda_cleanup(void) {
     CXLCudaErrorName *error_name;
-    size_t direct_source_cache_resident_bytes = g_direct_source_cache_bytes;
-    size_t direct_source_cache_range_count =
-        g_direct_source_cache_range_count +
-        g_direct_source_cache_pending_index_count;
 
     DLOG("libcuda.so unloading\n");
     observation_abandon_active_decode();
     function_param_layouts_clear("process-exit");
     graph_kernel_node_snapshots_clear();
     context_storage_clear_context(NULL, 0);
-    if (direct_source_owners_exist()) {
-        CUresult result;
-
-        cmd_lock();
-        result = execute_cmd(CXL_GPU_CMD_CTX_SYNC);
-        if (result == CUDA_SUCCESS)
-            result = direct_sources_complete_locked(0, true);
-        if (result == CUDA_SUCCESS)
-            result = direct_source_cache_clear_locked();
-        cmd_unlock();
-        if (result != CUDA_SUCCESS) {
-            fprintf(stderr,
-                    "[CXL-CUDA] direct source cleanup failed result=%d\n",
-                    result);
-            abort();
-        }
-    }
-    fprintf(stderr,
-            "[CXL-CUDA] direct_source_cache_summary limit_bytes=%zu "
-            "resident_bytes=%zu hits=%" PRIu64 " misses=%" PRIu64
-            " admissions=%" PRIu64 " capacity_bypasses=%" PRIu64
-            " range_count=%zu lookup_steps=%" PRIu64 "\n",
-            g_direct_source_cache_limit_bytes,
-            direct_source_cache_resident_bytes,
-            g_direct_source_cache_hits, g_direct_source_cache_misses,
-            g_direct_source_cache_admissions,
-            g_direct_source_cache_capacity_bypasses,
-            direct_source_cache_range_count,
-            g_direct_source_cache_lookup_steps);
     if (g_htod_route.staging && cxlCoherentFree(g_htod_route.staging) != 0) {
         fprintf(stderr, "[CXL-CUDA] failed to release HtoD route staging\n");
         abort();
