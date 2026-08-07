@@ -1528,6 +1528,29 @@ static uint64_t observation_cuda_call_begin(const char *symbol,
     return token;
 }
 
+static uint64_t observation_guest_span_begin(uint32_t category,
+                                             const char *operation) {
+    uint64_t token;
+
+    if (!__atomic_load_n(&g_observation_fast_active, __ATOMIC_ACQUIRE))
+        return 0;
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    token = observation_span_begin_locked(
+        category, 0,
+        g_async_copy_trace.active ? g_async_copy_trace.public_sequence : 0,
+        UINT32_MAX, "guest-shim", operation, NULL);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return token;
+}
+
+static void observation_guest_span_end(uint64_t token, CUresult result) {
+    if (!token)
+        return;
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    (void)observation_span_end_locked(token, result, NULL);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+}
+
 static uint64_t observation_cuda_call_end(uint64_t token, CUresult result,
                                           uint64_t fallback_ns) {
     if (!token)
@@ -3637,17 +3660,27 @@ static CUresult direct_source_unregister_locked(uint64_t source_id) {
 }
 
 static CUresult direct_source_lease_release(uint64_t lease_handle) {
+    uint64_t observation_token = observation_guest_span_begin(
+        CXL_CUDA_OBS_SOURCE_LEASE, "source_lease_release");
+    CUresult result;
+
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
-    if (g_test_direct_source_lease_releaser)
-        return g_test_direct_source_lease_releaser(lease_handle);
+    if (g_test_direct_source_lease_releaser) {
+        result = g_test_direct_source_lease_releaser(lease_handle);
+        observation_guest_span_end(observation_token, result);
+        return result;
+    }
 #endif
     struct cxl_type2_source_release_v1 release = {
         .version = CXL_TYPE2_SOURCE_UAPI_VERSION,
         .lease_handle = lease_handle,
     };
-    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0)
-        return direct_source_errno_result(errno);
-    return CUDA_SUCCESS;
+    result = ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE,
+                   &release) == 0
+                 ? CUDA_SUCCESS
+                 : direct_source_errno_result(errno);
+    observation_guest_span_end(observation_token, result);
+    return result;
 }
 
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
@@ -3696,10 +3729,10 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
 
     if (g_transport.source_fd < 0 || count > CXL_TYPE2_SOURCE_MAX_RANGES)
         return CUDA_ERROR_NOT_SUPPORTED;
-    kernel_ranges = calloc(count, sizeof(*kernel_ranges));
-    kernel_runs = calloc(CXL_TYPE2_SOURCE_MAX_RUNS, sizeof(*kernel_runs));
-    wire_ranges = calloc(count, sizeof(*wire_ranges));
-    direct_ranges = calloc(count, sizeof(*direct_ranges));
+    kernel_ranges = malloc(count * sizeof(*kernel_ranges));
+    kernel_runs = malloc(CXL_TYPE2_SOURCE_MAX_RUNS * sizeof(*kernel_runs));
+    wire_ranges = malloc(count * sizeof(*wire_ranges));
+    direct_ranges = malloc(count * sizeof(*direct_ranges));
     if (!kernel_ranges || !kernel_runs || !wire_ranges || !direct_ranges) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
         goto out;
@@ -3713,16 +3746,22 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             result = CUDA_ERROR_INVALID_VALUE;
             goto out;
         }
-        kernel_ranges[index].user_address = srcs[index];
-        kernel_ranges[index].length = sizes[index];
+        kernel_ranges[index] = (struct cxl_type2_source_range_v1) {
+            .user_address = srcs[index],
+            .length = sizes[index],
+        };
     }
     acquire.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
     acquire.ranges_ptr = (uintptr_t)kernel_ranges;
     acquire.runs_ptr = (uintptr_t)kernel_runs;
     acquire.range_count = count;
     acquire.run_capacity = CXL_TYPE2_SOURCE_MAX_RUNS;
+    uint64_t lease_observation_token = observation_guest_span_begin(
+        CXL_CUDA_OBS_SOURCE_LEASE, "source_lease_acquire");
     if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_ACQUIRE, &acquire) != 0) {
         int source_errno = errno;
+        observation_guest_span_end(
+            lease_observation_token, direct_source_errno_result(source_errno));
         fprintf(stderr,
                 "[CXL-CUDA] direct_source_acquire_failed errno=%d"
                 " range_count=%zu\n",
@@ -3736,6 +3775,7 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         result = direct_source_errno_result(source_errno);
         goto out;
     }
+    observation_guest_span_end(lease_observation_token, CUDA_SUCCESS);
     release.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
     release.lease_handle = acquire.lease_handle;
 
@@ -3754,9 +3794,11 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     }
     register_bytes += acquire.run_count * sizeof(*wire_runs);
     direct_bytes = count * sizeof(*direct_ranges);
-    wire_runs = calloc(acquire.run_count, sizeof(*wire_runs));
-    pending = calloc(1, sizeof(*pending));
-    if (!wire_runs || !pending) {
+    _Static_assert(sizeof(*kernel_runs) == sizeof(*wire_runs),
+                   "source run wire layout mismatch");
+    wire_runs = (CXLGPUSourceRunV1 *)kernel_runs;
+    pending = malloc(sizeof(*pending));
+    if (!pending) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
         goto release_lease;
     }
@@ -3782,13 +3824,6 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             .source_range = index,
         };
     }
-    for (size_t index = 0; index < acquire.run_count; index++) {
-        wire_runs[index] = (CXLGPUSourceRunV1){
-            .guest_phys_addr = kernel_runs[index].guest_phys_addr,
-            .length = kernel_runs[index].length,
-        };
-    }
-
     cmd_lock();
     if (batch_data_write(0, &header, sizeof(header)) != 0 ||
         batch_data_write(sizeof(header), wire_ranges,
@@ -3865,14 +3900,16 @@ unregister_source:
 unlock_release:
     cmd_unlock();
 release_lease:
-    if (release.lease_handle &&
-        ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE, &release) != 0 &&
-        result == CUDA_SUCCESS)
-        result = direct_source_errno_result(errno);
+    if (release.lease_handle) {
+        CUresult release_result =
+            direct_source_lease_release(release.lease_handle);
+
+        if (release_result != CUDA_SUCCESS && result == CUDA_SUCCESS)
+            result = release_result;
+    }
 out:
     free(pending);
     free(direct_ranges);
-    free(wire_runs);
     free(wire_ranges);
     free(kernel_runs);
     free(kernel_ranges);
