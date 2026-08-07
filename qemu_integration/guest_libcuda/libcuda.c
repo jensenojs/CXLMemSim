@@ -527,6 +527,7 @@ typedef struct CXLObservationLedger {
     CXLObservationAggregate all_known;
     uint64_t command_calls[256];
     uint64_t command_total_duration_ns[256];
+    uint64_t command_status_poll_count[256];
     CXLObservationGapAggregate
         all_known_gaps[CXL_OBSERVATION_GAP_IDENTITY_COUNT]
                       [CXL_OBSERVATION_GAP_IDENTITY_COUNT];
@@ -1350,13 +1351,15 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns) {
         if (g_observation_ledger.command_calls[command] == 0)
             continue;
         fprintf(stderr,
-                "[CXL-CUDA] command_summary schema=guest-command-summary-v1"
+                "[CXL-CUDA] command_summary schema=guest-command-summary-v2"
                 " producer=guest-shim clock_domain=guest-monotonic"
                 " case_epoch=%" PRIu64 " scope=decode command=0x%x"
-                " calls=%" PRIu64 " total_duration_ns=%" PRIu64 "\n",
+                " calls=%" PRIu64 " total_duration_ns=%" PRIu64
+                " status_poll_count=%" PRIu64 "\n",
                 g_observation_ledger.case_epoch, command,
                 g_observation_ledger.command_calls[command],
-                g_observation_ledger.command_total_duration_ns[command]);
+                g_observation_ledger.command_total_duration_ns[command],
+                g_observation_ledger.command_status_poll_count[command]);
     }
     observation_emit_gap_summaries_locked();
     observation_emit_clock_anchors_locked();
@@ -1860,6 +1863,19 @@ static uint64_t observation_cuda_call_end(uint64_t token, CUresult result,
     return end_ns;
 }
 
+static void observation_command_status_polls(uint32_t command,
+                                             uint32_t poll_count) {
+    if (!__atomic_load_n(&g_observation_fast_active, __ATOMIC_ACQUIRE) ||
+        command >= 256)
+        return;
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    if (g_observation_ledger.active)
+        observation_add_locked(
+            &g_observation_ledger.command_status_poll_count[command],
+            poll_count);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+}
+
 static void async_copy_trace_begin(const char *api, size_t total_bytes,
                                    size_t range_count, CUstream stream,
                                    const char *implementation) {
@@ -1928,6 +1944,7 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
     if (g_test_execute_cmd) {
         CUresult result = g_test_execute_cmd(cmd);
+        observation_command_status_polls(cmd, 0);
         uint64_t end_ns = observation_cuda_call_end(
             observation_token, result, guest_monotonic_ns());
         reg_write64(CXL_GPU_REG_CALL_ID, 0);
@@ -1949,6 +1966,7 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
 #endif
     uint32_t poll_count = 0;
     CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd, &poll_count);
+    observation_command_status_polls(cmd, poll_count);
     uint64_t end_ns = observation_cuda_call_end(
         observation_token, result, guest_monotonic_ns());
     reg_write64(CXL_GPU_REG_CALL_ID, 0);
