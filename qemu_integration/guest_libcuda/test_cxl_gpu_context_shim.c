@@ -1,4 +1,5 @@
 #include "cxl_gpu_cmd.h"
+#include "include/linux/cxl_type2_accel.h"
 
 #include <elf.h>
 #include <pthread.h>
@@ -116,12 +117,26 @@ void cxl_cuda_test_reset(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
 void cxl_cuda_test_set_direct_source_lease_releaser(
     CUresult (*releaser)(uint64_t lease_handle));
+void cxl_cuda_test_set_direct_source_acquirer(
+    int (*acquirer)(struct cxl_type2_source_acquire_v1 *acquire));
+void cxl_cuda_test_enable_direct_source(int source_fd,
+                                        size_t cache_limit_bytes);
 void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
                                              uint64_t lease_handle,
                                              uint64_t stream_wire);
 CUresult cxl_cuda_test_complete_direct_sources(uint64_t stream_wire,
                                                bool all_streams);
 size_t cxl_cuda_test_direct_source_pending_count(void);
+void cxl_cuda_test_set_direct_source_cache_limit(size_t limit_bytes);
+bool cxl_cuda_test_add_direct_source_cache_owner(
+    uint64_t source_id, uint64_t lease_handle, uint64_t pinned_bytes,
+    const CUdeviceptr *sources, const size_t *sizes, size_t count);
+bool cxl_cuda_test_find_direct_source_cache(
+    CUdeviceptr source, size_t size, uint64_t *source_id,
+    uint32_t *source_range, uint64_t *source_offset);
+size_t cxl_cuda_test_direct_source_cache_owner_count(void);
+size_t cxl_cuda_test_direct_source_cache_bytes(void);
+uint64_t cxl_cuda_test_direct_source_cache_capacity_bypasses(void);
 void cxl_cuda_test_set_initialized(int initialized);
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
@@ -137,6 +152,8 @@ CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice dev);
 CUresult cuCtxCreate_v2(CUcontext *ctx, unsigned int flags, CUdevice dev);
 CUresult cuCtxDestroy_v2(CUcontext ctx);
+CUresult cuCtxSynchronize(void);
+CUresult cuStreamSynchronize(CUstream stream);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
 CUresult cuCtxSetCurrent(CUcontext ctx);
 CUresult cuCtxGetDevice(CUdevice *device);
@@ -221,7 +238,15 @@ static CUresult source_unregister_result = CUDA_SUCCESS;
 static CUresult dtod_async_result = CUDA_SUCCESS;
 static CUresult lease_release_result = CUDA_SUCCESS;
 static uint64_t released_lease;
+static uint64_t released_leases[8];
 static unsigned int lease_release_count;
+static uint64_t unregistered_sources[8];
+static unsigned int source_unregister_count;
+static unsigned int source_acquire_count;
+static uint64_t next_source_id = 101;
+static uint64_t next_lease_handle = 1001;
+static CXLGPUDirectRangeV1 observed_direct_ranges[3];
+static size_t observed_direct_range_count;
 
 static const uint8_t batch_source0[] = {0x10, 0x11, 0x12};
 static const uint8_t batch_source1[] = {0x20, 0x21, 0x22, 0x23, 0x24};
@@ -264,8 +289,31 @@ typedef struct DestroyedContextThread {
 static CUresult fake_execute(uint32_t command) {
     commands[command_count++] = command;
     switch (command) {
+    case CXL_GPU_CMD_SOURCE_REGISTER:
+        cxl_cuda_test_write_result(0, next_source_id++);
+        return CUDA_SUCCESS;
     case CXL_GPU_CMD_SOURCE_UNREGISTER:
+        if (source_unregister_count <
+            sizeof(unregistered_sources) / sizeof(unregistered_sources[0]))
+            unregistered_sources[source_unregister_count++] =
+                cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0);
         return source_unregister_result;
+    case CXL_GPU_CMD_CTX_SYNC:
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_STREAM_SYNC:
+        return CUDA_SUCCESS;
+    case CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC:
+        observed_direct_range_count =
+            cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0);
+        CHECK(observed_direct_range_count <=
+              sizeof(observed_direct_ranges) /
+                  sizeof(observed_direct_ranges[0]));
+        cxl_cuda_test_read_batch_data(
+            0, observed_direct_ranges,
+            observed_direct_range_count * sizeof(observed_direct_ranges[0]));
+        cxl_cuda_test_write_result(0, UINT64_MAX);
+        cxl_cuda_test_write_result(2, observed_direct_range_count);
+        return CUDA_SUCCESS;
     case CXL_GPU_CMD_CTX_CREATE:
         cxl_cuda_test_write_result(0, issued_token);
         return CUDA_SUCCESS;
@@ -416,8 +464,37 @@ static CUresult fake_execute(uint32_t command) {
 
 static CUresult fake_lease_release(uint64_t lease_handle) {
     released_lease = lease_handle;
+    if (lease_release_count <
+        sizeof(released_leases) / sizeof(released_leases[0]))
+        released_leases[lease_release_count] = lease_handle;
     lease_release_count++;
     return lease_release_result;
+}
+
+static int fake_source_acquire(
+        struct cxl_type2_source_acquire_v1 *acquire) {
+    struct cxl_type2_source_range_v1 *ranges =
+        (struct cxl_type2_source_range_v1 *)(uintptr_t)acquire->ranges_ptr;
+    struct cxl_type2_source_run_v1 *runs =
+        (struct cxl_type2_source_run_v1 *)(uintptr_t)acquire->runs_ptr;
+    uint64_t logical_bytes = 0;
+
+    CHECK(acquire->version == CXL_TYPE2_SOURCE_UAPI_VERSION);
+    CHECK(acquire->range_count <= acquire->run_capacity);
+    for (uint32_t index = 0; index < acquire->range_count; index++) {
+        ranges[index].first_run = index;
+        ranges[index].run_count = 1;
+        ranges[index].first_run_byte_offset = 0;
+        runs[index].guest_phys_addr = UINT64_C(0x100000) + index * 0x1000;
+        runs[index].length = ranges[index].length;
+        logical_bytes += ranges[index].length;
+    }
+    acquire->run_count = acquire->range_count;
+    acquire->lease_handle = next_lease_handle++;
+    acquire->logical_bytes = logical_bytes;
+    acquire->unique_dmap_bytes = logical_bytes;
+    source_acquire_count++;
+    return 0;
 }
 
 static int test_query_and_context_sequence(void) {
@@ -1244,6 +1321,7 @@ static int test_direct_source_completion_orders_and_retries_release(void) {
     lease_release_result = CUDA_SUCCESS;
     lease_release_count = 0;
     released_lease = 0;
+    source_unregister_count = 0;
 
     cxl_cuda_test_add_direct_source_pending(17, 23, 5);
     CHECK(cxl_cuda_test_complete_direct_sources(5, false) == CUDA_SUCCESS);
@@ -1275,6 +1353,220 @@ static int test_direct_source_completion_orders_and_retries_release(void) {
     return 0;
 }
 
+static int test_direct_source_cache_skips_acquire_and_supports_mixed_owners(void) {
+    CUdeviceptr destinations[] = {0x1000, 0x2000};
+    CUdeviceptr initial_sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+        (CUdeviceptr)(uintptr_t)batch_source1,
+    };
+    size_t initial_sizes[] = {sizeof(batch_source0), sizeof(batch_source1)};
+    CUdeviceptr hit_sources[] = {
+        (CUdeviceptr)(uintptr_t)(batch_source0 + 1),
+    };
+    size_t hit_sizes[] = {2};
+    CUdeviceptr mixed_sources[] = {
+        (CUdeviceptr)(uintptr_t)(batch_source1 + 1),
+        (CUdeviceptr)(uintptr_t)batch_source2,
+    };
+    size_t mixed_sizes[] = {2, sizeof(batch_source2)};
+    CUmemcpyAttributes attributes = {
+        .srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+    };
+    size_t attribute_indices[] = {0};
+    size_t fail_idx = SIZE_MAX;
+    CUstream stream = (CUstream)(uintptr_t)(UINT64_C(1) << 32 | 7);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_direct_source_acquirer(fake_source_acquire);
+    cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
+    cxl_cuda_test_enable_direct_source(7, 64);
+    command_count = 0;
+    source_acquire_count = 0;
+    next_source_id = 101;
+    next_lease_handle = 1001;
+    observed_direct_range_count = 0;
+
+    CHECK(cuMemcpyBatchAsync(destinations, initial_sources, initial_sizes, 2,
+                             &attributes, attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_SUCCESS);
+    CHECK(source_acquire_count == 1);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_SOURCE_REGISTER);
+    CHECK(commands[1] == CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC);
+    CHECK(observed_direct_range_count == 2);
+    CHECK(observed_direct_ranges[0].source_id == 101 &&
+          observed_direct_ranges[0].source_range == 0 &&
+          observed_direct_ranges[0].source_offset == 0);
+    CHECK(observed_direct_ranges[1].source_id == 101 &&
+          observed_direct_ranges[1].source_range == 1 &&
+          observed_direct_ranges[1].source_offset == 0);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+
+    command_count = 0;
+    CHECK(cuMemcpyBatchAsync(destinations, hit_sources, hit_sizes, 1,
+                             &attributes, attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_SUCCESS);
+    CHECK(source_acquire_count == 1);
+    CHECK(command_count == 1 &&
+          commands[0] == CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC);
+    CHECK(observed_direct_range_count == 1);
+    CHECK(observed_direct_ranges[0].source_id == 101 &&
+          observed_direct_ranges[0].source_range == 0 &&
+          observed_direct_ranges[0].source_offset == 1);
+
+    CHECK(cuStreamSynchronize(stream) == CUDA_SUCCESS);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+
+    command_count = 0;
+    CHECK(cuMemcpyBatchAsync(destinations, mixed_sources, mixed_sizes, 2,
+                             &attributes, attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_SUCCESS);
+    CHECK(source_acquire_count == 2);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_SOURCE_REGISTER);
+    CHECK(commands[1] == CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC);
+    CHECK(observed_direct_range_count == 2);
+    CHECK(observed_direct_ranges[0].source_id == 101 &&
+          observed_direct_ranges[0].source_range == 1 &&
+          observed_direct_ranges[0].source_offset == 1);
+    CHECK(observed_direct_ranges[1].source_id == 102 &&
+          observed_direct_ranges[1].source_range == 0 &&
+          observed_direct_ranges[1].source_offset == 0);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 2);
+    return 0;
+}
+
+static int test_direct_source_cache_contains_ranges_and_bounds_capacity(void) {
+    CUdeviceptr first_sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+        (CUdeviceptr)(uintptr_t)batch_source1,
+    };
+    size_t first_sizes[] = {sizeof(batch_source0), sizeof(batch_source1)};
+    CUdeviceptr second_sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source2,
+    };
+    size_t second_sizes[] = {sizeof(batch_source2)};
+    uint64_t source_id = 0;
+    uint64_t source_offset = UINT64_MAX;
+    uint32_t source_range = UINT32_MAX;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_direct_source_cache_limit(8);
+    CHECK(cxl_cuda_test_add_direct_source_cache_owner(
+        17, 23, 8, first_sources, first_sizes, 2));
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+    CHECK(cxl_cuda_test_direct_source_cache_bytes() == 8);
+    CHECK(cxl_cuda_test_find_direct_source_cache(
+        first_sources[0] + 1, 2, &source_id, &source_range, &source_offset));
+    CHECK(source_id == 17 && source_range == 0 && source_offset == 1);
+    CHECK(cxl_cuda_test_find_direct_source_cache(
+        first_sources[1], first_sizes[1], &source_id, &source_range,
+        &source_offset));
+    CHECK(source_id == 17 && source_range == 1 && source_offset == 0);
+    CHECK(!cxl_cuda_test_find_direct_source_cache(
+        first_sources[0] + first_sizes[0] - 1, 2, NULL, NULL, NULL));
+
+    CHECK(!cxl_cuda_test_add_direct_source_cache_owner(
+        41, 43, 1, second_sources, second_sizes, 1));
+    CHECK(cxl_cuda_test_direct_source_cache_capacity_bypasses() == 1);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+
+    cxl_cuda_test_set_direct_source_cache_limit(32);
+    CHECK(cxl_cuda_test_add_direct_source_cache_owner(
+        41, 43, 7, second_sources, second_sizes, 1));
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 2);
+    CHECK(cxl_cuda_test_direct_source_cache_bytes() == 15);
+    CHECK(cxl_cuda_test_find_direct_source_cache(
+        second_sources[0], second_sizes[0], &source_id, &source_range,
+        &source_offset));
+    CHECK(source_id == 41 && source_range == 0 && source_offset == 0);
+    return 0;
+}
+
+static int test_context_destroy_drains_direct_source_owners_in_order(void) {
+    CUcontext context = NULL;
+    CUdeviceptr sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+    };
+    size_t sizes[] = {sizeof(batch_source0)};
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
+    cxl_cuda_test_set_direct_source_cache_limit(16);
+    command_count = 0;
+    source_unregister_count = 0;
+    lease_release_count = 0;
+    source_unregister_result = CUDA_SUCCESS;
+    lease_release_result = CUDA_SUCCESS;
+
+    CHECK(cuCtxCreate_v2(&context, 0, 0) == CUDA_SUCCESS);
+    CHECK(cxl_cuda_test_add_direct_source_cache_owner(
+        17, 23, 3, sources, sizes, 1));
+    CHECK(cuCtxSynchronize() == CUDA_SUCCESS);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+    CHECK(source_unregister_count == 0 && lease_release_count == 0);
+
+    cxl_cuda_test_add_direct_source_pending(29, 31, 7);
+    CHECK(cuCtxDestroy_v2(context) == CUDA_SUCCESS);
+    CHECK(command_count == 6);
+    CHECK(commands[0] == CXL_GPU_CMD_CTX_CREATE);
+    CHECK(commands[1] == CXL_GPU_CMD_CTX_SYNC);
+    CHECK(commands[2] == CXL_GPU_CMD_CTX_SYNC);
+    CHECK(commands[3] == CXL_GPU_CMD_SOURCE_UNREGISTER);
+    CHECK(commands[4] == CXL_GPU_CMD_SOURCE_UNREGISTER);
+    CHECK(commands[5] == CXL_GPU_CMD_CTX_DESTROY);
+    CHECK(source_unregister_count == 2);
+    CHECK(unregistered_sources[0] == 29 && unregistered_sources[1] == 17);
+    CHECK(lease_release_count == 2);
+    CHECK(released_leases[0] == 31 && released_leases[1] == 23);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 0);
+    CHECK(cxl_cuda_test_direct_source_cache_bytes() == 0);
+    return 0;
+}
+
+static int test_context_destroy_exposes_cache_release_failure(void) {
+    CUcontext context = NULL;
+    CUdeviceptr sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+    };
+    size_t sizes[] = {sizeof(batch_source0)};
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
+    cxl_cuda_test_set_direct_source_cache_limit(16);
+    command_count = 0;
+    source_unregister_count = 0;
+    lease_release_count = 0;
+    source_unregister_result = CUDA_SUCCESS;
+    lease_release_result = CUDA_ERROR_INVALID_VALUE;
+
+    CHECK(cuCtxCreate_v2(&context, 0, 0) == CUDA_SUCCESS);
+    CHECK(cxl_cuda_test_add_direct_source_cache_owner(
+        17, 23, 3, sources, sizes, 1));
+    CHECK(cuCtxDestroy_v2(context) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 3);
+    CHECK(commands[0] == CXL_GPU_CMD_CTX_CREATE);
+    CHECK(commands[1] == CXL_GPU_CMD_CTX_SYNC);
+    CHECK(commands[2] == CXL_GPU_CMD_SOURCE_UNREGISTER);
+    CHECK(source_unregister_count == 1);
+    CHECK(lease_release_count == 1 && released_leases[0] == 23);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 1);
+
+    lease_release_result = CUDA_SUCCESS;
+    CHECK(cuCtxDestroy_v2(context) == CUDA_SUCCESS);
+    CHECK(command_count == 5);
+    CHECK(commands[3] == CXL_GPU_CMD_CTX_SYNC);
+    CHECK(commands[4] == CXL_GPU_CMD_CTX_DESTROY);
+    CHECK(source_unregister_count == 1);
+    CHECK(lease_release_count == 2 && released_leases[1] == 23);
+    CHECK(cxl_cuda_test_direct_source_cache_owner_count() == 0);
+    return 0;
+}
+
 int main(void) {
     return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
@@ -1291,5 +1583,9 @@ int main(void) {
            test_graph_instantiate_with_flags_reuses_existing_command() ||
            test_graph_exec_update_preserves_result_info() ||
            test_batch_htod_materializes_one_command() ||
-           test_direct_source_completion_orders_and_retries_release();
+           test_direct_source_completion_orders_and_retries_release() ||
+           test_direct_source_cache_skips_acquire_and_supports_mixed_owners() ||
+           test_direct_source_cache_contains_ranges_and_bounds_capacity() ||
+           test_context_destroy_drains_direct_source_owners_in_order() ||
+           test_context_destroy_exposes_cache_release_failure();
 }
