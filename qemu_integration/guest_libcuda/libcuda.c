@@ -483,6 +483,16 @@ typedef struct CXLObservationOpenToken {
     CXLObservationIdentity identity;
 } CXLObservationOpenToken;
 
+typedef struct CXLObservationClockAnchor {
+    bool attempted;
+    uint32_t result;
+    uint64_t guest_before_ns;
+    uint64_t guest_after_ns;
+    uint64_t host_monotonic_ns;
+    uint64_t host_realtime_ns;
+    uint64_t host_sample_uncertainty_ns;
+} CXLObservationClockAnchor;
+
 typedef struct CXLObservationLedger {
     pthread_mutex_t lock;
     bool active;
@@ -504,6 +514,7 @@ typedef struct CXLObservationLedger {
     CXLObservationGapAggregate
         all_known_gaps[CXL_OBSERVATION_GAP_IDENTITY_COUNT]
                       [CXL_OBSERVATION_GAP_IDENTITY_COUNT];
+    CXLObservationClockAnchor clock_anchors[2];
     CXLObservationOpenToken open_tokens[CXL_OBSERVATION_OPEN_TOKEN_COUNT];
 } CXLObservationLedger;
 
@@ -1038,6 +1049,75 @@ static void observation_emit_category_pairs_locked(uint64_t span_end_ns) {
     }
 }
 
+static const char *observation_anchor_phase_name(uint32_t phase) {
+    return phase == CXL_GPU_OBSERVATION_ANCHOR_DECODE_BEGIN ? "begin" : "end";
+}
+
+static void observation_capture_clock_anchor_locked(uint32_t phase) {
+    const uint32_t index = phase == CXL_GPU_OBSERVATION_ANCHOR_DECODE_BEGIN ? 0 : 1;
+    CXLObservationClockAnchor *anchor = &g_observation_ledger.clock_anchors[index];
+
+    anchor->attempted = true;
+    anchor->result = CXL_GPU_ERROR_UNKNOWN;
+    anchor->guest_before_ns = observation_clock_ns_locked();
+    if (!anchor->guest_before_ns || !g_transport.descriptor)
+        goto complete;
+    if (cxl_gpu_transport_lock(&g_transport) != 0)
+        goto complete;
+    cxl_gpu_transport_write64(&g_transport, CXL_GPU_REG_PARAM0,
+                              CXL_GPU_OBSERVATION_ANCHOR_VERSION);
+    cxl_gpu_transport_write64(&g_transport, CXL_GPU_REG_PARAM1, phase);
+    cxl_gpu_transport_write64(&g_transport, CXL_GPU_REG_PARAM2,
+                              g_observation_ledger.case_epoch);
+    anchor->result = cxl_gpu_transport_execute(
+        &g_transport, CXL_GPU_CMD_OBSERVATION_ANCHOR, NULL);
+    if (anchor->result == CXL_GPU_SUCCESS) {
+        anchor->host_monotonic_ns = cxl_gpu_transport_read64(
+            &g_transport, CXL_GPU_REG_RESULT0);
+        anchor->host_realtime_ns = cxl_gpu_transport_read64(
+            &g_transport, CXL_GPU_REG_RESULT1);
+        anchor->host_sample_uncertainty_ns = cxl_gpu_transport_read64(
+            &g_transport, CXL_GPU_REG_RESULT2);
+    }
+    if (cxl_gpu_transport_unlock(&g_transport) != 0)
+        anchor->result = CXL_GPU_ERROR_UNKNOWN;
+
+complete:
+    anchor->guest_after_ns = observation_clock_ns_locked();
+}
+
+static void observation_emit_clock_anchors_locked(void) {
+    for (uint32_t index = 0; index < 2; index++) {
+        const CXLObservationClockAnchor *anchor =
+            &g_observation_ledger.clock_anchors[index];
+        const uint32_t phase = index == 0
+            ? CXL_GPU_OBSERVATION_ANCHOR_DECODE_BEGIN
+            : CXL_GPU_OBSERVATION_ANCHOR_DECODE_END;
+        const bool available =
+            anchor->attempted && anchor->result == CXL_GPU_SUCCESS &&
+            anchor->guest_before_ns && anchor->guest_after_ns &&
+            anchor->guest_after_ns >= anchor->guest_before_ns &&
+            anchor->host_monotonic_ns && anchor->host_realtime_ns;
+
+        fprintf(stderr,
+                "[CXL-CUDA] clock_anchor schema=observation-anchor-v1"
+                " producer=guest-shim case_epoch=%" PRIu64
+                " scope=decode phase=%s status=%s result=%u"
+                " guest_before_ns=%" PRIu64 " guest_after_ns=%" PRIu64
+                " host_monotonic_ns=%" PRIu64 " host_realtime_ns=%" PRIu64
+                " host_sample_uncertainty_ns=%" PRIu64 " reason=%s\n",
+                g_observation_ledger.case_epoch,
+                observation_anchor_phase_name(phase),
+                available ? "available" : "unavailable", anchor->result,
+                anchor->guest_before_ns, anchor->guest_after_ns,
+                anchor->host_monotonic_ns, anchor->host_realtime_ns,
+                anchor->host_sample_uncertainty_ns,
+                available ? "none" :
+                    (!g_transport.descriptor ? "transport-unavailable" :
+                     "anchor-command-failed"));
+    }
+}
+
 static void observation_emit_terminal_locked(uint64_t span_end_ns) {
     observation_validate_terminal_gaps_locked(span_end_ns);
     observation_validate_command_totals_locked();
@@ -1066,6 +1146,7 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns) {
                 g_observation_ledger.command_total_duration_ns[command]);
     }
     observation_emit_gap_summaries_locked();
+    observation_emit_clock_anchors_locked();
     fflush(stderr);
 }
 
@@ -1079,12 +1160,14 @@ CUresult cuCxlObservationDecodeBeginV1(uint64_t case_epoch) {
     }
     memset((char *)&g_observation_ledger + offsetof(CXLObservationLedger, active),
            0, sizeof(g_observation_ledger) - offsetof(CXLObservationLedger, active));
-    g_observation_ledger.active = true;
     g_observation_ledger.case_epoch = case_epoch;
+    observation_capture_clock_anchor_locked(
+        CXL_GPU_OBSERVATION_ANCHOR_DECODE_BEGIN);
     g_observation_ledger.span_begin_ns = observation_clock_ns_locked();
     g_observation_ledger.last_clock_ns = g_observation_ledger.span_begin_ns;
     if (!g_observation_ledger.span_begin_ns)
         observation_fail_locked("clock-read");
+    g_observation_ledger.active = true;
     __atomic_store_n(&g_observation_fast_active, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_observation_ledger.lock);
     return g_observation_ledger.span_begin_ns ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;
@@ -1142,6 +1225,8 @@ CUresult cuCxlObservationDecodeEndV1(uint64_t case_epoch) {
         observation_fail_locked("clock-read");
         span_end_ns = g_observation_ledger.last_clock_ns;
     }
+    observation_capture_clock_anchor_locked(
+        CXL_GPU_OBSERVATION_ANCHOR_DECODE_END);
     if (g_observation_ledger.open_count != 0)
         observation_fail_locked("open-span-at-terminal");
     observation_emit_terminal_locked(span_end_ns);

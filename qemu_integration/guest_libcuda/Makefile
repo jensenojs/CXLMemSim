@@ -173,6 +173,8 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1')" -eq 2; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1.*status=unavailable.*reason=transport-unavailable')" -eq 2; \
 	incomplete="$$(./$(OBSERVATION_LEDGER_TEST) incomplete 2>&1)"; \
 	printf '%s\n' "$$incomplete"; \
 	test "$$(printf '%s\n' "$$incomplete" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
