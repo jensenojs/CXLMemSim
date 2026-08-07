@@ -325,6 +325,10 @@ static CXLDirectSourceCacheOwner *g_direct_source_cache_owners;
 static CXLDirectSourceCacheRange *g_direct_source_cache_ranges;
 static CXLDirectSourceCacheRange **g_direct_source_cache_index;
 static size_t g_direct_source_cache_range_count;
+enum { CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP = 64 };
+static CXLDirectSourceCacheRange *g_direct_source_cache_pending_index[
+    CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP];
+static size_t g_direct_source_cache_pending_index_count;
 static size_t g_direct_source_cache_limit_bytes;
 static size_t g_direct_source_cache_bytes;
 static uint64_t g_direct_source_cache_hits;
@@ -332,6 +336,7 @@ static uint64_t g_direct_source_cache_misses;
 static uint64_t g_direct_source_cache_admissions;
 static uint64_t g_direct_source_cache_capacity_bypasses;
 static uint64_t g_direct_source_cache_lookup_steps;
+static uint64_t g_direct_source_cache_merge_steps;
 
 typedef struct CXLCudaErrorName {
     CUresult error;
@@ -2049,6 +2054,7 @@ void cxl_cuda_test_reset(void) {
     g_direct_source_cache_admissions = 0;
     g_direct_source_cache_capacity_bypasses = 0;
     g_direct_source_cache_lookup_steps = 0;
+    g_direct_source_cache_merge_steps = 0;
     g_direct_source_enabled = 0;
     memset(g_test_bar2, 0, sizeof(g_test_bar2));
     g_transport = (CxlGpuTransport)CXL_GPU_TRANSPORT_INITIALIZER;
@@ -4072,34 +4078,24 @@ static int direct_source_cache_range_compare(const void *left,
 }
 
 static bool direct_source_cache_merge_index(
-        CXLDirectSourceCacheRange *new_ranges, size_t new_count) {
-    CXLDirectSourceCacheRange **new_index;
+        CXLDirectSourceCacheRange **new_index, size_t new_count) {
     CXLDirectSourceCacheRange **merged;
     size_t old_index = 0;
     size_t new_index_pos = 0;
     size_t merged_count;
 
-    if (new_count > SIZE_MAX / sizeof(*new_index) ||
-        g_direct_source_cache_range_count >
+    if (g_direct_source_cache_range_count >
             SIZE_MAX / sizeof(*merged) - new_count)
         return false;
     merged_count = g_direct_source_cache_range_count + new_count;
-    new_index = malloc(new_count * sizeof(*new_index));
     merged = malloc(merged_count * sizeof(*merged));
-    if (!new_index || !merged) {
-        free(new_index);
-        free(merged);
+    if (!merged)
         return false;
-    }
 
-    size_t index = 0;
-    for (CXLDirectSourceCacheRange *range = new_ranges; range;
-         range = range->next)
-        new_index[index++] = range;
     qsort(new_index, new_count, sizeof(*new_index),
           direct_source_cache_range_compare);
 
-    index = 0;
+    size_t index = 0;
     while (old_index < g_direct_source_cache_range_count &&
            new_index_pos < new_count) {
         if (direct_source_cache_range_order(
@@ -4122,11 +4118,54 @@ static bool direct_source_cache_merge_index(
             prefix_max_end = range_end;
         range->prefix_max_end = prefix_max_end;
     }
+    g_direct_source_cache_merge_steps += merged_count;
 
-    free(new_index);
     free(g_direct_source_cache_index);
     g_direct_source_cache_index = merged;
     g_direct_source_cache_range_count = merged_count;
+    return true;
+}
+
+static bool direct_source_cache_flush_pending_index(void) {
+    if (!g_direct_source_cache_pending_index_count)
+        return true;
+    if (!direct_source_cache_merge_index(
+            g_direct_source_cache_pending_index,
+            g_direct_source_cache_pending_index_count))
+        return false;
+    g_direct_source_cache_pending_index_count = 0;
+    return true;
+}
+
+static bool direct_source_cache_admit_index(
+        CXLDirectSourceCacheRange *new_ranges, size_t new_count) {
+    if (new_count > CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP) {
+        CXLDirectSourceCacheRange **new_index;
+        size_t index = 0;
+
+        if (!direct_source_cache_flush_pending_index() ||
+            new_count > SIZE_MAX / sizeof(*new_index))
+            return false;
+        new_index = malloc(new_count * sizeof(*new_index));
+        if (!new_index)
+            return false;
+        for (CXLDirectSourceCacheRange *range = new_ranges; range;
+             range = range->next)
+            new_index[index++] = range;
+        bool merged = direct_source_cache_merge_index(new_index, new_count);
+        free(new_index);
+        return merged;
+    }
+
+    if (g_direct_source_cache_pending_index_count >
+            CXL_DIRECT_SOURCE_CACHE_PENDING_INDEX_CAP - new_count &&
+        !direct_source_cache_flush_pending_index())
+        return false;
+    for (CXLDirectSourceCacheRange *range = new_ranges; range;
+         range = range->next) {
+        g_direct_source_cache_pending_index[
+            g_direct_source_cache_pending_index_count++] = range;
+    }
     return true;
 }
 
@@ -4135,6 +4174,20 @@ static CXLDirectSourceCacheRange *direct_source_cache_find(uintptr_t address,
     if (!length || length > UINTPTR_MAX - address)
         return NULL;
     uintptr_t end = address + length;
+
+    /*
+     * knockout: the bounded pending scan caps admission rebuild cost for the
+     * current Kimi range scale; use an augmented tree if this scan owns wall.
+     */
+    for (size_t index = 0;
+         index < g_direct_source_cache_pending_index_count; index++) {
+        CXLDirectSourceCacheRange *range =
+            g_direct_source_cache_pending_index[index];
+        g_direct_source_cache_lookup_steps++;
+        if (address >= range->address &&
+            end <= range->address + range->length)
+            return range;
+    }
 
     size_t low = 0;
     size_t high = g_direct_source_cache_range_count;
@@ -4177,6 +4230,7 @@ static void direct_source_cache_reset(void) {
     free(g_direct_source_cache_index);
     g_direct_source_cache_index = NULL;
     g_direct_source_cache_range_count = 0;
+    g_direct_source_cache_pending_index_count = 0;
     g_direct_source_cache_bytes = 0;
 }
 
@@ -4239,7 +4293,7 @@ static CXLDirectSourceCacheAdmission direct_source_cache_admit(
         range->next = new_ranges;
         new_ranges = range;
     }
-    if (!direct_source_cache_merge_index(new_ranges, count)) {
+    if (!direct_source_cache_admit_index(new_ranges, count)) {
         while (new_ranges) {
             CXLDirectSourceCacheRange *next = new_ranges->next;
             free(new_ranges);
@@ -4647,6 +4701,10 @@ void cxl_cuda_test_reset_direct_source_cache_lookup_steps(void) {
 
 size_t cxl_cuda_test_direct_source_cache_lookup_steps(void) {
     return g_direct_source_cache_lookup_steps;
+}
+
+size_t cxl_cuda_test_direct_source_cache_merge_steps(void) {
+    return g_direct_source_cache_merge_steps;
 }
 #endif
 
@@ -7954,7 +8012,8 @@ __attribute__((destructor)) static void libcuda_cleanup(void) {
     CXLCudaErrorName *error_name;
     size_t direct_source_cache_resident_bytes = g_direct_source_cache_bytes;
     size_t direct_source_cache_range_count =
-        g_direct_source_cache_range_count;
+        g_direct_source_cache_range_count +
+        g_direct_source_cache_pending_index_count;
 
     DLOG("libcuda.so unloading\n");
     observation_abandon_active_decode();

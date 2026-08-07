@@ -139,6 +139,7 @@ size_t cxl_cuda_test_direct_source_cache_bytes(void);
 uint64_t cxl_cuda_test_direct_source_cache_capacity_bypasses(void);
 void cxl_cuda_test_reset_direct_source_cache_lookup_steps(void);
 size_t cxl_cuda_test_direct_source_cache_lookup_steps(void);
+size_t cxl_cuda_test_direct_source_cache_merge_steps(void);
 void cxl_cuda_test_set_initialized(int initialized);
 uint64_t cxl_cuda_test_read_reg64(uint32_t offset);
 void cxl_cuda_test_write_result(unsigned int index, uint64_t value);
@@ -1534,6 +1535,23 @@ static int test_direct_source_cache_lookup_handles_overlapping_ranges(void) {
     return 0;
 }
 
+static int test_direct_source_cache_admission_does_not_rebuild_every_range(void) {
+    enum { ADMISSION_COUNT = 4096 };
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_direct_source_cache_limit(ADMISSION_COUNT);
+    for (size_t index = 0; index < ADMISSION_COUNT; index++) {
+        CUdeviceptr source = UINT64_C(0x100000) +
+                             index * UINT64_C(0x1000);
+        size_t size = 0x100;
+
+        CHECK(cxl_cuda_test_add_direct_source_cache_owner(
+            1000 + index, 10000 + index, 1, &source, &size, 1));
+    }
+    CHECK(cxl_cuda_test_direct_source_cache_merge_steps() <= 262144);
+    return 0;
+}
+
 static int test_context_destroy_drains_direct_source_owners_in_order(void) {
     CUcontext context = NULL;
     CUdeviceptr sources[] = {
@@ -1638,6 +1656,7 @@ int main(void) {
            test_direct_source_cache_contains_ranges_and_bounds_capacity() ||
            test_direct_source_cache_lookup_is_not_linear() ||
            test_direct_source_cache_lookup_handles_overlapping_ranges() ||
+           test_direct_source_cache_admission_does_not_rebuild_every_range() ||
            test_context_destroy_drains_direct_source_owners_in_order() ||
            test_context_destroy_exposes_cache_release_failure();
 }
