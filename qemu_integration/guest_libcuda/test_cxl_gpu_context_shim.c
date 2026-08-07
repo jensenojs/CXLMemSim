@@ -1253,6 +1253,14 @@ static int test_direct_source_completion_orders_and_retries_release(void) {
 
     command_count = 0;
     lease_release_count = 0;
+    cxl_cuda_test_add_direct_source_pending(0, 41, 9);
+    CHECK(cxl_cuda_test_complete_direct_sources(9, false) == CUDA_SUCCESS);
+    CHECK(command_count == 0);
+    CHECK(lease_release_count == 1 && released_lease == 41);
+    CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
+
+    command_count = 0;
+    lease_release_count = 0;
     source_unregister_result = CUDA_ERROR_INVALID_CONTEXT;
     cxl_cuda_test_add_direct_source_pending(29, 31, 7);
     CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_ERROR_INVALID_CONTEXT);

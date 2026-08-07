@@ -4020,7 +4020,6 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     CXLDirectSourcePending *pending = NULL;
     struct cxl_type2_source_acquire_v1 acquire = {0};
     struct cxl_type2_source_release_v1 release = {0};
-    uint64_t source_id = 0;
     size_t register_bytes;
     size_t direct_bytes;
     CUresult result = CUDA_SUCCESS;
@@ -4123,78 +4122,47 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         };
     }
     cmd_lock();
-    if (batch_data_write(0, &header, sizeof(header)) != 0 ||
+    if (direct_bytes > CXL_GPU_BATCH_DATA_SIZE - register_bytes ||
+        batch_data_write(0, &header, sizeof(header)) != 0 ||
         batch_data_write(sizeof(header), wire_ranges,
                          count * sizeof(*wire_ranges)) != 0 ||
         batch_data_write(sizeof(header) + count * sizeof(*wire_ranges),
-                         wire_runs, acquire.run_count * sizeof(*wire_runs)) != 0) {
+                         wire_runs, acquire.run_count * sizeof(*wire_runs)) != 0 ||
+        batch_data_write(register_bytes, direct_ranges, direct_bytes) != 0) {
         result = CUDA_ERROR_UNKNOWN;
         goto unlock_release;
     }
     reg_write64(CXL_GPU_REG_PARAM0, register_bytes);
-    result = execute_cmd(CXL_GPU_CMD_SOURCE_REGISTER);
-    source_id = reg_read64(CXL_GPU_REG_RESULT0);
-    if (result != CUDA_SUCCESS || !source_id) {
-        if (result == CUDA_SUCCESS)
-            result = CUDA_ERROR_UNKNOWN;
-        goto unlock_release;
-    }
-
-    for (size_t index = 0; index < count; index++)
-        direct_ranges[index].source_id = source_id;
-    if (batch_data_write(0, direct_ranges, direct_bytes) != 0) {
-        result = CUDA_ERROR_UNKNOWN;
-        goto unregister_source;
-    }
-    reg_write64(CXL_GPU_REG_PARAM0, count);
-    reg_write64(CXL_GPU_REG_PARAM1, direct_bytes);
+    reg_write64(CXL_GPU_REG_PARAM1, count);
     reg_write64(CXL_GPU_REG_PARAM2, stream_wire);
-    result = execute_cmd(CXL_GPU_CMD_BATCH_HTOD_DIRECT_ASYNC);
+    result = execute_cmd(CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
     if (result != CUDA_SUCCESS) {
         uint64_t failed = reg_read64(CXL_GPU_REG_RESULT0);
         uint64_t fragments_enqueued = reg_read64(CXL_GPU_REG_RESULT2);
+
         if (failed < count)
             *failIdx = failed;
         if (fragments_enqueued) {
-            pending->source_id = source_id;
             pending->lease_handle = release.lease_handle;
             pending->stream_wire = stream_wire;
             pending->next = g_direct_source_pending;
             g_direct_source_pending = pending;
             pending = NULL;
-            source_id = 0;
             release.lease_handle = 0;
             cmd_unlock();
             goto out;
         }
-        goto unregister_source;
+        goto unlock_release;
     }
-    pending->source_id = source_id;
     pending->lease_handle = release.lease_handle;
     pending->stream_wire = stream_wire;
     pending->next = g_direct_source_pending;
     g_direct_source_pending = pending;
     pending = NULL;
-    source_id = 0;
     release.lease_handle = 0;
     cmd_unlock();
     goto out;
 
-unregister_source:
-    {
-        CUresult unregister_result = direct_source_unregister_locked(source_id);
-        if (unregister_result != CUDA_SUCCESS) {
-            result = unregister_result;
-            pending->source_id = source_id;
-            pending->lease_handle = release.lease_handle;
-            pending->stream_wire = stream_wire;
-            pending->next = g_direct_source_pending;
-            g_direct_source_pending = pending;
-            pending = NULL;
-            release.lease_handle = 0;
-        }
-        source_id = 0;
-    }
 unlock_release:
     cmd_unlock();
 release_lease:
