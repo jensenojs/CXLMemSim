@@ -167,9 +167,13 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$complete" | awk '/interval_pair_summary/ && /category_a=selected_range_plan category_b=host_result_read / { for (i = 1; i <= NF; i++) { if ($$i ~ /^intersection_union_ns=/) { split($$i, intersection, "=") } if ($$i ~ /^category_b_exclusive_ns=/) { split($$i, exclusive, "=") } } if (intersection[2] > 0 && exclusive[2] == 0) found = 1 } END { exit found ? 0 : 1 }'; \
 	printf '%s\n' "$$complete" | grep 'category=cuda_public_call ' | grep 'status=complete' | grep 'interval_count=0 ' >/dev/null; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'gap_summary schema=gap-summary-v1')" -gt 0; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'operation_gap_summary schema=operation-gap-summary-v1')" -gt 0; \
 	all_known_gap="$$(printf '%s\n' "$$complete" | awk '/interval_summary/ && /category=all_known / { for (i = 1; i <= NF; i++) if ($$i ~ /^gap_duration_ns=/) { split($$i, field, "="); print field[2] } }')"; \
 	gap_total="$$(printf '%s\n' "$$complete" | awk '/gap_summary/ { for (i = 1; i <= NF; i++) if ($$i ~ /^total_duration_ns=/) { split($$i, field, "="); total += field[2] } } END { print total + 0 }')"; \
 	test "$$gap_total" -eq "$$all_known_gap"; \
+	operation_gap_total="$$(printf '%s\n' "$$complete" | awk '/operation_gap_summary/ { for (i = 1; i <= NF; i++) if ($$i ~ /^total_duration_ns=/) { split($$i, field, "="); total += field[2] } } END { print total + 0 }')"; \
+	test "$$operation_gap_total" -eq "$$all_known_gap"; \
+	printf '%s\n' "$$complete" | grep 'next_operation=selected_range_plan ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
