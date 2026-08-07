@@ -3999,6 +3999,20 @@ static CUresult direct_source_lease_release(uint64_t lease_handle) {
     return result;
 }
 
+static CXLDirectSourcePending *direct_source_pending_new(uint64_t source_id, uint64_t lease_handle,
+                                                         uint64_t stream_wire) {
+    CXLDirectSourcePending *pending = malloc(sizeof(*pending));
+
+    if (pending) {
+        *pending = (CXLDirectSourcePending){
+            .source_id = source_id,
+            .lease_handle = lease_handle,
+            .stream_wire = stream_wire,
+        };
+    }
+    return pending;
+}
+
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                                                bool all_streams) {
     CXLDirectSourcePending **link = &g_direct_source_pending;
@@ -4112,7 +4126,7 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     _Static_assert(sizeof(*kernel_runs) == sizeof(*wire_runs),
                    "source run wire layout mismatch");
     wire_runs = (CXLGPUSourceRunV1 *)kernel_runs;
-    pending = malloc(sizeof(*pending));
+    pending = direct_source_pending_new(0, release.lease_handle, stream_wire);
     if (!pending) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
         goto release_lease;
@@ -4161,8 +4175,6 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         if (failed < count)
             *failIdx = failed;
         if (fragments_enqueued) {
-            pending->lease_handle = release.lease_handle;
-            pending->stream_wire = stream_wire;
             pending->next = g_direct_source_pending;
             g_direct_source_pending = pending;
             pending = NULL;
@@ -4172,8 +4184,6 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         }
         goto unlock_release;
     }
-    pending->lease_handle = release.lease_handle;
-    pending->stream_wire = stream_wire;
     pending->next = g_direct_source_pending;
     g_direct_source_pending = pending;
     pending = NULL;
@@ -4201,15 +4211,10 @@ out:
 }
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
-void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
-                                             uint64_t lease_handle,
-                                             uint64_t stream_wire) {
-    CXLDirectSourcePending *pending = calloc(1, sizeof(*pending));
+void cxl_cuda_test_add_direct_source_pending(uint64_t source_id, uint64_t lease_handle, uint64_t stream_wire) {
+    CXLDirectSourcePending *pending = direct_source_pending_new(source_id, lease_handle, stream_wire);
     if (!pending)
         abort();
-    pending->source_id = source_id;
-    pending->lease_handle = lease_handle;
-    pending->stream_wire = stream_wire;
     pending->next = g_direct_source_pending;
     g_direct_source_pending = pending;
 }

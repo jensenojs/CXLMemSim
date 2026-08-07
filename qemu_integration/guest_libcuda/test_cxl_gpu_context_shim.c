@@ -1235,7 +1235,7 @@ static int test_batch_htod_materializes_one_command(void) {
     return 0;
 }
 
-static int test_direct_source_completion_orders_and_retries_release(void) {
+static int test_direct_source_completion_distinguishes_fused_and_legacy_ownership(void) {
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
     cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
@@ -1299,5 +1299,5 @@ int main(void) {
            test_graph_instantiate_with_flags_reuses_existing_command() ||
            test_graph_exec_update_preserves_result_info() ||
            test_batch_htod_materializes_one_command() ||
-           test_direct_source_completion_orders_and_retries_release();
+           test_direct_source_completion_distinguishes_fused_and_legacy_ownership();
 }
