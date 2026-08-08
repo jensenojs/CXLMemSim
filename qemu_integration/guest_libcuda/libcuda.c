@@ -428,7 +428,7 @@ static char *g_observation_buffer = NULL;
             fprintf(stderr, "[CXL-CUDA] " __VA_ARGS__);                                                              \
     } while (0)
 
-#define CXL_OBSERVATION_CATEGORY_COUNT 8
+#define CXL_OBSERVATION_CATEGORY_COUNT 9
 #define CXL_OBSERVATION_PAIR_COUNT \
     ((CXL_OBSERVATION_CATEGORY_COUNT * (CXL_OBSERVATION_CATEGORY_COUNT - 1)) / 2)
 #define CXL_OBSERVATION_PUBLIC_CALL 0
@@ -436,7 +436,7 @@ static char *g_observation_buffer = NULL;
 #define CXL_OBSERVATION_GAP_BOUNDARY CXL_OBSERVATION_CATEGORY_COUNT
 #define CXL_OBSERVATION_GAP_IDENTITY_COUNT (CXL_OBSERVATION_CATEGORY_COUNT + 1)
 #define CXL_OBSERVATION_OPERATION_GAP_CAPACITY 1024
-#define CXL_OBSERVATION_CATEGORY_INTERVAL_CAPACITY 65536
+#define CXL_OBSERVATION_CATEGORY_INTERVAL_CAPACITY 131072
 
 typedef struct CXLObservationIdentity {
     bool valid;
@@ -585,6 +585,7 @@ static const char *const g_observation_category_names[CXL_OBSERVATION_CATEGORY_C
     "resident_to_compute",
     "cuda_graph_prepare",
     "host_result_read",
+    "scheduler_split_prepare",
 };
 
 static uint64_t observation_clock_ns_locked(void) {
@@ -1321,7 +1322,7 @@ static void observation_emit_category_intervals_locked(uint64_t span_end_ns) {
                     interval->begin_ns, interval->end_ns);
         }
         for (uint32_t category = CXL_CUDA_OBS_SELECTED_RANGE_PLAN;
-             category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
+             category <= CXL_CUDA_OBS_SCHEDULER_SPLIT_PREPARE; category++) {
             if (category_duration_ns[category] !=
                 g_observation_ledger.categories[category].union_duration_ns)
                 observation_fail_locked("category-interval-union-mismatch");
@@ -1467,7 +1468,7 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns,
     observation_validate_command_totals_locked();
     observation_validate_category_pairs_locked();
     for (uint32_t category = 0;
-         category <= CXL_CUDA_OBS_HOST_RESULT_READ; category++) {
+         category <= CXL_CUDA_OBS_SCHEDULER_SPLIT_PREPARE; category++) {
         observation_emit_summary_locked(g_observation_category_names[category],
                                         category == 0 ? "guest-shim" : "llama",
                                         &g_observation_ledger.categories[category],
@@ -1534,7 +1535,7 @@ CUresult cuCxlObservationSpanBeginV1(uint32_t category,
     }
     *token = 0;
     if (category < CXL_CUDA_OBS_SELECTED_RANGE_PLAN ||
-        category > CXL_CUDA_OBS_HOST_RESULT_READ) {
+        category > CXL_CUDA_OBS_SCHEDULER_SPLIT_PREPARE) {
         pthread_mutex_lock(&g_observation_ledger.lock);
         if (g_observation_ledger.active)
             observation_fail_locked("unknown-category");
@@ -2098,7 +2099,8 @@ static CUresult execute_cmd_traced(uint32_t cmd, const char *symbol) {
     }
 #endif
     uint32_t poll_count = 0;
-    CUresult result = (CUresult)cxl_gpu_transport_execute(&g_transport, cmd, &poll_count);
+    CUresult result = (CUresult)cxl_gpu_transport_execute(
+        &g_transport, cmd, &poll_count);
     observation_command_status_polls(cmd, poll_count);
     uint64_t end_ns = observation_cuda_call_end(
         observation_token, result, guest_monotonic_ns());

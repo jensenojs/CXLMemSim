@@ -11,6 +11,7 @@ enum cxl_cuda_observation_category_v1 {
     CXL_CUDA_OBS_RESIDENT_TO_COMPUTE = 5,
     CXL_CUDA_OBS_GRAPH_PREPARE = 6,
     CXL_CUDA_OBS_HOST_RESULT_READ = 7,
+    CXL_CUDA_OBS_SCHEDULER_SPLIT_PREPARE = 8,
 };
 
 #endif

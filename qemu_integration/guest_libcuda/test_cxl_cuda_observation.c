@@ -22,6 +22,7 @@ static int run_complete(void) {
     uint64_t outer = 0;
     uint64_t inner = 0;
     uint64_t read = 0;
+    uint64_t split_prepare = 0;
 
     if (cuCxlObservationDecodeBeginV1(17) != CUDA_SUCCESS ||
         cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_SELECTED_RANGE_PLAN,
@@ -32,6 +33,9 @@ static int run_complete(void) {
         cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_HOST_RESULT_READ,
                                     3, 3, &read) != CUDA_SUCCESS ||
         cuCxlObservationSpanEndV1(read, 0) != CUDA_SUCCESS ||
+        cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_SCHEDULER_SPLIT_PREPARE,
+                                    3, 4, &split_prepare) != CUDA_SUCCESS ||
+        cuCxlObservationSpanEndV1(split_prepare, 0) != CUDA_SUCCESS ||
         cuCxlObservationSpanEndV1(outer, 0) != CUDA_SUCCESS ||
         cuCxlObservationDecodeEndV1(17) != CUDA_SUCCESS)
         return 1;
@@ -70,7 +74,7 @@ static int run_interval_overflow(void) {
 
     if (cuCxlObservationDecodeBeginV1(31) != CUDA_SUCCESS)
         return 1;
-    for (uint64_t operation = 1; operation <= 65537; operation++) {
+    for (uint64_t operation = 1; operation <= 131073; operation++) {
         if (cuCxlObservationSpanBeginV1(CXL_CUDA_OBS_SOURCE_LEASE,
                                         1, operation, &token) != CUDA_SUCCESS ||
             cuCxlObservationSpanEndV1(token, 0) != CUDA_SUCCESS)

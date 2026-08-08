@@ -161,8 +161,8 @@ $(OBSERVATION_LEDGER_TEST): test_cxl_cuda_observation.c cxl_cuda_observation.h $
 test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	@complete="$$(./$(OBSERVATION_LEDGER_TEST) complete 2>&1)"; \
 	printf '%s\n' "$$complete"; \
-	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 9; \
-	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_pair_summary schema=interval-pair-summary-v1')" -eq 28; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_summary schema=interval-summary-v1')" -eq 10; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'interval_pair_summary schema=interval-pair-summary-v1')" -eq 36; \
 	printf '%s\n' "$$complete" | grep 'category_a=selected_range_plan category_b=host_result_read ' | grep 'status=complete' >/dev/null; \
 	printf '%s\n' "$$complete" | awk '/interval_pair_summary/ && /category_a=selected_range_plan category_b=host_result_read / { for (i = 1; i <= NF; i++) { if ($$i ~ /^intersection_union_ns=/) { split($$i, intersection, "=") } if ($$i ~ /^category_b_exclusive_ns=/) { split($$i, exclusive, "=") } } if (intersection[2] > 0 && exclusive[2] == 0) found = 1 } END { exit found ? 0 : 1 }'; \
 	printf '%s\n' "$$complete" | grep 'category=cuda_public_call ' | grep 'status=complete' | grep 'interval_count=0 ' >/dev/null; \
@@ -176,25 +176,26 @@ test-observation-ledger: $(OBSERVATION_LEDGER_TEST)
 	printf '%s\n' "$$complete" | grep 'next_operation=selected_range_plan ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=selected_range_plan ' | grep 'status=complete' | grep 'interval_count=2 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=host_result_read ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
-	test "$$(printf '%s\n' "$$complete" | grep -c 'category_interval schema=category-interval-v1')" -eq 2; \
-	printf '%s\n' "$$complete" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=available' | grep 'interval_count=2 ' | grep 'emitted_count=2 ' >/dev/null; \
+	printf '%s\n' "$$complete" | grep 'category=scheduler_split_prepare ' | grep 'status=complete' | grep 'interval_count=1 ' >/dev/null; \
+	test "$$(printf '%s\n' "$$complete" | grep -c 'category_interval schema=category-interval-v1')" -eq 3; \
+	printf '%s\n' "$$complete" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=available' | grep 'interval_count=3 ' | grep 'emitted_count=3 ' >/dev/null; \
 	printf '%s\n' "$$complete" | grep 'category=all_known ' | grep 'status=complete' | grep 'first_error=none' >/dev/null; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1')" -eq 2; \
 	test "$$(printf '%s\n' "$$complete" | grep -c 'clock_anchor schema=observation-anchor-v1.*status=unavailable.*reason=transport-unavailable')" -eq 2; \
 	incomplete="$$(./$(OBSERVATION_LEDGER_TEST) incomplete 2>&1)"; \
 	printf '%s\n' "$$incomplete"; \
-	test "$$(printf '%s\n' "$$incomplete" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
-	test "$$(printf '%s\n' "$$incomplete" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 28; \
+	test "$$(printf '%s\n' "$$incomplete" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 10; \
+	test "$$(printf '%s\n' "$$incomplete" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 36; \
 	printf '%s\n' "$$incomplete" | grep 'category=all_known ' | grep 'first_error=span-pairing' >/dev/null; \
 	overflow="$$(./$(OBSERVATION_LEDGER_TEST) overflow 2>&1)"; \
 	printf '%s\n' "$$overflow"; \
-	test "$$(printf '%s\n' "$$overflow" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 9; \
-	test "$$(printf '%s\n' "$$overflow" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 28; \
+	test "$$(printf '%s\n' "$$overflow" | grep 'interval_summary schema=interval-summary-v1' | grep -c 'status=incomplete')" -eq 10; \
+	test "$$(printf '%s\n' "$$overflow" | grep -c 'interval_pair_summary.*status=incomplete')" -eq 36; \
 	printf '%s\n' "$$overflow" | grep 'category=all_known ' | grep 'first_error=open-token-capacity' >/dev/null; \
 	interval_overflow="$$(./$(OBSERVATION_LEDGER_TEST) interval-overflow 2>&1)"; \
 	printf '%s\n' "$$interval_overflow"; \
 	test "$$(printf '%s\n' "$$interval_overflow" | grep -c 'category_interval schema=category-interval-v1')" -eq 0; \
-	printf '%s\n' "$$interval_overflow" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=unavailable' | grep 'interval_count=65537 ' | grep 'emitted_count=0 ' | grep 'capacity=65536 ' | grep 'reason=capacity-exceeded' >/dev/null
+	printf '%s\n' "$$interval_overflow" | grep 'category_interval_terminal schema=category-interval-terminal-v1' | grep 'status=unavailable' | grep 'interval_count=131073 ' | grep 'emitted_count=0 ' | grep 'capacity=131072 ' | grep 'reason=capacity-exceeded' >/dev/null
 
 $(LOADER_AUDIT): loader_audit.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< $(LDFLAGS) $(LDLIBS)
