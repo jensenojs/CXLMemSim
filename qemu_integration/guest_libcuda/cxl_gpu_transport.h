@@ -42,6 +42,8 @@ int cxl_gpu_transport_batch_read(const CxlGpuTransport *transport, size_t offset
 
 int cxl_gpu_transport_lock(CxlGpuTransport *transport);
 int cxl_gpu_transport_unlock(CxlGpuTransport *transport);
+int cxl_gpu_transport_try_elide_stream_sync(CxlGpuTransport *transport,
+                                            uint64_t stream_wire);
 uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command, uint32_t *poll_count);
 
 #endif

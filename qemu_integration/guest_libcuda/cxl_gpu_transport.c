@@ -221,6 +221,34 @@ int cxl_gpu_transport_unlock(CxlGpuTransport *transport) {
     return flock(transport->pci_fd, LOCK_UN);
 }
 
+int cxl_gpu_transport_try_elide_stream_sync(CxlGpuTransport *transport,
+                                            uint64_t stream_wire) {
+    volatile CXLGPURAMCommandDescriptor *descriptor = transport->descriptor;
+
+    if (transport->unusable || !descriptor ||
+        __atomic_load_n(&descriptor->sync_hint_valid, __ATOMIC_ACQUIRE) != 1)
+        return 0;
+
+    uint64_t generation = __atomic_load_n(&descriptor->device_generation,
+                                          __ATOMIC_ACQUIRE);
+    uint64_t case_epoch = __atomic_load_n(&descriptor->active_case_epoch,
+                                          __ATOMIC_ACQUIRE);
+    if (generation == 0 || case_epoch == 0 ||
+        descriptor->sync_hint_device_generation != generation ||
+        descriptor->sync_hint_case_epoch != case_epoch ||
+        descriptor->sync_hint_stream_wire != stream_wire ||
+        __atomic_load_n(&descriptor->sync_hint_valid, __ATOMIC_ACQUIRE) != 1)
+        return 0;
+
+    uint64_t elided = __atomic_load_n(&descriptor->guest_elided_stream_syncs,
+                                      __ATOMIC_RELAXED);
+    if (elided == UINT64_MAX)
+        return 0;
+    __atomic_store_n(&descriptor->guest_elided_stream_syncs, elided + 1,
+                     __ATOMIC_RELAXED);
+    return 1;
+}
+
 uint32_t cxl_gpu_transport_execute(CxlGpuTransport *transport, uint32_t command, uint32_t *poll_count) {
     static const uint64_t command_timeout_ns = UINT64_C(60) * UINT64_C(1000000000);
     static const uint32_t spin_poll_limit = 64;

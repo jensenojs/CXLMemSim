@@ -67,6 +67,25 @@ int main(void) {
     transport.bar_size = CXL_GPU_CMD_REG_SIZE;
     transport.descriptor->device_generation = 1;
 
+    transport.descriptor->active_case_epoch = 17;
+    transport.descriptor->sync_hint_device_generation = 1;
+    transport.descriptor->sync_hint_case_epoch = 17;
+    transport.descriptor->sync_hint_stream_wire = 23;
+    __atomic_store_n(&transport.descriptor->sync_hint_valid, 1,
+                     __ATOMIC_RELEASE);
+    assert(cxl_gpu_transport_try_elide_stream_sync(&transport, 24) == 0);
+    transport.descriptor->sync_hint_case_epoch = 18;
+    assert(cxl_gpu_transport_try_elide_stream_sync(&transport, 23) == 0);
+    transport.descriptor->sync_hint_case_epoch = 17;
+    transport.descriptor->sync_hint_device_generation = 2;
+    assert(cxl_gpu_transport_try_elide_stream_sync(&transport, 23) == 0);
+    transport.descriptor->sync_hint_device_generation = 1;
+    assert(cxl_gpu_transport_try_elide_stream_sync(&transport, 23) == 1);
+    assert(transport.descriptor->guest_elided_stream_syncs == 1);
+    __atomic_store_n(&transport.descriptor->sync_hint_valid, 0,
+                     __ATOMIC_RELEASE);
+    assert(cxl_gpu_transport_try_elide_stream_sync(&transport, 23) == 0);
+
     cxl_gpu_transport_write64(&transport, CXL_GPU_REG_PARAM1,
                               UINT64_C(0x123456789abcdef0));
     cxl_gpu_transport_write64(&transport, CXL_GPU_REG_CALL_ID, 42);
