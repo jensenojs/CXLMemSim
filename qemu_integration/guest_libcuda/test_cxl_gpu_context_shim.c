@@ -113,6 +113,7 @@ typedef struct {
 #define CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID 50
 
 void cxl_cuda_test_reset(void);
+int cxl_cuda_test_command_barrier_bursts(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
 void cxl_cuda_test_set_direct_source_lease_releaser(
     CUresult (*releaser)(uint64_t lease_handle));
@@ -1283,8 +1284,14 @@ static int test_direct_source_completion_distinguishes_fused_and_legacy_ownershi
     return 0;
 }
 
+static int test_command_barrier_burst_summary(void) {
+    CHECK(cxl_cuda_test_command_barrier_bursts());
+    return 0;
+}
+
 int main(void) {
-    return test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
+    return test_command_barrier_burst_summary() ||
+           test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
            test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
            test_context_local_storage_keeps_managers_separate() || test_context_check_preserves_result2() ||
            test_cublas_context_stream_export_table() ||

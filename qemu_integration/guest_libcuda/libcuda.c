@@ -509,6 +509,34 @@ typedef struct CXLObservationClockAnchor {
     uint64_t host_sample_uncertainty_ns;
 } CXLObservationClockAnchor;
 
+enum {
+    CXL_OBSERVATION_BURST_1,
+    CXL_OBSERVATION_BURST_2,
+    CXL_OBSERVATION_BURST_3_TO_4,
+    CXL_OBSERVATION_BURST_5_TO_8,
+    CXL_OBSERVATION_BURST_9_TO_16,
+    CXL_OBSERVATION_BURST_OVER_16,
+    CXL_OBSERVATION_BURST_BUCKET_COUNT,
+};
+
+enum {
+    CXL_OBSERVATION_BARRIER_CTX_SYNC,
+    CXL_OBSERVATION_BARRIER_GRAPH_LAUNCH,
+    CXL_OBSERVATION_BARRIER_KERNEL_LAUNCH,
+    CXL_OBSERVATION_BARRIER_STREAM_SYNC,
+    CXL_OBSERVATION_BARRIER_COUNT,
+};
+
+typedef struct CXLObservationCommandBarrierBursts {
+    uint64_t current_fused_calls;
+    uint64_t fused_calls;
+    uint64_t terminated_bursts;
+    uint64_t terminated_fused_calls;
+    uint64_t max_burst;
+    uint64_t histogram[CXL_OBSERVATION_BURST_BUCKET_COUNT];
+    uint64_t barriers[CXL_OBSERVATION_BARRIER_COUNT];
+} CXLObservationCommandBarrierBursts;
+
 typedef struct CXLObservationLedger {
     pthread_mutex_t lock;
     bool active;
@@ -528,6 +556,7 @@ typedef struct CXLObservationLedger {
     uint64_t command_calls[256];
     uint64_t command_total_duration_ns[256];
     uint64_t command_status_poll_count[256];
+    CXLObservationCommandBarrierBursts command_barrier_bursts;
     CXLObservationGapAggregate
         all_known_gaps[CXL_OBSERVATION_GAP_IDENTITY_COUNT]
                       [CXL_OBSERVATION_GAP_IDENTITY_COUNT];
@@ -579,6 +608,59 @@ static bool observation_add_locked(uint64_t *value, uint64_t increment) {
     }
     *value += increment;
     return true;
+}
+
+static int observation_barrier_index(uint32_t command) {
+    switch (command) {
+    case CXL_GPU_CMD_CTX_SYNC:
+        return CXL_OBSERVATION_BARRIER_CTX_SYNC;
+    case CXL_GPU_CMD_GRAPH_LAUNCH:
+        return CXL_OBSERVATION_BARRIER_GRAPH_LAUNCH;
+    case CXL_GPU_CMD_LAUNCH_KERNEL:
+        return CXL_OBSERVATION_BARRIER_KERNEL_LAUNCH;
+    case CXL_GPU_CMD_STREAM_SYNC:
+        return CXL_OBSERVATION_BARRIER_STREAM_SYNC;
+    default:
+        return -1;
+    }
+}
+
+static uint32_t observation_burst_bucket(uint64_t calls) {
+    if (calls == 1)
+        return CXL_OBSERVATION_BURST_1;
+    if (calls == 2)
+        return CXL_OBSERVATION_BURST_2;
+    if (calls <= 4)
+        return CXL_OBSERVATION_BURST_3_TO_4;
+    if (calls <= 8)
+        return CXL_OBSERVATION_BURST_5_TO_8;
+    if (calls <= 16)
+        return CXL_OBSERVATION_BURST_9_TO_16;
+    return CXL_OBSERVATION_BURST_OVER_16;
+}
+
+static void observation_command_barrier_record_locked(uint32_t command) {
+    CXLObservationCommandBarrierBursts *bursts =
+        &g_observation_ledger.command_barrier_bursts;
+
+    if (command == CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC) {
+        observation_add_locked(&bursts->current_fused_calls, 1);
+        observation_add_locked(&bursts->fused_calls, 1);
+        return;
+    }
+
+    const int barrier = observation_barrier_index(command);
+    if (barrier < 0 || bursts->current_fused_calls == 0)
+        return;
+
+    const uint64_t calls = bursts->current_fused_calls;
+    observation_add_locked(&bursts->terminated_bursts, 1);
+    observation_add_locked(&bursts->terminated_fused_calls, calls);
+    observation_add_locked(&bursts->histogram[observation_burst_bucket(calls)], 1);
+    observation_add_locked(&bursts->barriers[barrier], 1);
+    if (calls > bursts->max_burst)
+        bursts->max_burst = calls;
+    bursts->current_fused_calls = 0;
 }
 
 static void observation_update_category_pairs_locked(uint32_t category,
@@ -1331,7 +1413,56 @@ static void observation_emit_clock_anchors_locked(void) {
     }
 }
 
-static void observation_emit_terminal_locked(uint64_t span_end_ns) {
+static void observation_emit_command_barrier_bursts_locked(
+    bool decode_terminal_observed) {
+    const CXLObservationCommandBarrierBursts *bursts =
+        &g_observation_ledger.command_barrier_bursts;
+
+    fprintf(stderr,
+            "[CXL-CUDA] command_barrier_burst_summary"
+            " schema=guest-command-barrier-burst-summary-v1"
+            " producer=guest-shim order_domain=guest-bar2-command"
+            " case_epoch=%" PRIu64 " scope=decode status=%s"
+            " source_command=0x%x fused_calls=%" PRIu64
+            " terminated_bursts=%" PRIu64
+            " terminated_fused_calls=%" PRIu64
+            " trailing_fused_calls=%" PRIu64
+            " max_terminated_burst=%" PRIu64
+            " singleton_bursts=%" PRIu64 " multi_bursts=%" PRIu64
+            " multi_fused_calls=%" PRIu64
+            " burst_1=%" PRIu64 " burst_2=%" PRIu64
+            " burst_3_4=%" PRIu64 " burst_5_8=%" PRIu64
+            " burst_9_16=%" PRIu64 " burst_gt_16=%" PRIu64
+            " ctx_sync_bursts=%" PRIu64
+            " graph_launch_bursts=%" PRIu64
+            " kernel_launch_bursts=%" PRIu64
+            " stream_sync_bursts=%" PRIu64 " reason=%s\n",
+            g_observation_ledger.case_epoch,
+            decode_terminal_observed ? "complete" : "incomplete",
+            CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC,
+            bursts->fused_calls, bursts->terminated_bursts,
+            bursts->terminated_fused_calls, bursts->current_fused_calls,
+            bursts->max_burst,
+            bursts->histogram[CXL_OBSERVATION_BURST_1],
+            bursts->terminated_bursts
+                - bursts->histogram[CXL_OBSERVATION_BURST_1],
+            bursts->terminated_fused_calls
+                - bursts->histogram[CXL_OBSERVATION_BURST_1],
+            bursts->histogram[CXL_OBSERVATION_BURST_1],
+            bursts->histogram[CXL_OBSERVATION_BURST_2],
+            bursts->histogram[CXL_OBSERVATION_BURST_3_TO_4],
+            bursts->histogram[CXL_OBSERVATION_BURST_5_TO_8],
+            bursts->histogram[CXL_OBSERVATION_BURST_9_TO_16],
+            bursts->histogram[CXL_OBSERVATION_BURST_OVER_16],
+            bursts->barriers[CXL_OBSERVATION_BARRIER_CTX_SYNC],
+            bursts->barriers[CXL_OBSERVATION_BARRIER_GRAPH_LAUNCH],
+            bursts->barriers[CXL_OBSERVATION_BARRIER_KERNEL_LAUNCH],
+            bursts->barriers[CXL_OBSERVATION_BARRIER_STREAM_SYNC],
+            decode_terminal_observed ? "none" : "decode-terminal-missing");
+}
+
+static void observation_emit_terminal_locked(uint64_t span_end_ns,
+                                             bool decode_terminal_observed) {
     observation_validate_terminal_gaps_locked(span_end_ns);
     observation_validate_command_totals_locked();
     observation_validate_category_pairs_locked();
@@ -1347,6 +1478,7 @@ static void observation_emit_terminal_locked(uint64_t span_end_ns) {
                                     span_end_ns);
     observation_emit_category_pairs_locked(span_end_ns);
     observation_emit_category_intervals_locked(span_end_ns);
+    observation_emit_command_barrier_bursts_locked(decode_terminal_observed);
     for (uint32_t command = 0; command < 256; command++) {
         if (g_observation_ledger.command_calls[command] == 0)
             continue;
@@ -1445,7 +1577,7 @@ CUresult cuCxlObservationDecodeEndV1(uint64_t case_epoch) {
         CXL_GPU_OBSERVATION_ANCHOR_DECODE_END);
     if (g_observation_ledger.open_count != 0)
         observation_fail_locked("open-span-at-terminal");
-    observation_emit_terminal_locked(span_end_ns);
+    observation_emit_terminal_locked(span_end_ns, true);
     g_observation_ledger.active = false;
     __atomic_store_n(&g_observation_fast_active, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_observation_ledger.lock);
@@ -1459,7 +1591,7 @@ static void observation_abandon_active_decode(void) {
         uint64_t span_end_ns = observation_clock_ns_locked();
         if (!span_end_ns)
             span_end_ns = g_observation_ledger.last_clock_ns;
-        observation_emit_terminal_locked(span_end_ns);
+        observation_emit_terminal_locked(span_end_ns, false);
         g_observation_ledger.active = false;
         __atomic_store_n(&g_observation_fast_active, 0, __ATOMIC_RELEASE);
     }
@@ -1825,6 +1957,7 @@ static uint64_t observation_cuda_call_begin(const char *symbol,
     uint64_t token = observation_span_begin_locked(
         CXL_OBSERVATION_PUBLIC_CALL, 0, call_id, command,
         "guest-shim", symbol, begin_ns);
+    observation_command_barrier_record_locked(command);
     pthread_mutex_unlock(&g_observation_ledger.lock);
     return token;
 }
@@ -2036,6 +2169,58 @@ void cxl_cuda_test_reset(void) {
     g_test_direct_source_lease_releaser = NULL;
     cxl_cuda_context_state_reset();
     context_storage_test_reset();
+}
+
+int cxl_cuda_test_command_barrier_bursts(void) {
+    pthread_mutex_lock(&g_observation_ledger.lock);
+    memset((char *)&g_observation_ledger + offsetof(CXLObservationLedger, active),
+           0, sizeof(g_observation_ledger) - offsetof(CXLObservationLedger, active));
+    g_observation_ledger.active = true;
+
+    observation_command_barrier_record_locked(
+        CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    observation_command_barrier_record_locked(CXL_GPU_CMD_GRAPH_LAUNCH);
+    for (uint32_t index = 0; index < 2; index++)
+        observation_command_barrier_record_locked(
+            CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    observation_command_barrier_record_locked(CXL_GPU_CMD_LAUNCH_KERNEL);
+    for (uint32_t index = 0; index < 3; index++)
+        observation_command_barrier_record_locked(
+            CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    observation_command_barrier_record_locked(CXL_GPU_CMD_MEM_GET_INFO);
+    observation_command_barrier_record_locked(CXL_GPU_CMD_STREAM_SYNC);
+    for (uint32_t index = 0; index < 5; index++)
+        observation_command_barrier_record_locked(
+            CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    observation_command_barrier_record_locked(CXL_GPU_CMD_CTX_SYNC);
+    for (uint32_t index = 0; index < 17; index++)
+        observation_command_barrier_record_locked(
+            CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+
+    const CXLObservationCommandBarrierBursts *bursts =
+        &g_observation_ledger.command_barrier_bursts;
+    const bool passed =
+        bursts->fused_calls == 28 &&
+        bursts->terminated_bursts == 4 &&
+        bursts->terminated_fused_calls == 11 &&
+        bursts->current_fused_calls == 17 &&
+        bursts->max_burst == 5 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_1] == 1 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_2] == 1 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_3_TO_4] == 1 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_5_TO_8] == 1 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_9_TO_16] == 0 &&
+        bursts->histogram[CXL_OBSERVATION_BURST_OVER_16] == 0 &&
+        bursts->barriers[CXL_OBSERVATION_BARRIER_CTX_SYNC] == 1 &&
+        bursts->barriers[CXL_OBSERVATION_BARRIER_GRAPH_LAUNCH] == 1 &&
+        bursts->barriers[CXL_OBSERVATION_BARRIER_KERNEL_LAUNCH] == 1 &&
+        bursts->barriers[CXL_OBSERVATION_BARRIER_STREAM_SYNC] == 1;
+
+    memset((char *)&g_observation_ledger + offsetof(CXLObservationLedger, active),
+           0, sizeof(g_observation_ledger) - offsetof(CXLObservationLedger, active));
+    __atomic_store_n(&g_observation_fast_active, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_observation_ledger.lock);
+    return passed;
 }
 
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
