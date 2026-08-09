@@ -10,6 +10,7 @@
 # agent-context: proves=On native: the suite exercises real stream ordering and passes, so a later stack FAIL is attributable to the forwarding chain, not the test. On the Type-2 stack: whether the specific async copy API preserves same-stream ordering relative to a producer kernel.
 # agent-context: does_not_prove=It does not measure performance, does not cover batched/graphed copies or cross-stream dependencies, and a stack PASS for DtoD/HtoD on current components reflects their existing stream-forwarding paths, not the 2D fix.
 # agent-context: next=Run the same build/ inside the type2-kvm guest against the pre-fix shim (expect memcpy2d_async+nonblocking FAIL) and against the stream-aware shim + QEMU pair (expect all PASS); then register the matrix in CI per gpu-b6a2.
+# agent-context: status_2026-08-10=Pre-fix reproduction done (stale-source FAIL, deterministic). Fix-pair run done: race eliminated, but the matrix is blocked at the Concordia backend, which implements neither cuMemcpy2DAsync_v2 (any published source) nor cuMemcpyDtoDAsync_v2 (only concordia main b1eb28b). Full investigation with diagrams: cxl-lab/docs/evidence/stream-contract-fixed-pair-backend-gap-20260810.md.
 
 ## Convicted mechanism (gpu-w68.5.19)
 
