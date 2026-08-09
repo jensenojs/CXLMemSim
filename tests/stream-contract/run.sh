@@ -47,7 +47,7 @@ fi
 deviations=0
 nonblocking_failures=0
 legacy_failures=0
-for case_name in memcpy2d_async memcpy_dtod_async memcpy_htod_async; do
+for case_name in memcpy2d_async memcpy_dtod_async memcpy_htod_async memset_d8_async; do
     for stream in legacy nonblocking; do
         "$build/$case_name" --stream="$stream" --delay-cycles="$delay" \
             --bytes="$bytes"

@@ -16,7 +16,7 @@ if [ -n "$CCBIN" ] && command -v "$CCBIN" >/dev/null 2>&1; then
     ccbin_args=(-ccbin "$CCBIN")
 fi
 
-for c in memcpy2d_async memcpy_dtod_async memcpy_htod_async; do
+for c in memcpy2d_async memcpy_dtod_async memcpy_htod_async memset_d8_async; do
     "$NVCC" "${ccbin_args[@]}" -arch="$SM" -O2 \
         -o "$build/$c" "$here/$c.cu" -lcuda
     echo "built=$build/$c"
