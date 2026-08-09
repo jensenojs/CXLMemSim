@@ -52,6 +52,34 @@ In the Type-2 guest: copy `build/` plus `run.sh` in, then
 `./run.sh --surface type2-fixed` (stream-aware shim + QEMU). No rebuild in the
 guest; the binaries only need `libcuda.so.1` (the shim) and `libcudart`.
 
+## Local Type-2 KVM reproduction (2026-08-09 procedure)
+
+The suite ran in-guest on the real stack (QEMU Type-2 + shim + RTX 3050) via a
+diagnostic driver at `cxl-lab/.work/local-dev/stream-contract-guest/`:
+
+- `run_local_kvm.sh` boots `scripts/type2/core/run_type2_stack.sh`
+  (ACCELERATOR=local-kvm) inside the CNB toolchain container. The fixed-1.5B
+  seed probe is not reusable here: its verifier is coupled to the llama
+  stdout/perf contract.
+- The guest initrd is the local fixed-1.5B case-control initrd with the
+  workload section replaced by the 6-case matrix and the binaries baked into
+  `/stream-contract/` (built with `-cudart static`; guest glibc 2.42 matches
+  the host, payload supplies libstdc++/libgcc_s).
+- Component versions must satisfy the shim's strict transport-version
+  equality check (`CXL_GPU_VERSION`). The local QEMU binary
+  (`.work/cnb-toolchain-build/qemu-system-x86_64`) speaks v1.11.0; the only
+  main-line cxlmemsim commit at v1.11.0 is `3c0fd9d`, which is also exactly
+  the convicted pre-fix 2D code. Build `libcuda.so.1` + `cxl-gpu-case` from
+  `3c0fd9d` and bake them into the initrd (payload stays last in
+  LD_LIBRARY_PATH so its stale v1.10.0 shim never shadows).
+- Known unrelated breakage: the CDI spec (`/var/run/cdi/nvidia.yaml`) goes
+  stale after an nvidia module reload (references `/dev/dri/card0`); compute
+  needs no DRI nodes, so the driver injects `/dev/nvidia*` and the real
+  `libcuda.so.1` manually. Also, `run_type2_stack.sh` currently requires
+  `DIRECT_REGISTRATION_TILE_SIZE`/`DIRECT_REGISTRATION_PADDING_SIZE` in the
+  caller env (its manifest Python reads `os.environ` keys its own env wrapper
+  never sets); pass both as `0`.
+
 ## Expected verdict matrix
 
 | case | stream | native | type2-prefix | type2-fixed |

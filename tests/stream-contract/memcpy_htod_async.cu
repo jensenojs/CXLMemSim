@@ -36,9 +36,15 @@ int main(int argc, char **argv) {
         args.delay_cycles);
     CUDA_RT_CHECK(cudaGetLastError());
 
-    // Pinned host source with its own pattern, filled before enqueue.
-    void *host_src = nullptr;
-    CUDA_DRV_CHECK(cuMemAllocHost_v2(&host_src, args.bytes));
+    // Pageable host source with its own pattern, filled before enqueue. The
+    // Type-2 shim does not export cuMemAllocHost_v2; pageable memory keeps
+    // the same ordering contract (the driver stages the copy) and matches
+    // what the shim can serve.
+    void *host_src = std::malloc(args.bytes);
+    if (!host_src) {
+        std::printf("error=host_alloc bytes=%zu\n", args.bytes);
+        return 2;
+    }
     unsigned int *words = (unsigned int *)host_src;
     for (size_t i = 0; i < bufs.words; i++) {
         words[i] = PAT_HOST;
@@ -54,7 +60,7 @@ int main(int argc, char **argv) {
     rc = validate("cuMemcpyHtoDAsync", args, bufs.dst, PAT_HOST, PAT_FRESH,
                   "copy_overwritten_by_unordered_producer_stream_order_dropped",
                   bufs.words, &pass);
-    cuMemFreeHost(host_src);
+    std::free(host_src);
     if (rc) return rc;
 
     cuMemFree_v2(bufs.src);
