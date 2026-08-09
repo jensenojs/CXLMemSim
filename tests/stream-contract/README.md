@@ -82,20 +82,37 @@ diagnostic driver at `cxl-lab/.work/local-dev/stream-contract-guest/`:
 
 ## Expected verdict matrix
 
-| case | stream | native | type2-prefix | type2-fixed |
+| case | stream | native | type2-prefix (pre-fix, any generation) | type2-fixed |
 | --- | --- | --- | --- | --- |
 | memcpy2d_async | legacy | PASS | PASS | PASS |
 | memcpy2d_async | nonblocking | PASS | FAIL (convicted defect) | PASS |
 | memcpy_dtod_async | legacy | PASS | PASS | PASS |
-| memcpy_dtod_async | nonblocking | PASS | PASS | PASS |
+| memcpy_dtod_async | nonblocking | PASS | FAIL (generic `cuMemcpyAsync` entry also drops the stream) | PASS |
 | memcpy_htod_async | legacy | PASS | PASS | PASS |
-| memcpy_htod_async | nonblocking | PASS | PASS | PASS |
+| memcpy_htod_async | nonblocking | PASS | PASS (HtoD forwards the stream on the wire) | PASS |
 
-The legacy-stream twin of the 2D case is the discriminating control: on the
+`--surface type2-prefix` asserts the signature structurally (all legacy PASS
+plus at least one nonblocking FAIL) rather than an exact per-case matrix,
+because which nonblocking cases fail depends on the component generation.
+
+Observed on the local KVM stack (2026-08-09, QEMU 60fff9dc + shim 984feab,
+both transport v1.10.0, from the active-cxl-exact materialization): exactly
+the matrix above, with `bad_marker_words=262144/262144` (total overtake, not
+flaky) and `diagnosis=copy_observed_stale_source_stream_order_dropped` on both
+nonblocking DtoD cases. Guest log:
+`cxl-lab/.work/local-dev/stream-contract-guest/runs/stream-contract-20260809-220924/qemu-guest.log`.
+
+Coverage warning for the fix: the shim fix `ca0fb8f` (descriptor protocol v2)
+carries the stream only for the 2D entry. The generic `cuMemcpyAsync` entry
+still discards `hStream` at main `c79f867` (`(void)hStream` + blocking
+`cuMemcpy`), so `type2-fixed` will keep failing on `memcpy_dtod_async` until
+that entry is also stream-aware.
+
+The legacy-stream twin of each case is the discriminating control: on the
 pre-fix stack the producer (legacy stream, forwarded) and the copy (host
-legacy stream) are ordered, so it must PASS; only the non-blocking case fails.
-If the legacy case also fails, the stack is broken in a different way and the
-matrix must not be read as the convicted defect.
+legacy stream) are ordered, so legacy cases must PASS; only non-blocking
+cases fail. If a legacy case fails, the stack is broken in a different way
+and the matrix must not be read as the convicted defect.
 
 ## Determinism
 
