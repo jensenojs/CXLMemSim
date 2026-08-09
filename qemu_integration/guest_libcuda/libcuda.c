@@ -6745,7 +6745,8 @@ static bool cxl_memcpy2d_offset(CUdeviceptr base, size_t pitch, size_t x, size_t
     return true;
 }
 
-static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
+static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy,
+                                              uint64_t stream_wire) {
     if (!copy) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -6783,6 +6784,7 @@ static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
     reg_write64(CXL_GPU_REG_PARAM3, copy->srcPitch);
     reg_write64(CXL_GPU_REG_PARAM4, copy->WidthInBytes);
     reg_write64(CXL_GPU_REG_PARAM5, copy->Height);
+    reg_write64(CXL_GPU_REG_PARAM6, stream_wire);
     CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_2D_DTOD);
     cmd_unlock();
     return result;
@@ -6790,22 +6792,25 @@ static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
 
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *copy) {
     DLOG("cuMemcpy2D_v2(copy=%p)\n", (const void *)copy);
-    return cxl_memcpy2d_device_to_device(copy);
+    /* The synchronous API maps to the legacy default stream: the device
+     * model executes it with synchronous cuMemcpy2D semantics, which keep
+     * the legacy stream's implicit ordering against blocking streams. */
+    return cxl_memcpy2d_device_to_device(copy, CXL_GPU_STREAM_WIRE_LEGACY);
 }
 
 CUresult cuMemcpy2D(const CUDA_MEMCPY2D *copy) { return cuMemcpy2D_v2(copy); }
 
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     DLOG("cuMemcpy2DAsync_v2(copy=%p, stream=%p)\n", (const void *)copy, hStream);
-    /* knockout: Type-2 currently serializes transfer commands. Preserve the
-     * existing async copy contract by completing this multidimensional copy
-     * before return; add a stream-aware BAR2 protocol only after it is measured. */
+    uint64_t stream_wire;
     size_t total_bytes = 0;
     if (copy && (copy->Height == 0 || copy->WidthInBytes <= SIZE_MAX / copy->Height))
         total_bytes = copy->WidthInBytes * copy->Height;
     async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, 1, hStream,
-                           "blocking");
-    return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy));
+                           "streamed");
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return async_copy_trace_end(CUDA_ERROR_INVALID_HANDLE);
+    return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy, stream_wire));
 }
 
 CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) { return cuMemcpy2DAsync_v2(copy, hStream); }
