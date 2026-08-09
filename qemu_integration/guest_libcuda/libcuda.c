@@ -6869,7 +6869,13 @@ CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
 CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) { return cuMemsetD8_v2(dstDevice, uc, N); }
 
 CUresult cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc, size_t N, CUstream hStream) {
-    (void)hStream;
+    /* The wire MEM_SET command has no device-model case; the fill is
+     * emulated with chunked HtoD copies that execute immediately, so the
+     * async entry must first drain the caller's stream to preserve
+     * ordering against in-flight kernels. */
+    CUresult result = cuStreamSynchronize(hStream);
+    if (result != CUDA_SUCCESS)
+        return result;
     return cuMemsetD8_v2(dstDevice, uc, N);
 }
 
