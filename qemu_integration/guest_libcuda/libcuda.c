@@ -4733,15 +4733,35 @@ CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t byteCount) {
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream);
+
 CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount,
                        CUstream hStream) {
     DLOG("cuMemcpyAsync(dst=0x%lx, src=0x%lx, size=%zu, stream=%p)\n",
          (unsigned long)dst, (unsigned long)src, byteCount, hStream);
-    (void)hStream;
-    /* knockout: the current Type-2 command path serializes copies and kernel
-     * launches. Completing the UVA-directed copy before return preserves
-     * correctness; add stream ordering only when concurrent execution exists. */
-    return cuMemcpy(dst, src, byteCount);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!dst || !src)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    bool dst_is_device = false;
+    bool src_is_device = false;
+    CUresult result = cxl_cuda_pointer_is_device(dst, &dst_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+    result = cxl_cuda_pointer_is_device(src, &src_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+
+    if (dst_is_device && src_is_device)
+        return cuMemcpyDtoDAsync_v2(dst, src, byteCount, hStream);
+    if (dst_is_device)
+        return cuMemcpyHtoDAsync_v2(dst, (const void *)(uintptr_t)src, byteCount, hStream);
+    if (src_is_device)
+        return cuMemcpyDtoHAsync_v2((void *)(uintptr_t)dst, src, byteCount, hStream);
+
+    memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, byteCount);
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
