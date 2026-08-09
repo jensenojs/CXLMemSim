@@ -4,7 +4,7 @@
   lfs: false
 
 .cxlmemsim-component-tools: &cxlmemsim-component-tools
-  image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:e74cee9e7350b26b11e7487509083cc3aacfd2f44280805ac4bd8f89eeb280d8
+  image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:df9050e0657134935975448d83dbe354b174a13a87e64b2c2991d23cfaa50f15
   volumes:
     - cxlmemsim-build-cache:/cache/cxlmemsim/ccache:copy-on-write
 
@@ -103,7 +103,7 @@ $:
       runner:
         tags: cnb:arch:amd64:gpu:L40
       docker:
-        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:ec2050e6c8038093977867503255638c37fdeffb6e4dfbf24cbd95114a3676d0
+        image: docker.cnb.cool/gevico.online/jensen/cxl-lab@sha256:df9050e0657134935975448d83dbe354b174a13a87e64b2c2991d23cfaa50f15
       stages:
         - name: observe L40 CUDA private export table calls
           timeout: 15m
