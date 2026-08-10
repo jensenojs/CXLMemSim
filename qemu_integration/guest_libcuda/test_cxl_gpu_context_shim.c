@@ -131,6 +131,7 @@ void cxl_cuda_test_read_data(size_t offset, void *dst, size_t length);
 void cxl_cuda_test_write_data(size_t offset, const void *src, size_t length);
 void cxl_cuda_test_read_batch_data(size_t offset, void *dst, size_t length);
 CUresult cxl_cuda_test_direct_elf_size(const void *code, size_t *elf_size);
+void cxl_cuda_test_set_bar4(void *base, size_t size);
 
 CUresult cuInit(unsigned int flags);
 CUresult cuDriverGetVersion(int *version);
@@ -192,7 +193,16 @@ typedef struct {
     CUgraphNode errorFromNode;
 } CUgraphExecUpdateResultInfo;
 CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
-                           CUgraphExecUpdateResultInfo *resultInfo);
+                            CUgraphExecUpdateResultInfo *resultInfo);
+int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes,
+                         uint64_t request_bytes, uint64_t *device_alias,
+                         int *can_map_host_memory);
+int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
+                           uint64_t *htod_command_delta);
+int cxlCoherentStaleAliasProbe(void *host_ptr, uint64_t bytes,
+                               int *positive_status,
+                               int *stale_launch_status,
+                               int *stale_sync_status);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -229,6 +239,9 @@ static CUresult dtod_async_result = CUDA_SUCCESS;
 static CUresult lease_release_result = CUDA_SUCCESS;
 static uint64_t released_lease;
 static unsigned int lease_release_count;
+static CUresult coherent_map_result = CUDA_SUCCESS;
+static CUresult coherent_unmap_result = CUDA_SUCCESS;
+static CUresult coherent_stale_result = CUDA_SUCCESS;
 
 static const uint8_t batch_source0[] = {0x10, 0x11, 0x12};
 static const uint8_t batch_source1[] = {0x20, 0x21, 0x22, 0x23, 0x24};
@@ -344,6 +357,25 @@ static CUresult fake_execute(uint32_t command) {
         }
     case CXL_GPU_CMD_CTX_DESTROY:
         return CUDA_SUCCESS;
+    case CXL_GPU_CMD_COHERENT_MAP_DEVICE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 128);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 4096);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM2) == 256);
+        cxl_cuda_test_write_result(0, UINT64_C(0x12340000));
+        cxl_cuda_test_write_result(2, 1);
+        return coherent_map_result;
+    case CXL_GPU_CMD_COHERENT_UNMAP_DEVICE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 128);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == UINT64_C(0x12340000));
+        cxl_cuda_test_write_result(0, 0);
+        return coherent_unmap_result;
+    case CXL_GPU_CMD_COHERENT_STALE_ALIAS_PROBE:
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 128);
+        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 256);
+        cxl_cuda_test_write_result(0, CUDA_SUCCESS);
+        cxl_cuda_test_write_result(1, (uint64_t)(uint32_t)CUDA_ERROR_INVALID_VALUE);
+        cxl_cuda_test_write_result(2, CUDA_SUCCESS);
+        return coherent_stale_result;
     case CXL_GPU_CMD_FUNC_GET_OCCUPANCY:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 128);
@@ -1279,6 +1311,60 @@ static int test_batch_htod_materializes_one_command(void) {
     return 0;
 }
 
+static int test_coherent_device_map_command_contract(void) {
+    uint8_t bar4[8192] = {0};
+    void *host_ptr = bar4 + 128;
+    uint64_t device_alias = 0;
+    uint64_t htod_delta = UINT64_MAX;
+    int can_map = 0;
+    int positive_status = -1;
+    int stale_launch_status = -1;
+    int stale_sync_status = -1;
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_bar4(bar4, sizeof(bar4));
+    command_count = 0;
+    coherent_map_result = CUDA_SUCCESS;
+    coherent_unmap_result = CUDA_SUCCESS;
+    coherent_stale_result = CUDA_SUCCESS;
+
+    CHECK(cxlCoherentMapDevice(host_ptr, 4096, 256, &device_alias, &can_map) == CUDA_SUCCESS);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_COHERENT_MAP_DEVICE);
+    CHECK(device_alias == UINT64_C(0x12340000) && can_map == 1);
+
+    CHECK(cxlCoherentUnmapDevice(host_ptr, device_alias, &htod_delta) == CUDA_SUCCESS);
+    CHECK(command_count == 2 && commands[1] == CXL_GPU_CMD_COHERENT_UNMAP_DEVICE);
+    CHECK(htod_delta == 0);
+
+    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 256, &positive_status, &stale_launch_status, &stale_sync_status) ==
+          CUDA_SUCCESS);
+    CHECK(command_count == 3 && commands[2] == CXL_GPU_CMD_COHERENT_STALE_ALIAS_PROBE);
+    CHECK(positive_status == CUDA_SUCCESS);
+    CHECK(stale_launch_status == CUDA_ERROR_INVALID_VALUE);
+    CHECK(stale_sync_status == CUDA_SUCCESS);
+
+    CHECK(cxlCoherentMapDevice(NULL, 4096, 256, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(cxlCoherentMapDevice(host_ptr, 256, 4096, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(cxlCoherentMapDevice(bar4 + sizeof(bar4) - 128, 4096, 256, &device_alias, &can_map) ==
+          CUDA_ERROR_INVALID_VALUE);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, 0, &htod_delta) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 0, &positive_status, &stale_launch_status, &stale_sync_status) ==
+          CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 3);
+
+    coherent_map_result = 911;
+    CHECK(cxlCoherentMapDevice(host_ptr, 4096, 256, &device_alias, &can_map) == 911);
+    coherent_unmap_result = 912;
+    CHECK(cxlCoherentUnmapDevice(host_ptr, UINT64_C(0x12340000), &htod_delta) == 912);
+    coherent_stale_result = 913;
+    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 256, &positive_status, &stale_launch_status, &stale_sync_status) == 913);
+    CHECK(command_count == 6);
+
+    cxl_cuda_test_set_bar4(NULL, 0);
+    return 0;
+}
+
 static int test_direct_source_completion_distinguishes_fused_and_legacy_ownership(void) {
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
@@ -1333,22 +1419,20 @@ static int test_command_barrier_burst_summary(void) {
 }
 
 int main(void) {
-    return test_command_barrier_burst_summary() ||
-           test_query_and_context_sequence() || test_primary_retain_does_not_become_current() ||
-           test_destroy_keeps_other_thread_token_without_transport() || test_integrity_export_table_shape() ||
-           test_context_local_storage_keeps_managers_separate() || test_context_check_preserves_result2() ||
-           test_cublas_context_stream_export_table() ||
+    return test_command_barrier_burst_summary() || test_query_and_context_sequence() ||
+           test_primary_retain_does_not_become_current() || test_destroy_keeps_other_thread_token_without_transport() ||
+           test_integrity_export_table_shape() || test_context_local_storage_keeps_managers_separate() ||
+           test_context_check_preserves_result2() || test_cublas_context_stream_export_table() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
            test_memcpy2d_device_route() || test_dtod_async_preserves_stream_without_synchronizing() ||
            test_stream_sync_reason_identifies_calling_semantics() ||
            test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity() ||
-           test_direct_elf_library_kernel_function_lifecycle() ||
-           test_driver_version_mapping_is_reused_by_init() ||
+           test_direct_elf_library_kernel_function_lifecycle() || test_driver_version_mapping_is_reused_by_init() ||
            test_launch_reuses_param_layout_until_module_unload() ||
            test_graph_instantiate_with_flags_reuses_existing_command() ||
-           test_graph_exec_update_preserves_result_info() ||
-           test_batch_htod_materializes_one_command() ||
+           test_graph_exec_update_preserves_result_info() || test_batch_htod_materializes_one_command() ||
+           test_coherent_device_map_command_contract() ||
            test_direct_source_completion_distinguishes_fused_and_legacy_ownership();
 }

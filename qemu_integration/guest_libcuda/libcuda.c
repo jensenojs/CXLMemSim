@@ -7281,6 +7281,13 @@ static volatile uint8_t *g_bar4_ptr = NULL;
 static size_t g_bar4_size = 0;
 static uint64_t g_coh_offset = 0; /* bump allocator offset */
 
+#ifdef CXL_GPU_CONTEXT_SHIM_TEST
+void cxl_cuda_test_set_bar4(void *base, size_t size) {
+    g_bar4_ptr = base;
+    g_bar4_size = size;
+}
+#endif
+
 static volatile uint8_t *ensure_bar4(void) {
     if (g_bar4_ptr)
         return g_bar4_ptr;
@@ -7570,6 +7577,63 @@ void *cxlDeviceToHost(uint64_t dev_offset) {
 int cxlCoherentFence(void) {
     __sync_synchronize();
     return 0;
+}
+
+int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes, uint64_t request_bytes, uint64_t *device_alias,
+                         int *can_map_host_memory) {
+    uint64_t offset;
+
+    if (!g_transport.regs || !host_ptr || !mapped_bytes || !request_bytes || request_bytes > mapped_bytes ||
+        !device_alias || !can_map_host_memory)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!bar4_pointer_range(host_ptr, mapped_bytes, &offset))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, offset);
+    reg_write64(CXL_GPU_REG_PARAM1, mapped_bytes);
+    reg_write64(CXL_GPU_REG_PARAM2, request_bytes);
+    CUresult result = execute_cmd(CXL_GPU_CMD_COHERENT_MAP_DEVICE);
+    if (result == CUDA_SUCCESS) {
+        *device_alias = reg_read64(CXL_GPU_REG_RESULT0);
+        *can_map_host_memory = (int)reg_read64(CXL_GPU_REG_RESULT2);
+    }
+    cmd_unlock();
+    return result;
+}
+
+int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias, uint64_t *htod_command_delta) {
+    uint64_t offset;
+
+    if (!g_transport.regs || !host_ptr || !device_alias || !htod_command_delta)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!bar4_pointer_range(host_ptr, 1, &offset))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, offset);
+    reg_write64(CXL_GPU_REG_PARAM1, device_alias);
+    CUresult result = execute_cmd(CXL_GPU_CMD_COHERENT_UNMAP_DEVICE);
+    *htod_command_delta = reg_read64(CXL_GPU_REG_RESULT0);
+    cmd_unlock();
+    return result;
+}
+
+int cxlCoherentStaleAliasProbe(void *host_ptr, uint64_t bytes, int *positive_status, int *stale_launch_status,
+                               int *stale_sync_status) {
+    uint64_t offset;
+
+    if (!g_transport.regs || !host_ptr || !bytes || !positive_status || !stale_launch_status || !stale_sync_status)
+        return CUDA_ERROR_INVALID_VALUE;
+    if (!bar4_pointer_range(host_ptr, bytes, &offset))
+        return CUDA_ERROR_INVALID_VALUE;
+    cmd_lock();
+    reg_write64(CXL_GPU_REG_PARAM0, offset);
+    reg_write64(CXL_GPU_REG_PARAM1, bytes);
+    CUresult result = execute_cmd(CXL_GPU_CMD_COHERENT_STALE_ALIAS_PROBE);
+    *positive_status = (int)(uint32_t)reg_read64(CXL_GPU_REG_RESULT0);
+    *stale_launch_status = (int)(uint32_t)reg_read64(CXL_GPU_REG_RESULT1);
+    *stale_sync_status = (int)(uint32_t)reg_read64(CXL_GPU_REG_RESULT2);
+    cmd_unlock();
+    return result;
 }
 
 static inline uint64_t bar4_offset_of(void *host_ptr) {
