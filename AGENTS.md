@@ -77,6 +77,29 @@ CNB任务接管时至少核对repo、branch、exact SHA、event、runner CPU/内
 Type-2 smoke 的观察点：启动参数含 `-device cxl-type2`，QEMU 日志出现 Type-2 realized，guest 能看到 `/dev/cxl/cache0`、`/dev/cxl/mem0`、`/dev/cxl_gpu0`。
 本机`/home/jensen/Projects/cxl-memsim/CXLAgent/`可以在guest rootfs准备好后作为观测工具：先用topology/snapshot类命令确认cache/mem/sysfs/iomem，再考虑memory snapshot和tracepoint；当前诊断initramfs不适合直接跑完整`cxlagent`。
 
+## 流语义与测试契约
+
+Kimi 正确性战役中，`cnb-5r8-1jvj5f4kp` 暴露了非阻塞计算流的生产者与
+legacy 默认流拷贝并发时会读取脏源。已入 `main` 的 `a1ac80a` 把这个边界
+收拢为三条直接路径：`MEM_COPY_2D_DTOD` 在 `PARAM6` 传递 `stream_wire`，
+`cuMemcpy2DAsync_v2` 转发调用流而同步 `cuMemcpy2D_v2` 使用 legacy sentinel；
+`cuMemsetD8Async` 先 drain 调用流，再走既有立即执行的分片 HtoD 填充；
+`cuMemcpyAsync` 按指针类型进入保留流身份的异步入口。
+
+`qemu_integration/guest_libcuda/cxl_gpu_cmd.h` 中
+`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION=2` 是 shim 与 QEMU 的共享 ABI。该版本
+必须和 `qemu-cxl-type2` 的 `main` 配对：QEMU 的 `MEM_COPY_2D_DTOD` handler
+读取 `PARAM6` 并调用 `hetgpu_memcpy2d_dtod_async`。不能把修复后的任一端与
+旧端单独组合后宣称流语义成立。
+
+`tests/stream-contract/` 是这一边界的回归套件。它让延迟 producer 与异步 copy
+在同一 stream 上执行，并用 legacy-stream 对照组区分流顺序丢失与一般拷贝故障。
+本地 KVM/RTX 3050 已建立该套件；它证明特定 copy API 是否保留同流顺序，不证明
+完整模型正确性或性能。修改 shim copy path、BAR2 wire protocol 或 QEMU copy
+handler 后，先在 native 路径运行 `tests/stream-contract/build.sh` 与
+`tests/stream-contract/run.sh --surface native`，再以 Type-2 guest 的
+`--surface type2-fixed` 验收配对实现。
+
 ## 可复用调试证据
 
 `qemu_integration/guest_libcuda/`中的 CUDA 诊断工具服务于下一次同类失败的低成本取证。原始 core、CNB

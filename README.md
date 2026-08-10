@@ -341,6 +341,47 @@ The command protocol includes:
 
 The guest shim implements the CUDA Driver API subset needed by the tests and benchmarks, including `cuInit`, `cuDeviceGetCount`, `cuCtxCreate`, `cuMemAlloc`, `cuMemcpyHtoD`, `cuMemcpyDtoH`, `cuModuleLoadData`, `cuModuleGetFunction`, and `cuLaunchKernel`.
 
+### Stream Semantics and Contract Tests
+
+The guest shim must preserve the CUDA stream selected by the caller all the
+way to the host backend. A missing stream identity lets a legacy-stream copy
+race a producer running on a non-blocking stream; the full Kimi failure that
+exposed this condition is recorded as `cnb-5r8-1jvj5f4kp`. The stream-aware
+copy fixes were merged in `a1ac80a`:
+
+- `MEM_COPY_2D_DTOD` sends `stream_wire` in `PARAM6`; `cuMemcpy2DAsync_v2`
+  forwards its stream, while synchronous `cuMemcpy2D_v2` uses the legacy-stream
+  sentinel.
+- `cuMemsetD8Async` synchronizes its caller stream before using the existing
+  immediate, chunked HtoD fill path, because the device model has no `MEM_SET`
+  command handler.
+- `cuMemcpyAsync` classifies its pointer endpoints and dispatches to the
+  stream-aware asynchronous copy path rather than dropping `hStream` through
+  the generic entry point.
+
+`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION` is `2` in
+`qemu_integration/guest_libcuda/cxl_gpu_cmd.h`. It is a shared shim/QEMU
+contract. This shim must be paired with the QEMU Type-2 implementation on its
+`main` branch: the `MEM_COPY_2D_DTOD` handler reads `PARAM6` and calls
+`hetgpu_memcpy2d_dtod_async`. Pairing either side with an older counterpart
+loses the stream semantics that this protocol version carries.
+
+`tests/stream-contract/` is the regression suite for this boundary. Each
+case places a delayed producer and an async copy on the same stream, then
+checks the copied result; legacy-stream cases distinguish the stream-ordering
+contract from general copy failure. Run it with:
+
+```bash
+cd tests/stream-contract
+./build.sh
+./run.sh --surface native
+```
+
+The same binaries can run in a Type-2 guest with `--surface type2-fixed` to
+validate the shim/QEMU pair. The suite was established on local KVM with an
+RTX 3050. It detects stream forwarding regressions; it does not establish
+full-model correctness or measure performance.
+
 ### Host GPU Backend
 
 `cxl_hetgpu.c` loads the host CUDA driver dynamically. By default it tries:
