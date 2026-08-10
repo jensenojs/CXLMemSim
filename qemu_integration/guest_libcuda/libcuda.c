@@ -351,6 +351,8 @@ CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod, const char *name)
 CUresult cuModuleUnload(CUmodule hmod);
 CUresult cuCtxGetCurrent(CUcontext *pctx);
 CUresult cuStreamSynchronize(CUstream hStream);
+static CUresult cxl_stream_synchronize(CUstream hStream,
+                                       CXLGPUStreamSyncReason reason);
 static CUresult cxl_module_load_image(CUmodule *module, const void *image);
 static CUresult direct_source_errno_result(int error);
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
@@ -4672,7 +4674,8 @@ CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t byteC
      * stream execution is measured. */
     async_copy_trace_begin("cuMemcpyDtoHAsync", byteCount, 1, hStream,
                            "blocking");
-    CUresult result = cuStreamSynchronize(hStream);
+    CUresult result = cxl_stream_synchronize(
+        hStream, CXL_GPU_STREAM_SYNC_DTOH_ASYNC_DRAIN);
     if (result != CUDA_SUCCESS)
         return async_copy_trace_end(result);
     return async_copy_trace_end(cuMemcpyDtoH_v2(dstHost, srcDevice, byteCount));
@@ -6214,19 +6217,28 @@ CUresult cuStreamDestroy_v2(CUstream hStream) {
     return result;
 }
 
-CUresult cuStreamSynchronize(CUstream hStream) {
+static CUresult cxl_stream_synchronize(CUstream hStream,
+                                       CXLGPUStreamSyncReason reason) {
     uint64_t wire;
     if (!g_initialized)
         return CUDA_ERROR_NOT_INITIALIZED;
+    if (reason < 0 || reason >= CXL_GPU_STREAM_SYNC_REASON_COUNT)
+        return CUDA_ERROR_INVALID_VALUE;
     if (!cxl_gpu_stream_wire(hStream, &wire))
         return CUDA_ERROR_INVALID_HANDLE;
     cmd_lock();
     reg_write64(CXL_GPU_REG_PARAM0, wire);
-    CUresult result = execute_cmd(CXL_GPU_CMD_STREAM_SYNC);
+    reg_write64(CXL_GPU_REG_PARAM1, reason);
+    CUresult result = execute_cmd_traced(CXL_GPU_CMD_STREAM_SYNC,
+                                         "cuStreamSynchronize");
     if (result == CUDA_SUCCESS && g_direct_source_enabled)
         result = direct_sources_complete_locked(wire, false);
     cmd_unlock();
     return result;
+}
+
+CUresult cuStreamSynchronize(CUstream hStream) {
+    return cxl_stream_synchronize(hStream, CXL_GPU_STREAM_SYNC_PUBLIC_API);
 }
 
 CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
@@ -6873,7 +6885,8 @@ CUresult cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc, size_t N, CUst
      * emulated with chunked HtoD copies that execute immediately, so the
      * async entry must first drain the caller's stream to preserve
      * ordering against in-flight kernels. */
-    CUresult result = cuStreamSynchronize(hStream);
+    CUresult result = cxl_stream_synchronize(
+        hStream, CXL_GPU_STREAM_SYNC_MEMSET_D8_ASYNC_DRAIN);
     if (result != CUDA_SUCCESS)
         return result;
     return cuMemsetD8_v2(dstDevice, uc, N);

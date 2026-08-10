@@ -160,6 +160,11 @@ CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex,
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dst, CUdeviceptr src, size_t bytes,
                               CUstream stream);
+CUresult cuMemcpyDtoHAsync_v2(void *dst, CUdeviceptr src, size_t bytes,
+                              CUstream stream);
+CUresult cuMemsetD8Async(CUdeviceptr dst, unsigned char value, size_t count,
+                         CUstream stream);
+CUresult cuStreamSynchronize(CUstream stream);
 CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
                             size_t *sizes, size_t count,
                             CUmemcpyAttributes *attrs, size_t *attrsIdxs,
@@ -198,6 +203,7 @@ CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
     } while (0)
 
 static uint32_t commands[32];
+static uint64_t command_param1[32];
 static unsigned int command_count;
 static uint64_t issued_token = 41;
 static int identity_pci_bus = 131;
@@ -263,7 +269,10 @@ typedef struct DestroyedContextThread {
 } DestroyedContextThread;
 
 static CUresult fake_execute(uint32_t command) {
-    commands[command_count++] = command;
+    commands[command_count] = command;
+    command_param1[command_count] =
+        cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1);
+    command_count++;
     switch (command) {
     case CXL_GPU_CMD_SOURCE_UNREGISTER:
         return source_unregister_result;
@@ -399,6 +408,10 @@ static CUresult fake_execute(uint32_t command) {
         return CUDA_SUCCESS;
     case CXL_GPU_CMD_MEM_COPY_DTOD_ASYNC:
         return dtod_async_result;
+    case CXL_GPU_CMD_STREAM_SYNC:
+    case CXL_GPU_CMD_MEM_COPY_DTOH:
+    case CXL_GPU_CMD_MEM_COPY_HTOD:
+        return CUDA_SUCCESS;
     case CXL_GPU_CMD_MODULE_LOAD_CUBIN: {
         unsigned char observed[8] = {0};
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == cubin_expected_size);
@@ -874,6 +887,36 @@ static int test_dtod_async_preserves_stream_without_synchronizing(void) {
     return 0;
 }
 
+static int test_stream_sync_reason_identifies_calling_semantics(void) {
+    const uint64_t stream_wire = 7;
+    CUstream stream = (CUstream)(uintptr_t)(UINT64_C(1) << 32 | stream_wire);
+    unsigned char dtoh[4] = {0};
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_initialized(1);
+
+    command_count = 0;
+    CHECK(cuStreamSynchronize(stream) == CUDA_SUCCESS);
+    CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_STREAM_SYNC);
+    CHECK(command_param1[0] == CXL_GPU_STREAM_SYNC_PUBLIC_API);
+
+    command_count = 0;
+    CHECK(cuMemcpyDtoHAsync_v2(dtoh, UINT64_C(0x100000), sizeof(dtoh),
+                              stream) == CUDA_SUCCESS);
+    CHECK(command_count == 2 && commands[0] == CXL_GPU_CMD_STREAM_SYNC &&
+          commands[1] == CXL_GPU_CMD_MEM_COPY_DTOH);
+    CHECK(command_param1[0] == CXL_GPU_STREAM_SYNC_DTOH_ASYNC_DRAIN);
+
+    command_count = 0;
+    CHECK(cuMemsetD8Async(UINT64_C(0x200000), 0xa5, 4, stream) ==
+          CUDA_SUCCESS);
+    CHECK(command_count == 2 && commands[0] == CXL_GPU_CMD_STREAM_SYNC &&
+          commands[1] == CXL_GPU_CMD_MEM_COPY_HTOD);
+    CHECK(command_param1[0] == CXL_GPU_STREAM_SYNC_MEMSET_D8_ASYNC_DRAIN);
+    return 0;
+}
+
 static int test_library_fatbin_prefers_highest_compatible_cubin(void) {
     unsigned char fatbin[sizeof(CudartFatbinHeader) + 3 * (sizeof(CudartFatbinFileHeader) + 8)] = {0};
     CudartFatbinHeader header = {
@@ -1297,6 +1340,7 @@ int main(void) {
            test_cublas_context_stream_export_table() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
            test_memcpy2d_device_route() || test_dtod_async_preserves_stream_without_synchronizing() ||
+           test_stream_sync_reason_identifies_calling_semantics() ||
            test_library_fatbin_prefers_highest_compatible_cubin() ||
            test_library_legacy_only_fatbin_registers_without_module_load() ||
            test_library_registration_exceeds_the_previous_fixed_capacity() ||

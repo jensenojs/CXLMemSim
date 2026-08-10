@@ -359,12 +359,13 @@ copy fixes were merged in `a1ac80a`:
   stream-aware asynchronous copy path rather than dropping `hStream` through
   the generic entry point.
 
-`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION` is `2` in
+`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION` is `3` in
 `qemu_integration/guest_libcuda/cxl_gpu_cmd.h`. It is a shared shim/QEMU
-contract. This shim must be paired with the QEMU Type-2 implementation on its
-`main` branch: the `MEM_COPY_2D_DTOD` handler reads `PARAM6` and calls
-`hetgpu_memcpy2d_dtod_async`. Pairing either side with an older counterpart
-loses the stream semantics that this protocol version carries.
+contract. Version 2 carries the `MEM_COPY_2D_DTOD` stream in `PARAM6`; version 3
+also identifies public, blocking-DtoH-drain, and memset-emulation-drain
+`STREAM_SYNC` commands in `PARAM1`. QEMU interprets version 2 syncs as public
+API calls and rejects unknown version 3 reasons. The shim must still be paired
+with the QEMU Type-2 implementation on its `main` branch.
 
 `tests/stream-contract/` is the regression suite for this boundary. Each
 case places a delayed producer and an async copy on the same stream, then

@@ -87,10 +87,11 @@ legacy 默认流拷贝并发时会读取脏源。已入 `main` 的 `a1ac80a` 把
 `cuMemcpyAsync` 按指针类型进入保留流身份的异步入口。
 
 `qemu_integration/guest_libcuda/cxl_gpu_cmd.h` 中
-`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION=2` 是 shim 与 QEMU 的共享 ABI。该版本
-必须和 `qemu-cxl-type2` 的 `main` 配对：QEMU 的 `MEM_COPY_2D_DTOD` handler
-读取 `PARAM6` 并调用 `hetgpu_memcpy2d_dtod_async`。不能把修复后的任一端与
-旧端单独组合后宣称流语义成立。
+`CXL_GPU_DESCRIPTOR_PROTOCOL_VERSION=3` 是 shim 与 QEMU 的共享 ABI。版本2让
+`MEM_COPY_2D_DTOD`在`PARAM6`携带stream；版本3让`STREAM_SYNC`在`PARAM1`
+携带public API、blocking DtoH drain或memset emulation drain来源。QEMU对版本2
+按public API解释以保留旧shim兼容，版本3的未知来源值直接失败。不能把新shim
+与旧QEMU组合后宣称来源归因或流语义成立。
 
 `tests/stream-contract/` 是这一边界的回归套件。它让延迟 producer 与异步 copy
 在同一 stream 上执行，并用 legacy-stream 对照组区分流顺序丢失与一般拷贝故障。
