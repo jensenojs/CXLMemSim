@@ -4733,15 +4733,35 @@ CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t byteCount) {
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream);
+
 CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount,
                        CUstream hStream) {
     DLOG("cuMemcpyAsync(dst=0x%lx, src=0x%lx, size=%zu, stream=%p)\n",
          (unsigned long)dst, (unsigned long)src, byteCount, hStream);
-    (void)hStream;
-    /* knockout: the current Type-2 command path serializes copies and kernel
-     * launches. Completing the UVA-directed copy before return preserves
-     * correctness; add stream ordering only when concurrent execution exists. */
-    return cuMemcpy(dst, src, byteCount);
+    if (!g_initialized)
+        return CUDA_ERROR_NOT_INITIALIZED;
+    if (!dst || !src)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    bool dst_is_device = false;
+    bool src_is_device = false;
+    CUresult result = cxl_cuda_pointer_is_device(dst, &dst_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+    result = cxl_cuda_pointer_is_device(src, &src_is_device);
+    if (result != CUDA_SUCCESS)
+        return result;
+
+    if (dst_is_device && src_is_device)
+        return cuMemcpyDtoDAsync_v2(dst, src, byteCount, hStream);
+    if (dst_is_device)
+        return cuMemcpyHtoDAsync_v2(dst, (const void *)(uintptr_t)src, byteCount, hStream);
+    if (src_is_device)
+        return cuMemcpyDtoHAsync_v2((void *)(uintptr_t)dst, src, byteCount, hStream);
+
+    memmove((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, byteCount);
+    return CUDA_SUCCESS;
 }
 
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
@@ -6745,7 +6765,8 @@ static bool cxl_memcpy2d_offset(CUdeviceptr base, size_t pitch, size_t x, size_t
     return true;
 }
 
-static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
+static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy,
+                                              uint64_t stream_wire) {
     if (!copy) {
         return CUDA_ERROR_INVALID_VALUE;
     }
@@ -6783,6 +6804,7 @@ static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
     reg_write64(CXL_GPU_REG_PARAM3, copy->srcPitch);
     reg_write64(CXL_GPU_REG_PARAM4, copy->WidthInBytes);
     reg_write64(CXL_GPU_REG_PARAM5, copy->Height);
+    reg_write64(CXL_GPU_REG_PARAM6, stream_wire);
     CUresult result = execute_cmd(CXL_GPU_CMD_MEM_COPY_2D_DTOD);
     cmd_unlock();
     return result;
@@ -6790,22 +6812,25 @@ static CUresult cxl_memcpy2d_device_to_device(const CUDA_MEMCPY2D *copy) {
 
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *copy) {
     DLOG("cuMemcpy2D_v2(copy=%p)\n", (const void *)copy);
-    return cxl_memcpy2d_device_to_device(copy);
+    /* The synchronous API maps to the legacy default stream: the device
+     * model executes it with synchronous cuMemcpy2D semantics, which keep
+     * the legacy stream's implicit ordering against blocking streams. */
+    return cxl_memcpy2d_device_to_device(copy, CXL_GPU_STREAM_WIRE_LEGACY);
 }
 
 CUresult cuMemcpy2D(const CUDA_MEMCPY2D *copy) { return cuMemcpy2D_v2(copy); }
 
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream hStream) {
     DLOG("cuMemcpy2DAsync_v2(copy=%p, stream=%p)\n", (const void *)copy, hStream);
-    /* knockout: Type-2 currently serializes transfer commands. Preserve the
-     * existing async copy contract by completing this multidimensional copy
-     * before return; add a stream-aware BAR2 protocol only after it is measured. */
+    uint64_t stream_wire;
     size_t total_bytes = 0;
     if (copy && (copy->Height == 0 || copy->WidthInBytes <= SIZE_MAX / copy->Height))
         total_bytes = copy->WidthInBytes * copy->Height;
     async_copy_trace_begin("cuMemcpy2DAsync", total_bytes, 1, hStream,
-                           "blocking");
-    return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy));
+                           "streamed");
+    if (!cxl_gpu_stream_wire(hStream, &stream_wire))
+        return async_copy_trace_end(CUDA_ERROR_INVALID_HANDLE);
+    return async_copy_trace_end(cxl_memcpy2d_device_to_device(copy, stream_wire));
 }
 
 CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *copy, CUstream hStream) { return cuMemcpy2DAsync_v2(copy, hStream); }
@@ -6844,7 +6869,13 @@ CUresult cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
 CUresult cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) { return cuMemsetD8_v2(dstDevice, uc, N); }
 
 CUresult cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc, size_t N, CUstream hStream) {
-    (void)hStream;
+    /* The wire MEM_SET command has no device-model case; the fill is
+     * emulated with chunked HtoD copies that execute immediately, so the
+     * async entry must first drain the caller's stream to preserve
+     * ordering against in-flight kernels. */
+    CUresult result = cuStreamSynchronize(hStream);
+    if (result != CUDA_SUCCESS)
+        return result;
     return cuMemsetD8_v2(dstDevice, uc, N);
 }
 
