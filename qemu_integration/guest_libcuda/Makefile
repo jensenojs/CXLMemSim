@@ -65,7 +65,8 @@ test-cublas-create-probe: $(TINY_CUDA_PROBE) $(CUBLAS_CREATE_PROBE) $(CUBLAS_CRE
 	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_output_copy_result=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_sgemm_numerical_oracle=pass elements=4 max_abs_error=0' >/dev/null; \
 	printf '%s\n' "$$output" | grep -Fx 'cublas_destroy_result=0' >/dev/null; \
-	printf '%s\n' "$$output" | grep -Fx '=== CUBLAS_CREATE_PROBE_PASS ===' >/dev/null
+	printf '%s\n' "$$output" | grep -Fx '=== CUBLAS_CREATE_PROBE_PASS ===' >/dev/null; \
+	printf '%s\n' "$$output" | grep -Fx '=== CUDA_RUNTIME_DLOPEN_KERNEL_PROBE_PASS ===' >/dev/null
 
 private-export-table-probe: tiny-probe $(PRIVATE_EXPORT_PROBE) $(PRIVATE_EXPORT_RUNNER)
 	python3 -m py_compile $(PRIVATE_EXPORT_PROBE)

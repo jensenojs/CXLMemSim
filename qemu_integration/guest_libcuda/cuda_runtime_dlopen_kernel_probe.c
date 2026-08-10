@@ -37,5 +37,8 @@ int main(int argc, char **argv) {
     printf("dlopen_ok=%p probe=%p\n", handle, (void *)run);
     int result = run();
     dlclose(handle);
+    if (result == 0) {
+        printf("=== CUDA_RUNTIME_DLOPEN_KERNEL_PROBE_PASS ===\n");
+    }
     return result;
 }
