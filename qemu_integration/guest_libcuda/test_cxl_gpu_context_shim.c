@@ -161,11 +161,16 @@ CUresult cuFuncGetParamInfo(CUfunction hfunc, size_t paramIndex,
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *copy, CUstream stream);
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dst, CUdeviceptr src, size_t bytes,
                               CUstream stream);
+CUresult cuMemcpyAsync_ptsz(CUdeviceptr dst, CUdeviceptr src, size_t bytes,
+                            CUstream stream);
+CUresult cuMemcpyDtoDAsync_v2_ptsz(CUdeviceptr dst, CUdeviceptr src,
+                                   size_t bytes, CUstream stream);
 CUresult cuMemcpyDtoHAsync_v2(void *dst, CUdeviceptr src, size_t bytes,
                               CUstream stream);
 CUresult cuMemsetD8Async(CUdeviceptr dst, unsigned char value, size_t count,
                          CUstream stream);
 CUresult cuStreamSynchronize(CUstream stream);
+CUresult cuStreamSynchronize_ptsz(CUstream stream);
 CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
                             size_t *sizes, size_t count,
                             CUmemcpyAttributes *attrs, size_t *attrsIdxs,
@@ -819,6 +824,45 @@ static int test_occupancy_driver_api_route(void) {
     return 0;
 }
 
+static int test_proc_address_respects_per_thread_default_stream(void) {
+    CUdriverProcAddressQueryResult symbol_status = -1;
+    void *resolved = NULL;
+
+    CHECK(cuGetProcAddress("cuMemcpyAsync", &resolved, 12090, 2,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuMemcpyAsync_ptsz);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+
+    resolved = NULL;
+    symbol_status = -1;
+    CHECK(cuGetProcAddress("cuMemcpyDtoDAsync_v2", &resolved, 12090, 2,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuMemcpyDtoDAsync_v2_ptsz);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+
+    resolved = NULL;
+    symbol_status = -1;
+    CHECK(cuGetProcAddress("cuStreamSynchronize", &resolved, 12090, 2,
+                           &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == (void *)cuStreamSynchronize_ptsz);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SUCCESS);
+
+    resolved = (void *)(uintptr_t)1;
+    symbol_status = -1;
+    CHECK(cuGetProcAddress("cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+                           &resolved, 12090, 2, &symbol_status) == CUDA_SUCCESS);
+    CHECK(resolved == NULL);
+    CHECK(symbol_status == CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND);
+
+    resolved = (void *)(uintptr_t)1;
+    symbol_status = -1;
+    CHECK(cuGetProcAddress("cuMemcpyAsync", &resolved, 12090, 3,
+                           &symbol_status) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(resolved == (void *)(uintptr_t)1);
+    CHECK(symbol_status == -1);
+    return 0;
+}
+
 static int test_memcpy2d_device_route(void) {
     CUdriverProcAddressQueryResult symbol_status = -1;
     CUDA_MEMCPY2D copy = {
@@ -1401,6 +1445,7 @@ int main(void) {
            test_integrity_export_table_shape() || test_context_local_storage_keeps_managers_separate() ||
            test_context_check_preserves_result2() || test_cublas_context_stream_export_table() ||
            test_integrity_uses_runtime_device_identity() || test_occupancy_driver_api_route() ||
+           test_proc_address_respects_per_thread_default_stream() ||
            test_memcpy2d_device_route() || test_dtod_async_preserves_stream_without_synchronizing() ||
            test_stream_sync_reason_identifies_calling_semantics() ||
            test_library_fatbin_prefers_highest_compatible_cubin() ||

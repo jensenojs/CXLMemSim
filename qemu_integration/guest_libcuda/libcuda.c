@@ -2275,7 +2275,7 @@ static int find_and_map_device(void) {
 /* CUDA 12 runtime resolves most driver entry points through cuGetProcAddress.
  * Use the dynamic symbol table of this shim so missing APIs stay visible in
  * CXL_CUDA_DEBUG logs. */
-static void *lookup_proc_address(const char *symbol) {
+static void *lookup_proc_address(const char *symbol, cuuint64_t flags) {
     if (!symbol) {
         return NULL;
     }
@@ -2288,7 +2288,16 @@ static void *lookup_proc_address(const char *symbol) {
                 symbol);
         return NULL;
     }
-    void *fn = dlsym(RTLD_DEFAULT, symbol);
+    void *fn = NULL;
+    if (flags == 2) {
+        char ptsz_symbol[256];
+        int length = snprintf(ptsz_symbol, sizeof(ptsz_symbol), "%s_ptsz", symbol);
+        if (length <= 0 || (size_t)length >= sizeof(ptsz_symbol))
+            return NULL;
+        fn = dlsym(RTLD_DEFAULT, ptsz_symbol);
+    } else {
+        fn = dlsym(RTLD_DEFAULT, symbol);
+    }
     OLOG("lookup_proc_address(symbol=%s) -> %p\n", symbol, fn);
     return fn;
 }
@@ -2314,13 +2323,14 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuin
          symbol ? symbol : "(null)", cudaVersion, (unsigned long)flags, (void *)pfn, (void *)symbolStatus);
     log_proc_address_caller("query", symbol, caller);
     (void)cudaVersion;
-    (void)flags;
+    if (flags > 2)
+        return CUDA_ERROR_INVALID_VALUE;
 
     if (!pfn) {
         return CUDA_ERROR_INVALID_VALUE;
     }
 
-    void *fn = lookup_proc_address(symbol);
+    void *fn = lookup_proc_address(symbol, flags);
     if (!fn) {
         *pfn = NULL;
         if (symbolStatus) {
@@ -4767,6 +4777,11 @@ CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t byteCount,
     return CUDA_SUCCESS;
 }
 
+CUresult cuMemcpyAsync_ptsz(CUdeviceptr dst, CUdeviceptr src, size_t byteCount,
+                            CUstream hStream) {
+    return cuMemcpyAsync(dst, src, byteCount, hStream);
+}
+
 CUresult cuModuleLoadData(CUmodule *module, const void *image) {
     DLOG("cuModuleLoadData\n");
     if (!g_initialized)
@@ -6241,6 +6256,10 @@ CUresult cuStreamSynchronize(CUstream hStream) {
     return cxl_stream_synchronize(hStream, CXL_GPU_STREAM_SYNC_PUBLIC_API);
 }
 
+CUresult cuStreamSynchronize_ptsz(CUstream hStream) {
+    return cuStreamSynchronize(hStream);
+}
+
 CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
                            unsigned int Flags) {
     uint64_t stream_wire, event_id;
@@ -6757,6 +6776,11 @@ CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size
 }
 
 CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t byteCount, CUstream hStream) {
+    return cuMemcpyDtoDAsync_v2(dstDevice, srcDevice, byteCount, hStream);
+}
+
+CUresult cuMemcpyDtoDAsync_v2_ptsz(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                                   size_t byteCount, CUstream hStream) {
     return cuMemcpyDtoDAsync_v2(dstDevice, srcDevice, byteCount, hStream);
 }
 
