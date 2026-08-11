@@ -188,11 +188,30 @@ int main(int argc, char **argv) {
            "device_alias=0x%" PRIx64 "\n",
            can_map, MAP_BYTES, l2_bytes, device_alias);
 
-    if (cuModuleLoadData(&module, copy_ptx) != CUDA_SUCCESS ||
-        cuModuleGetFunction(&function, module, "cxl_copy_words") != CUDA_SUCCESS ||
-        cuMemAlloc_v2(&device_buffer, MAP_BYTES) != CUDA_SUCCESS || !device_buffer ||
-        cuEventCreate(&start, 0) != CUDA_SUCCESS || cuEventCreate(&end, 0) != CUDA_SUCCESS) {
-        puts("cxl_mem_active_gate=fail stage=direct-read-setup");
+    CUresult result = cuModuleLoadData(&module, copy_ptx);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuModuleLoadData status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuModuleGetFunction(&function, module, "cxl_copy_words");
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuModuleGetFunction status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuMemAlloc_v2(&device_buffer, MAP_BYTES);
+    if (result != CUDA_SUCCESS || !device_buffer) {
+        printf("cxl_mem_active_gate=fail stage=cuMemAlloc status=%d device_buffer=0x%" PRIx64 "\n", result,
+               device_buffer);
+        goto cleanup;
+    }
+    result = cuEventCreate(&start, 0);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuEventCreate-start status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuEventCreate(&end, 0);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuEventCreate-end status=%d\n", result);
         goto cleanup;
     }
 
@@ -200,11 +219,33 @@ int main(int argc, char **argv) {
     void *kernel_params[] = {&device_alias, &device_buffer, &words};
     for (size_t run = 0; run < 4; run++) {
         float elapsed_ms = 0.0f;
-        if (cuEventRecord(start, NULL) != CUDA_SUCCESS ||
-            cuLaunchKernel(function, 4096, 1, 1, 256, 1, 1, 0, NULL, kernel_params, NULL) != CUDA_SUCCESS ||
-            cuEventRecord(end, NULL) != CUDA_SUCCESS || cuEventSynchronize(end) != CUDA_SUCCESS ||
-            cuEventElapsedTime(&elapsed_ms, start, end) != CUDA_SUCCESS || elapsed_ms <= 0.0f) {
-            puts("cxl_mem_active_gate=fail stage=direct-read-kernel");
+        result = cuEventRecord(start, NULL);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventRecord-start run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuLaunchKernel(function, 4096, 1, 1, 256, 1, 1, 0, NULL, kernel_params, NULL);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuLaunchKernel run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventRecord(end, NULL);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventRecord-end run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventSynchronize(end);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventSynchronize run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventElapsedTime(&elapsed_ms, start, end);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventElapsedTime run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        if (elapsed_ms <= 0.0f) {
+            printf("cxl_mem_active_gate=fail stage=elapsed-nonpositive run=%zu elapsed_ms=%.6f\n", run, elapsed_ms);
             goto cleanup;
         }
         if (run > 0)
