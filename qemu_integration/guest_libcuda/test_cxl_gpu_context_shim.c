@@ -198,11 +198,8 @@ int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes,
                          uint64_t request_bytes, uint64_t *device_alias,
                          int *can_map_host_memory);
 int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
-                           uint64_t *htod_command_delta);
-int cxlCoherentStaleAliasProbe(void *host_ptr, uint64_t bytes,
-                               int *positive_status,
-                               int *stale_launch_status,
-                               int *stale_sync_status);
+                           uint64_t *htod_command_delta,
+                           int *stale_query_driver_status);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -241,7 +238,6 @@ static uint64_t released_lease;
 static unsigned int lease_release_count;
 static CUresult coherent_map_result = CUDA_SUCCESS;
 static CUresult coherent_unmap_result = CUDA_SUCCESS;
-static CUresult coherent_stale_result = CUDA_SUCCESS;
 
 static const uint8_t batch_source0[] = {0x10, 0x11, 0x12};
 static const uint8_t batch_source1[] = {0x20, 0x21, 0x22, 0x23, 0x24};
@@ -368,14 +364,8 @@ static CUresult fake_execute(uint32_t command) {
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 128);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == UINT64_C(0x12340000));
         cxl_cuda_test_write_result(0, 0);
+        cxl_cuda_test_write_result(1, CUDA_ERROR_INVALID_VALUE);
         return coherent_unmap_result;
-    case CXL_GPU_CMD_COHERENT_STALE_ALIAS_PROBE:
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 128);
-        CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 256);
-        cxl_cuda_test_write_result(0, CUDA_SUCCESS);
-        cxl_cuda_test_write_result(1, (uint64_t)(uint32_t)CUDA_ERROR_INVALID_VALUE);
-        cxl_cuda_test_write_result(2, CUDA_SUCCESS);
-        return coherent_stale_result;
     case CXL_GPU_CMD_FUNC_GET_OCCUPANCY:
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM0) == 4);
         CHECK(cxl_cuda_test_read_reg64(CXL_GPU_REG_PARAM1) == 128);
@@ -1317,9 +1307,7 @@ static int test_coherent_device_map_command_contract(void) {
     uint64_t device_alias = 0;
     uint64_t htod_delta = UINT64_MAX;
     int can_map = 0;
-    int positive_status = -1;
-    int stale_launch_status = -1;
-    int stale_sync_status = -1;
+    int stale_query_status = -1;
 
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
@@ -1327,39 +1315,28 @@ static int test_coherent_device_map_command_contract(void) {
     command_count = 0;
     coherent_map_result = CUDA_SUCCESS;
     coherent_unmap_result = CUDA_SUCCESS;
-    coherent_stale_result = CUDA_SUCCESS;
 
     CHECK(cxlCoherentMapDevice(host_ptr, 4096, 256, &device_alias, &can_map) == CUDA_SUCCESS);
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_COHERENT_MAP_DEVICE);
     CHECK(device_alias == UINT64_C(0x12340000) && can_map == 1);
 
-    CHECK(cxlCoherentUnmapDevice(host_ptr, device_alias, &htod_delta) == CUDA_SUCCESS);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, device_alias, &htod_delta, &stale_query_status) == CUDA_SUCCESS);
     CHECK(command_count == 2 && commands[1] == CXL_GPU_CMD_COHERENT_UNMAP_DEVICE);
     CHECK(htod_delta == 0);
-
-    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 256, &positive_status, &stale_launch_status, &stale_sync_status) ==
-          CUDA_SUCCESS);
-    CHECK(command_count == 3 && commands[2] == CXL_GPU_CMD_COHERENT_STALE_ALIAS_PROBE);
-    CHECK(positive_status == CUDA_SUCCESS);
-    CHECK(stale_launch_status == CUDA_ERROR_INVALID_VALUE);
-    CHECK(stale_sync_status == CUDA_SUCCESS);
+    CHECK(stale_query_status == CUDA_ERROR_INVALID_VALUE);
 
     CHECK(cxlCoherentMapDevice(NULL, 4096, 256, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
     CHECK(cxlCoherentMapDevice(host_ptr, 256, 4096, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
     CHECK(cxlCoherentMapDevice(bar4 + sizeof(bar4) - 128, 4096, 256, &device_alias, &can_map) ==
           CUDA_ERROR_INVALID_VALUE);
-    CHECK(cxlCoherentUnmapDevice(host_ptr, 0, &htod_delta) == CUDA_ERROR_INVALID_VALUE);
-    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 0, &positive_status, &stale_launch_status, &stale_sync_status) ==
-          CUDA_ERROR_INVALID_VALUE);
-    CHECK(command_count == 3);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, 0, &htod_delta, &stale_query_status) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(command_count == 2);
 
     coherent_map_result = 911;
     CHECK(cxlCoherentMapDevice(host_ptr, 4096, 256, &device_alias, &can_map) == 911);
     coherent_unmap_result = 912;
-    CHECK(cxlCoherentUnmapDevice(host_ptr, UINT64_C(0x12340000), &htod_delta) == 912);
-    coherent_stale_result = 913;
-    CHECK(cxlCoherentStaleAliasProbe(host_ptr, 256, &positive_status, &stale_launch_status, &stale_sync_status) == 913);
-    CHECK(command_count == 6);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, UINT64_C(0x12340000), &htod_delta, &stale_query_status) == 912);
+    CHECK(command_count == 4);
 
     cxl_cuda_test_set_bar4(NULL, 0);
     return 0;

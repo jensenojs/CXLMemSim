@@ -2,9 +2,8 @@
  * Bounded CXL.mem active-path gate.
  *
  * The producer writes a finite object through the BAR4 coherent mapping. The
- * same object is then consumed by the existing CUDA HtoD entry point and
- * checked after DtoH. This keeps the gate on real guest, QEMU and Driver
- * paths without using a synthetic CXLMemSim request.
+ * same object is then consumed through its mapped device alias and checked
+ * after DtoH. This keeps the gate on real guest, QEMU and Driver paths.
  */
 
 #include <inttypes.h>
@@ -22,6 +21,7 @@ typedef void *CUevent;
 typedef uint64_t CUdeviceptr;
 
 #define CUDA_SUCCESS 0
+#define CUDA_ERROR_INVALID_VALUE 1
 #define GATE_BYTES 4096U
 #define MAP_BYTES (128U * 1024U * 1024U)
 #define GATE_MAGIC UINT32_C(0xC1A2A5E)
@@ -61,11 +61,8 @@ extern int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes,
                                 uint64_t *device_alias,
                                 int *can_map_host_memory);
 extern int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
-                                  uint64_t *htod_command_delta);
-extern int cxlCoherentStaleAliasProbe(void *host_ptr, uint64_t bytes,
-                                      int *positive_status,
-                                      int *stale_launch_status,
-                                      int *stale_sync_status);
+                                  uint64_t *htod_command_delta,
+                                  int *stale_query_driver_status);
 
 static const char copy_ptx[] =
     ".version 7.0\n"
@@ -93,7 +90,7 @@ static void usage(const char *argv0) {
 static void hint(void) {
     puts("agent_hint=problem=Measure whether one BAR4 host shadow can be read directly by a real GPU without HtoD staging");
     puts("agent_hint=inputs=Existing CXL Type-2 endpoint, coherent pool, CUDA Driver shim and CXLMemSim server");
-    puts("agent_hint=outputs=Capability, direct-read oracle, three bandwidth samples, zero-HtoD and stale-alias markers");
+    puts("agent_hint=outputs=Capability, direct-read oracle, three bandwidth samples, zero-HtoD and exact pointer-query markers");
     puts("agent_hint=proves=The mapped host shadow was consumed through a device alias under the bounded L40 contract");
     puts("agent_hint=does_not_prove=Kimi object placement, direct GPU-to-CXLMemSim requests, overlap or TPS");
     puts("agent_hint=next=Reject the placement candidate below the fixed bandwidth floor; otherwise design exact Kimi object identity");
@@ -132,9 +129,7 @@ int main(int argc, char **argv) {
     CUevent start = NULL;
     CUevent end = NULL;
     uint64_t htod_delta = UINT64_MAX;
-    int positive_status = -1;
-    int stale_launch_status = -1;
-    int stale_sync_status = -1;
+    int stale_query_status = -1;
     float samples_ms[3] = {0.0f, 0.0f, 0.0f};
     double best_gbps = 0.0;
     double median_gbps = 0.0;
@@ -276,24 +271,19 @@ int main(int argc, char **argv) {
     }
     printf("cxl_mem_active_gate=oracle status=pass bytes=%u\n", GATE_BYTES);
 
-    if (cxlCoherentUnmapDevice(cxl_buffer, device_alias, &htod_delta) != CUDA_SUCCESS || htod_delta != 0) {
-        printf("cxl_mem_active_gate=fail stage=unmap htod_command_delta=%" PRIu64 "\n", htod_delta);
+    if (cxlCoherentUnmapDevice(cxl_buffer, device_alias, &htod_delta, &stale_query_status) != CUDA_SUCCESS ||
+        htod_delta != 0 || stale_query_status != CUDA_ERROR_INVALID_VALUE) {
+        printf("cxl_mem_active_gate=fail stage=unmap htod_command_delta=%" PRIu64
+               " stale_query_driver_status=%d\n",
+               htod_delta, stale_query_status);
         goto cleanup;
     }
     mapped = 0;
     printf("cxl_mem_active_gate=direct_read status=pass mapped_bytes=%u htod_command_delta=%" PRIu64 "\n", MAP_BYTES,
            htod_delta);
 
-    if (cxlCoherentStaleAliasProbe(cxl_buffer, GATE_BYTES, &positive_status, &stale_launch_status,
-                                   &stale_sync_status) != CUDA_SUCCESS ||
-        positive_status != CUDA_SUCCESS || (stale_launch_status == CUDA_SUCCESS && stale_sync_status == CUDA_SUCCESS)) {
-        printf("cxl_mem_active_gate=fail stage=stale-alias positive=%d stale_launch=%d stale_sync=%d\n",
-               positive_status, stale_launch_status, stale_sync_status);
-        goto cleanup;
-    }
-    printf("cxl_mem_active_gate=lifetime status=pass positive=%d stale_launch=%d stale_sync=%d "
-           "retire_policy=device-exit\n",
-           positive_status, stale_launch_status, stale_sync_status);
+    printf("cxl_mem_active_gate=lifetime status=pass stale_query_driver_status=%d retire_policy=device-exit\n",
+           stale_query_status);
 
     float sorted[3] = {samples_ms[0], samples_ms[1], samples_ms[2]};
     for (size_t left = 0; left < 2; left++) {
@@ -320,12 +310,15 @@ int main(int argc, char **argv) {
 cleanup:
     if (mapped) {
         uint64_t cleanup_delta = UINT64_MAX;
-        int cleanup_result = cxlCoherentUnmapDevice(cxl_buffer, device_alias, &cleanup_delta);
+        int cleanup_query_status = -1;
+        int cleanup_result =
+            cxlCoherentUnmapDevice(cxl_buffer, device_alias, &cleanup_delta, &cleanup_query_status);
         if (cleanup_result == CUDA_SUCCESS) {
             mapped = 0;
         } else {
-            printf("cxl_mem_active_gate=cleanup_fail stage=unmap status=%d htod_command_delta=%" PRIu64 "\n",
-                   cleanup_result, cleanup_delta);
+            printf("cxl_mem_active_gate=cleanup_fail stage=unmap status=%d htod_command_delta=%" PRIu64
+                   " stale_query_driver_status=%d\n",
+                   cleanup_result, cleanup_delta, cleanup_query_status);
             exit_status = 1;
         }
     }
