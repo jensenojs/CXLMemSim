@@ -222,7 +222,6 @@ extern "C" int tiny_cuda_probe_run(void) {
         return 30;
     }
 
-    printf("=== CUDA_RUNTIME_DLOPEN_KERNEL_PROBE_PASS ===\n");
     printf("=== GGML_DLOPEN_PROBE_PASS ===\n");
     return 0;
 }
