@@ -115,6 +115,7 @@ typedef struct {
 void cxl_cuda_test_reset(void);
 int cxl_cuda_test_command_barrier_bursts(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
+void cxl_cuda_test_set_direct_source_enabled(int enabled);
 void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
                                              uint64_t stream_wire);
 CUresult cxl_cuda_test_complete_direct_sources(uint64_t stream_wire,
@@ -232,6 +233,9 @@ static unsigned char cubin_expected_first_byte = 0x80;
 static CUresult batch_result = CUDA_SUCCESS;
 static uint64_t batch_fail_idx = UINT64_MAX;
 static uint64_t batch_success_count = 3;
+static CUresult direct_batch_result = CUDA_SUCCESS;
+static uint64_t direct_batch_fail_idx = UINT64_MAX;
+static uint64_t direct_batch_fragments_enqueued;
 static CUresult source_unregister_result = CUDA_SUCCESS;
 static CUresult dtod_async_result = CUDA_SUCCESS;
 static CUresult coherent_map_result = CUDA_SUCCESS;
@@ -329,6 +333,10 @@ static CUresult fake_execute(uint32_t command) {
         cxl_cuda_test_write_result(1, batch_success_count);
         return batch_result;
     }
+    case CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC:
+        cxl_cuda_test_write_result(0, direct_batch_fail_idx);
+        cxl_cuda_test_write_result(2, direct_batch_fragments_enqueued);
+        return direct_batch_result;
     case CXL_GPU_CMD_GET_TOTAL_MEM:
         cxl_cuda_test_write_result(0, UINT64_C(0x300000000));
         return CUDA_SUCCESS;
@@ -1332,6 +1340,53 @@ static int test_batch_htod_materializes_one_command(void) {
     return 0;
 }
 
+static int test_batch_htod_falls_back_only_before_direct_submission(void) {
+    CUdeviceptr destinations[] = {0x1000, 0x2000, 0x3000};
+    CUdeviceptr sources[] = {
+        (CUdeviceptr)(uintptr_t)batch_source0,
+        (CUdeviceptr)(uintptr_t)batch_source1,
+        (CUdeviceptr)(uintptr_t)batch_source2,
+    };
+    size_t sizes[] = {
+        sizeof(batch_source0), sizeof(batch_source1), sizeof(batch_source2),
+    };
+    CUmemcpyAttributes attributes = {
+        .srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+    };
+    size_t attribute_indices[] = {0};
+    size_t fail_idx = SIZE_MAX;
+    CUstream stream = (CUstream)(uintptr_t)(UINT64_C(1) << 32 | 7);
+
+    cxl_cuda_test_reset();
+    cxl_cuda_test_set_executor(fake_execute);
+    cxl_cuda_test_set_direct_source_enabled(1);
+    command_count = 0;
+    direct_batch_result = CUDA_ERROR_INVALID_VALUE;
+    direct_batch_fail_idx = 1;
+    direct_batch_fragments_enqueued = 0;
+    batch_result = CUDA_SUCCESS;
+    batch_fail_idx = UINT64_MAX;
+    batch_success_count = 3;
+
+    CHECK(cuMemcpyBatchAsync(destinations, sources, sizes, 3, &attributes,
+                             attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_SUCCESS);
+    CHECK(fail_idx == SIZE_MAX);
+    CHECK(command_count == 2);
+    CHECK(commands[0] == CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    CHECK(commands[1] == CXL_GPU_CMD_BATCH_HTOD_ASYNC);
+
+    command_count = 0;
+    direct_batch_fragments_enqueued = 1;
+    CHECK(cuMemcpyBatchAsync(destinations, sources, sizes, 3, &attributes,
+                             attribute_indices, 1, &fail_idx,
+                             stream) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(fail_idx == 1);
+    CHECK(command_count == 1);
+    CHECK(commands[0] == CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
+    return 0;
+}
+
 static int test_coherent_device_map_command_contract(void) {
     uint8_t bar4[8192] = {0};
     void *host_ptr = bar4 + 128;
@@ -1423,6 +1478,7 @@ int main(void) {
            test_launch_reuses_param_layout_until_module_unload() ||
            test_graph_instantiate_with_flags_reuses_existing_command() ||
            test_graph_exec_update_preserves_result_info() || test_batch_htod_materializes_one_command() ||
+           test_batch_htod_falls_back_only_before_direct_submission() ||
            test_coherent_device_map_command_contract() ||
            test_direct_source_completion_unregisters_owned_sources();
 }

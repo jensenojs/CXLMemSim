@@ -2146,6 +2146,10 @@ void cxl_cuda_test_reset(void) {
     context_storage_test_reset();
 }
 
+void cxl_cuda_test_set_direct_source_enabled(int enabled) {
+    g_direct_source_enabled = enabled;
+}
+
 int cxl_cuda_test_command_barrier_bursts(void) {
     pthread_mutex_lock(&g_observation_ledger.lock);
     memset((char *)&g_observation_ledger + offsetof(CXLObservationLedger, active),
@@ -4158,7 +4162,8 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
                                          CUdeviceptr *srcs,
                                          size_t *sizes, size_t count,
                                          size_t *failIdx,
-                                         uint64_t stream_wire) {
+                                         uint64_t stream_wire,
+                                         uint64_t *fragments_enqueued) {
     CXLGPUSourceVirtualRangeV1 *wire_ranges = NULL;
     CXLGPUDirectRangeV1 *direct_ranges = NULL;
     CXLDirectSourcePending *pending = NULL;
@@ -4167,6 +4172,7 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     size_t direct_bytes;
     CUresult result = CUDA_SUCCESS;
 
+    *fragments_enqueued = 0;
     if (count > UINT32_MAX)
         return CUDA_ERROR_INVALID_VALUE;
     wire_ranges = malloc(count * sizeof(*wire_ranges));
@@ -4239,11 +4245,11 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
     result = execute_cmd(CXL_GPU_CMD_SOURCE_REGISTER_BATCH_HTOD_DIRECT_ASYNC);
     if (result != CUDA_SUCCESS) {
         uint64_t failed = reg_read64(CXL_GPU_REG_RESULT0);
-        uint64_t fragments_enqueued = reg_read64(CXL_GPU_REG_RESULT2);
+        *fragments_enqueued = reg_read64(CXL_GPU_REG_RESULT2);
 
         if (failed < count)
             *failIdx = failed;
-        if (fragments_enqueued) {
+        if (*fragments_enqueued) {
             pending->next = g_direct_source_pending;
             g_direct_source_pending = pending;
             pending = NULL;
@@ -4334,6 +4340,7 @@ CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
         return CUDA_ERROR_NOT_SUPPORTED;
 
     if (g_direct_source_enabled) {
+        uint64_t fragments_enqueued = 0;
         for (size_t index = 0; index < count; index++) {
             if (source_bytes > SIZE_MAX - sizes[index]) {
                 *failIdx = index;
@@ -4344,13 +4351,16 @@ CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs,
         async_copy_trace_begin("cuMemcpyBatchAsync", source_bytes, count,
                                hStream, "direct-source");
         result = cuMemcpyBatchDirectAsync(dsts, srcs, sizes, count, failIdx,
-                                          stream_wire);
+                                          stream_wire, &fragments_enqueued);
         OLOG("batch_htod_direct public_sequence=%" PRIu64
              " result=%d fail_idx=%zu ranges=%zu source_bytes=%zu"
              " payload_bytes=0 stream_wire=%" PRIu64 "\n",
              g_async_copy_trace.public_sequence, result, *failIdx, count,
              source_bytes, stream_wire);
-        return async_copy_trace_end(result);
+        result = async_copy_trace_end(result);
+        if (result != CUDA_ERROR_INVALID_VALUE || fragments_enqueued != 0)
+            return result;
+        *failIdx = SIZE_MAX;
     }
 
     table_end = sizeof(CXLGPUBatchHtoDHeader) +
