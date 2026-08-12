@@ -7485,11 +7485,11 @@ int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes, uint64_t request
     return result;
 }
 
-int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias, uint64_t *htod_command_delta,
-                           int *stale_query_driver_status) {
+int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
+                           uint64_t *htod_command_delta) {
     uint64_t offset;
 
-    if (!g_transport.regs || !host_ptr || !device_alias || !htod_command_delta || !stale_query_driver_status)
+    if (!g_transport.regs || !host_ptr || !device_alias || !htod_command_delta)
         return CUDA_ERROR_INVALID_VALUE;
     if (!bar4_pointer_range(host_ptr, 1, &offset))
         return CUDA_ERROR_INVALID_VALUE;
@@ -7498,7 +7498,6 @@ int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias, uint64_t *htod
     reg_write64(CXL_GPU_REG_PARAM1, device_alias);
     CUresult result = execute_cmd(CXL_GPU_CMD_COHERENT_UNMAP_DEVICE);
     *htod_command_delta = reg_read64(CXL_GPU_REG_RESULT0);
-    *stale_query_driver_status = (int)(uint32_t)reg_read64(CXL_GPU_REG_RESULT1);
     cmd_unlock();
     return result;
 }

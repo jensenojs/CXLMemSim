@@ -75,8 +75,7 @@ extern int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes,
                                 uint64_t *device_alias,
                                 int *can_map_host_memory);
 extern int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
-                                  uint64_t *htod_command_delta,
-                                  int *stale_query_driver_status);
+                                  uint64_t *htod_command_delta);
 
 static const char copy_ptx[] =
     ".version 7.0\n"
@@ -146,7 +145,6 @@ int main(int argc, char **argv) {
     CUgraph graph = NULL;
     CUgraphExec graph_exec = NULL;
     uint64_t htod_delta = UINT64_MAX;
-    int stale_query_status = -1;
     float samples_ms[3] = {0.0f, 0.0f, 0.0f};
     double best_gbps = 0.0;
     double median_gbps = 0.0;
@@ -315,19 +313,17 @@ int main(int argc, char **argv) {
     }
     printf("cxl_mem_active_gate=oracle status=pass bytes=%u\n", GATE_BYTES);
 
-    if (cxlCoherentUnmapDevice(cxl_buffer, device_alias, &htod_delta, &stale_query_status) != CUDA_SUCCESS ||
-        htod_delta != 0 || stale_query_status != CUDA_ERROR_INVALID_VALUE) {
-        printf("cxl_mem_active_gate=fail stage=unmap htod_command_delta=%" PRIu64
-               " stale_query_driver_status=%d\n",
-               htod_delta, stale_query_status);
+    if (cxlCoherentUnmapDevice(cxl_buffer, device_alias, &htod_delta) != CUDA_SUCCESS ||
+        htod_delta != 0) {
+        printf("cxl_mem_active_gate=fail stage=unmap htod_command_delta=%" PRIu64 "\n",
+               htod_delta);
         goto cleanup;
     }
     mapped = 0;
     printf("cxl_mem_active_gate=direct_read status=pass mapped_bytes=%u htod_command_delta=%" PRIu64 "\n", MAP_BYTES,
            htod_delta);
 
-    printf("cxl_mem_active_gate=lifetime status=pass stale_query_driver_status=%d retire_policy=device-exit\n",
-           stale_query_status);
+    printf("cxl_mem_active_gate=lifetime status=pass retire_policy=device-exit\n");
 
     float sorted[3] = {samples_ms[0], samples_ms[1], samples_ms[2]};
     for (size_t left = 0; left < 2; left++) {
@@ -354,15 +350,13 @@ int main(int argc, char **argv) {
 cleanup:
     if (mapped) {
         uint64_t cleanup_delta = UINT64_MAX;
-        int cleanup_query_status = -1;
         int cleanup_result =
-            cxlCoherentUnmapDevice(cxl_buffer, device_alias, &cleanup_delta, &cleanup_query_status);
+            cxlCoherentUnmapDevice(cxl_buffer, device_alias, &cleanup_delta);
         if (cleanup_result == CUDA_SUCCESS) {
             mapped = 0;
         } else {
-            printf("cxl_mem_active_gate=cleanup_fail stage=unmap status=%d htod_command_delta=%" PRIu64
-                   " stale_query_driver_status=%d\n",
-                   cleanup_result, cleanup_delta, cleanup_query_status);
+            printf("cxl_mem_active_gate=cleanup_fail stage=unmap status=%d htod_command_delta=%" PRIu64 "\n",
+                   cleanup_result, cleanup_delta);
             exit_status = 1;
         }
     }

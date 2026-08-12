@@ -200,8 +200,7 @@ int cxlCoherentMapDevice(void *host_ptr, uint64_t mapped_bytes,
                          uint64_t request_bytes, uint64_t *device_alias,
                          int *can_map_host_memory);
 int cxlCoherentUnmapDevice(void *host_ptr, uint64_t device_alias,
-                           uint64_t *htod_command_delta,
-                           int *stale_query_driver_status);
+                           uint64_t *htod_command_delta);
 
 #define CHECK(expr)                                                                                                    \
     do {                                                                                                               \
@@ -1339,7 +1338,6 @@ static int test_coherent_device_map_command_contract(void) {
     uint64_t device_alias = 0;
     uint64_t htod_delta = UINT64_MAX;
     int can_map = 0;
-    int stale_query_status = -1;
 
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
@@ -1352,22 +1350,21 @@ static int test_coherent_device_map_command_contract(void) {
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_COHERENT_MAP_DEVICE);
     CHECK(device_alias == UINT64_C(0x12340000) && can_map == 1);
 
-    CHECK(cxlCoherentUnmapDevice(host_ptr, device_alias, &htod_delta, &stale_query_status) == CUDA_SUCCESS);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, device_alias, &htod_delta) == CUDA_SUCCESS);
     CHECK(command_count == 2 && commands[1] == CXL_GPU_CMD_COHERENT_UNMAP_DEVICE);
     CHECK(htod_delta == 0);
-    CHECK(stale_query_status == CUDA_ERROR_INVALID_VALUE);
 
     CHECK(cxlCoherentMapDevice(NULL, 4096, 256, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
     CHECK(cxlCoherentMapDevice(host_ptr, 256, 4096, &device_alias, &can_map) == CUDA_ERROR_INVALID_VALUE);
     CHECK(cxlCoherentMapDevice(bar4 + sizeof(bar4) - 128, 4096, 256, &device_alias, &can_map) ==
           CUDA_ERROR_INVALID_VALUE);
-    CHECK(cxlCoherentUnmapDevice(host_ptr, 0, &htod_delta, &stale_query_status) == CUDA_ERROR_INVALID_VALUE);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, 0, &htod_delta) == CUDA_ERROR_INVALID_VALUE);
     CHECK(command_count == 2);
 
     coherent_map_result = 911;
     CHECK(cxlCoherentMapDevice(host_ptr, 4096, 256, &device_alias, &can_map) == 911);
     coherent_unmap_result = 912;
-    CHECK(cxlCoherentUnmapDevice(host_ptr, UINT64_C(0x12340000), &htod_delta, &stale_query_status) == 912);
+    CHECK(cxlCoherentUnmapDevice(host_ptr, UINT64_C(0x12340000), &htod_delta) == 912);
     CHECK(command_count == 4);
 
     cxl_cuda_test_set_bar4(NULL, 0);
