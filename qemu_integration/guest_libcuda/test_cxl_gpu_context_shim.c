@@ -115,10 +115,7 @@ typedef struct {
 void cxl_cuda_test_reset(void);
 int cxl_cuda_test_command_barrier_bursts(void);
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd));
-void cxl_cuda_test_set_direct_source_lease_releaser(
-    CUresult (*releaser)(uint64_t lease_handle));
 void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
-                                             uint64_t lease_handle,
                                              uint64_t stream_wire);
 CUresult cxl_cuda_test_complete_direct_sources(uint64_t stream_wire,
                                                bool all_streams);
@@ -238,9 +235,6 @@ static uint64_t batch_fail_idx = UINT64_MAX;
 static uint64_t batch_success_count = 3;
 static CUresult source_unregister_result = CUDA_SUCCESS;
 static CUresult dtod_async_result = CUDA_SUCCESS;
-static CUresult lease_release_result = CUDA_SUCCESS;
-static uint64_t released_lease;
-static unsigned int lease_release_count;
 static CUresult coherent_map_result = CUDA_SUCCESS;
 static CUresult coherent_unmap_result = CUDA_SUCCESS;
 
@@ -453,12 +447,6 @@ static CUresult fake_execute(uint32_t command) {
     default:
         return CUDA_ERROR_INVALID_CONTEXT;
     }
-}
-
-static CUresult fake_lease_release(uint64_t lease_handle) {
-    released_lease = lease_handle;
-    lease_release_count++;
-    return lease_release_result;
 }
 
 static int test_query_and_context_sequence(void) {
@@ -1386,50 +1374,33 @@ static int test_coherent_device_map_command_contract(void) {
     return 0;
 }
 
-static int test_direct_source_completion_distinguishes_fused_and_legacy_ownership(void) {
+static int test_direct_source_completion_unregisters_owned_sources(void) {
     cxl_cuda_test_reset();
     cxl_cuda_test_set_executor(fake_execute);
-    cxl_cuda_test_set_direct_source_lease_releaser(fake_lease_release);
     command_count = 0;
     source_unregister_result = CUDA_SUCCESS;
-    lease_release_result = CUDA_SUCCESS;
-    lease_release_count = 0;
-    released_lease = 0;
 
-    cxl_cuda_test_add_direct_source_pending(17, 23, 5);
+    cxl_cuda_test_add_direct_source_pending(17, 5);
     CHECK(cxl_cuda_test_complete_direct_sources(5, false) == CUDA_SUCCESS);
     CHECK(command_count == 1 && commands[0] == CXL_GPU_CMD_SOURCE_UNREGISTER);
-    CHECK(lease_release_count == 1 && released_lease == 23);
     CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
 
     command_count = 0;
-    lease_release_count = 0;
-    cxl_cuda_test_add_direct_source_pending(0, 41, 9);
+    cxl_cuda_test_add_direct_source_pending(0, 9);
     CHECK(cxl_cuda_test_complete_direct_sources(9, false) == CUDA_SUCCESS);
     CHECK(command_count == 0);
-    CHECK(lease_release_count == 1 && released_lease == 41);
     CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
 
     command_count = 0;
-    lease_release_count = 0;
     source_unregister_result = CUDA_ERROR_INVALID_CONTEXT;
-    cxl_cuda_test_add_direct_source_pending(29, 31, 7);
+    cxl_cuda_test_add_direct_source_pending(29, 7);
     CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_ERROR_INVALID_CONTEXT);
     CHECK(command_count == 1);
-    CHECK(lease_release_count == 0);
     CHECK(cxl_cuda_test_direct_source_pending_count() == 1);
 
     source_unregister_result = CUDA_SUCCESS;
-    lease_release_result = CUDA_ERROR_INVALID_VALUE;
-    CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_ERROR_INVALID_VALUE);
-    CHECK(command_count == 2);
-    CHECK(lease_release_count == 1 && released_lease == 31);
-    CHECK(cxl_cuda_test_direct_source_pending_count() == 1);
-
-    lease_release_result = CUDA_SUCCESS;
     CHECK(cxl_cuda_test_complete_direct_sources(7, false) == CUDA_SUCCESS);
     CHECK(command_count == 2);
-    CHECK(lease_release_count == 2 && released_lease == 31);
     CHECK(cxl_cuda_test_direct_source_pending_count() == 0);
     return 0;
 }
@@ -1456,5 +1427,5 @@ int main(void) {
            test_graph_instantiate_with_flags_reuses_existing_command() ||
            test_graph_exec_update_preserves_result_info() || test_batch_htod_materializes_one_command() ||
            test_coherent_device_map_command_contract() ||
-           test_direct_source_completion_distinguishes_fused_and_legacy_ownership();
+           test_direct_source_completion_unregisters_owned_sources();
 }

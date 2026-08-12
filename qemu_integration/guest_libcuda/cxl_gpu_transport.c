@@ -304,47 +304,9 @@ void cxl_gpu_transport_close(CxlGpuTransport *transport) {
         close(transport->pci_fd);
         transport->pci_fd = -1;
     }
-    if (transport->source_fd >= 0) {
-        close(transport->source_fd);
-        transport->source_fd = -1;
-    }
     transport->bar_size = 0;
     transport->unusable = 0;
     transport->pci_bdf[0] = '\0';
-}
-
-int cxl_gpu_transport_open_source(CxlGpuTransport *transport) {
-    char device_path[64];
-
-    if (!transport || transport->source_fd >= 0 || !transport->pci_bdf[0]) {
-        errno = EINVAL;
-        return -1;
-    }
-    for (unsigned int index = 0; index < 256; index++) {
-        char sysfs_path[128];
-        char resolved[PATH_MAX];
-
-        if (snprintf(device_path, sizeof(device_path), "/dev/cxl_gpu%u", index) >=
-            (int)sizeof(device_path) ||
-            snprintf(sysfs_path, sizeof(sysfs_path),
-                     "/sys/class/misc/cxl_gpu%u/device", index) >=
-                (int)sizeof(sysfs_path)) {
-            errno = ENAMETOOLONG;
-            return -1;
-        }
-        if (!realpath(sysfs_path, resolved)) {
-            if (errno == ENOENT)
-                continue;
-            return -1;
-        }
-        const char *leaf = strrchr(resolved, '/');
-        if (!leaf || strcmp(leaf + 1, transport->pci_bdf) != 0)
-            continue;
-        transport->source_fd = open(device_path, O_RDWR | O_CLOEXEC);
-        return transport->source_fd >= 0 ? 0 : -1;
-    }
-    errno = ENODEV;
-    return -1;
 }
 
 int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug) {

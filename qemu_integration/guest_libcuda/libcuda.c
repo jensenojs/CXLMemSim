@@ -27,7 +27,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
-#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -35,7 +34,6 @@
 #include "cxl_gpu_context_state.h"
 #include "cxl_gpu_transport.h"
 #include "cxl_cuda_observation.h"
-#include "include/linux/cxl_type2_accel.h"
 
 /* These symbols are linked into the shim's declared runtime dependency set. */
 extern int LZ4_decompress_safe(const char *src, char *dst, int compressed_size, int dst_capacity);
@@ -253,7 +251,6 @@ static int g_direct_source_enabled = 0;
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
 static uint8_t g_test_bar2[CXL_GPU_CMD_REG_SIZE];
 static CUresult (*g_test_execute_cmd)(uint32_t cmd);
-static CUresult (*g_test_direct_source_lease_releaser)(uint64_t lease_handle);
 #endif
 static uintptr_t g_cudart_placeholder_module = 0x435844465442494eULL; /* "CXDFTBIN" diagnostic placeholder */
 static uintptr_t g_cudart_placeholder_library = 0x4358444c49425259ULL; /* "CXDLIBRY" diagnostic placeholder */
@@ -290,7 +287,6 @@ static CXLStreamCaptureSnapshot *g_stream_capture_snapshots;
 
 typedef struct CXLDirectSourcePending {
     uint64_t source_id;
-    uint64_t lease_handle;
     uint64_t stream_wire;
     struct CXLDirectSourcePending *next;
 } CXLDirectSourcePending;
@@ -354,7 +350,6 @@ CUresult cuStreamSynchronize(CUstream hStream);
 static CUresult cxl_stream_synchronize(CUstream hStream,
                                        CXLGPUStreamSyncReason reason);
 static CUresult cxl_module_load_image(CUmodule *module, const void *image);
-static CUresult direct_source_errno_result(int error);
 static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                                                bool all_streams);
 
@@ -1965,29 +1960,6 @@ static uint64_t observation_cuda_call_begin(const char *symbol,
     return token;
 }
 
-static uint64_t observation_guest_span_begin(uint32_t category,
-                                             const char *operation) {
-    uint64_t token;
-
-    if (!__atomic_load_n(&g_observation_fast_active, __ATOMIC_ACQUIRE))
-        return 0;
-    pthread_mutex_lock(&g_observation_ledger.lock);
-    token = observation_span_begin_locked(
-        category, 0,
-        g_async_copy_trace.active ? g_async_copy_trace.public_sequence : 0,
-        UINT32_MAX, "guest-shim", operation, NULL);
-    pthread_mutex_unlock(&g_observation_ledger.lock);
-    return token;
-}
-
-static void observation_guest_span_end(uint64_t token, CUresult result) {
-    if (!token)
-        return;
-    pthread_mutex_lock(&g_observation_ledger.lock);
-    (void)observation_span_end_locked(token, result, NULL);
-    pthread_mutex_unlock(&g_observation_ledger.lock);
-}
-
 static uint64_t observation_cuda_call_end(uint64_t token, CUresult result,
                                           uint64_t fallback_ns) {
     if (!token)
@@ -2170,7 +2142,6 @@ void cxl_cuda_test_reset(void) {
     g_transport.bar_size = sizeof(g_test_bar2);
     g_initialized = 1;
     g_test_execute_cmd = NULL;
-    g_test_direct_source_lease_releaser = NULL;
     cxl_cuda_context_state_reset();
     context_storage_test_reset();
 }
@@ -2228,11 +2199,6 @@ int cxl_cuda_test_command_barrier_bursts(void) {
 }
 
 void cxl_cuda_test_set_executor(CUresult (*executor)(uint32_t cmd)) { g_test_execute_cmd = executor; }
-
-void cxl_cuda_test_set_direct_source_lease_releaser(
-    CUresult (*releaser)(uint64_t lease_handle)) {
-    g_test_direct_source_lease_releaser = releaser;
-}
 
 void cxl_cuda_test_set_initialized(int initialized) { g_initialized = initialized; }
 
@@ -3608,12 +3574,6 @@ CUresult cuInit(unsigned int flags) {
     if (find_and_map_device() < 0) {
         return CUDA_ERROR_NO_DEVICE;
     }
-    if (g_direct_source_enabled &&
-        cxl_gpu_transport_open_source(&g_transport) != 0) {
-        DLOG("direct source device unavailable: %s\n", strerror(errno));
-        return direct_source_errno_result(errno);
-    }
-
     /* Check device status */
     uint32_t status = reg_read32(CXL_GPU_REG_STATUS);
     if (!(status & CXL_GPU_STATUS_READY)) {
@@ -4153,59 +4113,18 @@ typedef struct CXLBatchHtoDPlanEntry {
     const void *source;
 } CXLBatchHtoDPlanEntry;
 
-static CUresult direct_source_errno_result(int error) {
-    switch (error) {
-    case EINVAL:
-    case EFAULT:
-        return CUDA_ERROR_INVALID_VALUE;
-    case ENOMEM:
-        return CUDA_ERROR_OUT_OF_MEMORY;
-    case ENODEV:
-    case ENOTTY:
-    case EOPNOTSUPP:
-        return CUDA_ERROR_NOT_SUPPORTED;
-    default:
-        return CUDA_ERROR_UNKNOWN;
-    }
-}
-
 static CUresult direct_source_unregister_locked(uint64_t source_id) {
     reg_write64(CXL_GPU_REG_PARAM0, source_id);
     return execute_cmd(CXL_GPU_CMD_SOURCE_UNREGISTER);
 }
 
-static CUresult direct_source_lease_release(uint64_t lease_handle) {
-    uint64_t observation_token = observation_guest_span_begin(
-        CXL_CUDA_OBS_SOURCE_LEASE, "source_lease_release");
-    CUresult result;
-
-#ifdef CXL_GPU_CONTEXT_SHIM_TEST
-    if (g_test_direct_source_lease_releaser) {
-        result = g_test_direct_source_lease_releaser(lease_handle);
-        observation_guest_span_end(observation_token, result);
-        return result;
-    }
-#endif
-    struct cxl_type2_source_release_v1 release = {
-        .version = CXL_TYPE2_SOURCE_UAPI_VERSION,
-        .lease_handle = lease_handle,
-    };
-    result = ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_RELEASE,
-                   &release) == 0
-                 ? CUDA_SUCCESS
-                 : direct_source_errno_result(errno);
-    observation_guest_span_end(observation_token, result);
-    return result;
-}
-
-static CXLDirectSourcePending *direct_source_pending_new(uint64_t source_id, uint64_t lease_handle,
+static CXLDirectSourcePending *direct_source_pending_new(uint64_t source_id,
                                                          uint64_t stream_wire) {
     CXLDirectSourcePending *pending = malloc(sizeof(*pending));
 
     if (pending) {
         *pending = (CXLDirectSourcePending){
             .source_id = source_id,
-            .lease_handle = lease_handle,
             .stream_wire = stream_wire,
         };
     }
@@ -4229,9 +4148,6 @@ static CUresult direct_sources_complete_locked(uint64_t stream_wire,
                 return result;
             pending->source_id = 0;
         }
-        result = direct_source_lease_release(pending->lease_handle);
-        if (result != CUDA_SUCCESS)
-            return result;
         *link = pending->next;
         free(pending);
     }
@@ -4243,25 +4159,19 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
                                          size_t *sizes, size_t count,
                                          size_t *failIdx,
                                          uint64_t stream_wire) {
-    struct cxl_type2_source_range_v1 *kernel_ranges = NULL;
-    struct cxl_type2_source_run_v1 *kernel_runs = NULL;
-    CXLGPUSourceRangeV1 *wire_ranges = NULL;
-    CXLGPUSourceRunV1 *wire_runs = NULL;
+    CXLGPUSourceVirtualRangeV1 *wire_ranges = NULL;
     CXLGPUDirectRangeV1 *direct_ranges = NULL;
     CXLDirectSourcePending *pending = NULL;
-    struct cxl_type2_source_acquire_v1 acquire = {0};
-    struct cxl_type2_source_release_v1 release = {0};
+    uint64_t logical_bytes = 0;
     size_t register_bytes;
     size_t direct_bytes;
     CUresult result = CUDA_SUCCESS;
 
-    if (g_transport.source_fd < 0 || count > CXL_TYPE2_SOURCE_MAX_RANGES)
-        return CUDA_ERROR_NOT_SUPPORTED;
-    kernel_ranges = malloc(count * sizeof(*kernel_ranges));
-    kernel_runs = malloc(CXL_TYPE2_SOURCE_MAX_RUNS * sizeof(*kernel_runs));
+    if (count > UINT32_MAX)
+        return CUDA_ERROR_INVALID_VALUE;
     wire_ranges = malloc(count * sizeof(*wire_ranges));
     direct_ranges = malloc(count * sizeof(*direct_ranges));
-    if (!kernel_ranges || !kernel_runs || !wire_ranges || !direct_ranges) {
+    if (!wire_ranges || !direct_ranges) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
         goto out;
     }
@@ -4274,78 +4184,40 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             result = CUDA_ERROR_INVALID_VALUE;
             goto out;
         }
-        kernel_ranges[index] = (struct cxl_type2_source_range_v1) {
-            .user_address = srcs[index],
+        if (logical_bytes > UINT64_MAX - sizes[index]) {
+            *failIdx = index;
+            result = CUDA_ERROR_INVALID_VALUE;
+            goto out;
+        }
+        logical_bytes += sizes[index];
+        wire_ranges[index] = (CXLGPUSourceVirtualRangeV1) {
+            .guest_virtual_address = srcs[index],
             .length = sizes[index],
         };
     }
-    acquire.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
-    acquire.ranges_ptr = (uintptr_t)kernel_ranges;
-    acquire.runs_ptr = (uintptr_t)kernel_runs;
-    acquire.range_count = count;
-    acquire.run_capacity = CXL_TYPE2_SOURCE_MAX_RUNS;
-    uint64_t lease_observation_token = observation_guest_span_begin(
-        CXL_CUDA_OBS_SOURCE_LEASE, "source_lease_acquire");
-    if (ioctl(g_transport.source_fd, CXL_TYPE2_SOURCE_ACQUIRE, &acquire) != 0) {
-        int source_errno = errno;
-        observation_guest_span_end(
-            lease_observation_token, direct_source_errno_result(source_errno));
-        fprintf(stderr,
-                "[CXL-CUDA] direct_source_acquire_failed errno=%d"
-                " range_count=%zu\n",
-                source_errno, count);
-        for (size_t index = 0; index < count; index++) {
-            fprintf(stderr,
-                    "[CXL-CUDA] direct_source_acquire_range index=%zu"
-                    " source=0x%" PRIx64 " length=%zu\n",
-                    index, (uint64_t)srcs[index], sizes[index]);
-        }
-        result = direct_source_errno_result(source_errno);
-        goto out;
-    }
-    observation_guest_span_end(lease_observation_token, CUDA_SUCCESS);
-    release.version = CXL_TYPE2_SOURCE_UAPI_VERSION;
-    release.lease_handle = acquire.lease_handle;
-
-    if (!acquire.run_count || acquire.run_count > CXL_TYPE2_SOURCE_MAX_RUNS ||
-        count > (SIZE_MAX - sizeof(CXLGPUSourceRegisterV1)) /
+    if (count > (SIZE_MAX - sizeof(CXLGPUSourceRegisterV1)) /
                     sizeof(*wire_ranges)) {
-        result = CUDA_ERROR_UNKNOWN;
-        goto release_lease;
+        result = CUDA_ERROR_INVALID_VALUE;
+        goto out;
     }
     register_bytes = sizeof(CXLGPUSourceRegisterV1) +
                      count * sizeof(*wire_ranges);
-    if (acquire.run_count >
-            (CXL_GPU_BATCH_DATA_SIZE - register_bytes) / sizeof(*wire_runs)) {
+    if (register_bytes > CXL_GPU_BATCH_DATA_SIZE) {
         result = CUDA_ERROR_NOT_SUPPORTED;
-        goto release_lease;
+        goto out;
     }
-    register_bytes += acquire.run_count * sizeof(*wire_runs);
     direct_bytes = count * sizeof(*direct_ranges);
-    _Static_assert(sizeof(*kernel_runs) == sizeof(*wire_runs),
-                   "source run wire layout mismatch");
-    wire_runs = (CXLGPUSourceRunV1 *)kernel_runs;
-    pending = direct_source_pending_new(0, release.lease_handle, stream_wire);
+    pending = direct_source_pending_new(0, stream_wire);
     if (!pending) {
         result = CUDA_ERROR_OUT_OF_MEMORY;
-        goto release_lease;
+        goto out;
     }
 
     CXLGPUSourceRegisterV1 header = {
         .range_count = count,
-        .run_count = acquire.run_count,
-        .lease_handle = acquire.lease_handle,
-        .logical_bytes = acquire.logical_bytes,
-        .unique_dmap_bytes = acquire.unique_dmap_bytes,
+        .logical_bytes = logical_bytes,
     };
     for (size_t index = 0; index < count; index++) {
-        wire_ranges[index] = (CXLGPUSourceRangeV1){
-            .first_run = kernel_ranges[index].first_run,
-            .run_count = kernel_ranges[index].run_count,
-            .first_run_byte_offset =
-                kernel_ranges[index].first_run_byte_offset,
-            .length = kernel_ranges[index].length,
-        };
         direct_ranges[index] = (CXLGPUDirectRangeV1){
             .destination = dsts[index],
             .size = sizes[index],
@@ -4357,11 +4229,9 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
         batch_data_write(0, &header, sizeof(header)) != 0 ||
         batch_data_write(sizeof(header), wire_ranges,
                          count * sizeof(*wire_ranges)) != 0 ||
-        batch_data_write(sizeof(header) + count * sizeof(*wire_ranges),
-                         wire_runs, acquire.run_count * sizeof(*wire_runs)) != 0 ||
         batch_data_write(register_bytes, direct_ranges, direct_bytes) != 0) {
         result = CUDA_ERROR_UNKNOWN;
-        goto unlock_release;
+        goto unlock;
     }
     reg_write64(CXL_GPU_REG_PARAM0, register_bytes);
     reg_write64(CXL_GPU_REG_PARAM1, count);
@@ -4377,41 +4247,31 @@ static CUresult cuMemcpyBatchDirectAsync(CUdeviceptr *dsts,
             pending->next = g_direct_source_pending;
             g_direct_source_pending = pending;
             pending = NULL;
-            release.lease_handle = 0;
             cmd_unlock();
             goto out;
         }
-        goto unlock_release;
+        goto unlock;
     }
     pending->next = g_direct_source_pending;
     g_direct_source_pending = pending;
     pending = NULL;
-    release.lease_handle = 0;
     cmd_unlock();
     goto out;
 
-unlock_release:
+unlock:
     cmd_unlock();
-release_lease:
-    if (release.lease_handle) {
-        CUresult release_result =
-            direct_source_lease_release(release.lease_handle);
-
-        if (release_result != CUDA_SUCCESS && result == CUDA_SUCCESS)
-            result = release_result;
-    }
 out:
     free(pending);
     free(direct_ranges);
     free(wire_ranges);
-    free(kernel_runs);
-    free(kernel_ranges);
     return result;
 }
 
 #ifdef CXL_GPU_CONTEXT_SHIM_TEST
-void cxl_cuda_test_add_direct_source_pending(uint64_t source_id, uint64_t lease_handle, uint64_t stream_wire) {
-    CXLDirectSourcePending *pending = direct_source_pending_new(source_id, lease_handle, stream_wire);
+void cxl_cuda_test_add_direct_source_pending(uint64_t source_id,
+                                             uint64_t stream_wire) {
+    CXLDirectSourcePending *pending = direct_source_pending_new(source_id,
+                                                                stream_wire);
     if (!pending)
         abort();
     pending->next = g_direct_source_pending;

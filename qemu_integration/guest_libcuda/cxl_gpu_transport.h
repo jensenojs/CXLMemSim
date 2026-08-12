@@ -15,7 +15,6 @@ typedef struct {
     volatile CXLGPURAMCommandDescriptor *descriptor;
     volatile uint8_t *batch_data;
     int pci_fd;
-    int source_fd;
     size_t bar_size;
     char pci_bdf[64];
     int debug;
@@ -23,10 +22,9 @@ typedef struct {
 } CxlGpuTransport;
 
 #define CXL_GPU_TRANSPORT_INITIALIZER                                                                                  \
-    {.regs = NULL, .data = NULL, .descriptor = NULL, .batch_data = NULL, .pci_fd = -1, .source_fd = -1, .bar_size = 0, .pci_bdf = "", .debug = 0, .unusable = 0}
+    {.regs = NULL, .data = NULL, .descriptor = NULL, .batch_data = NULL, .pci_fd = -1, .bar_size = 0, .pci_bdf = "", .debug = 0, .unusable = 0}
 
 int cxl_gpu_transport_open(CxlGpuTransport *transport, int debug);
-int cxl_gpu_transport_open_source(CxlGpuTransport *transport);
 void cxl_gpu_transport_close(CxlGpuTransport *transport);
 
 uint32_t cxl_gpu_transport_read32(const CxlGpuTransport *transport, uint32_t offset);
