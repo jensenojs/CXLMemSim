@@ -139,7 +139,8 @@ ccache --show-stats | tee "$EVIDENCE/ccache-after.txt"
 install -m 0755 "$BUILD/cxlmemsim_server" "$PAYLOAD/bin/cxlmemsim_server"
 readonly FMT_RUNTIME=$(ldconfig -p | awk '$1 == "libfmt.so.9" { print $NF; exit }')
 [[ -f $FMT_RUNTIME ]] || { printf 'toolchain does not provide libfmt.so.9\n' >&2; exit 1; }
-install -m 0644 -L "$FMT_RUNTIME" "$PAYLOAD/lib/libfmt.so.9"
+cp --dereference "$FMT_RUNTIME" "$PAYLOAD/lib/libfmt.so.9"
+chmod 0644 "$PAYLOAD/lib/libfmt.so.9"
 install -m 0755 "$GUEST_DIR/cuda-integrity-export-oracle" "$PAYLOAD/bin/cuda-integrity-export-oracle"
 install -m 0755 "$GUEST_DIR/libcuda.so.1" "$PAYLOAD/guest/libcuda.so.1"
 install -m 0755 "$GUEST_DIR/libcxl-loader-audit.so" "$PAYLOAD/guest/libcxl-loader-audit.so"
