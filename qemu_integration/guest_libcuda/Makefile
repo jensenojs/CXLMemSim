@@ -120,7 +120,7 @@ $(CUDA_SHIM): $(CUDA_SHIM_OBJECTS)
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
 		$(LDFLAGS) $(LDLIBS)
 
-libcuda.instrumented.o: libcuda.c cxl_cuda_observation.h cxl_gpu_context_state.h cxl_gpu_transport.h cxl_gpu_cmd.h include/linux/cxl_type2_accel.h
+libcuda.instrumented.o: libcuda.c cxl_cuda_observation.h cxl_gpu_context_state.h cxl_gpu_transport.h cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -fPIC -finstrument-functions -c -o $@ $<
 
 cuda_api_provenance.o: cuda_api_provenance.c
@@ -147,7 +147,7 @@ $(CONTEXT_STATE_TEST): test_cxl_gpu_context_state.c cxl_gpu_context_state.c cxl_
 test-context-state: $(CONTEXT_STATE_TEST)
 	./$(CONTEXT_STATE_TEST)
 
-$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_cuda_observation.h cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h include/linux/cxl_type2_accel.h
+$(CONTEXT_SHIM_TEST): test_cxl_gpu_context_shim.c libcuda.c cxl_cuda_observation.h cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_context_state.h cxl_gpu_transport.c cxl_gpu_transport.h cxl_gpu_cmd.h
 	$(CC) $(CFLAGS) -DCXL_GPU_CONTEXT_SHIM_TEST -Wl,--export-dynamic -o $@ test_cxl_gpu_context_shim.c \
 		libcuda.c -finstrument-functions cuda_api_provenance.c cxl_gpu_context_state.c cxl_gpu_transport.c -ldl \
 		-Wl,--no-as-needed -l:liblz4.so.1 -l:libzstd.so.1 -Wl,--as-needed \
