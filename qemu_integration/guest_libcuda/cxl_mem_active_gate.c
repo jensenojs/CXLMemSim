@@ -18,6 +18,9 @@ typedef void *CUcontext;
 typedef void *CUmodule;
 typedef void *CUfunction;
 typedef void *CUevent;
+typedef void *CUstream;
+typedef void *CUgraph;
+typedef void *CUgraphExec;
 typedef uint64_t CUdeviceptr;
 
 #define CUDA_SUCCESS 0
@@ -26,6 +29,7 @@ typedef uint64_t CUdeviceptr;
 #define MAP_BYTES (128U * 1024U * 1024U)
 #define GATE_MAGIC UINT32_C(0xC1A2A5E)
 #define CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE 38
+#define CU_STREAM_CAPTURE_MODE_GLOBAL 0
 
 extern CUresult cuInit(unsigned int flags);
 extern CUresult cuDeviceGetCount(int *count);
@@ -51,6 +55,16 @@ extern CUresult cuEventRecord(CUevent event, void *stream);
 extern CUresult cuEventSynchronize(CUevent event);
 extern CUresult cuEventElapsedTime(float *milliseconds, CUevent start,
                                    CUevent end);
+extern CUresult cuStreamCreate(CUstream *stream, unsigned int flags);
+extern CUresult cuStreamDestroy_v2(CUstream stream);
+extern CUresult cuStreamBeginCapture(CUstream stream, int mode);
+extern CUresult cuStreamEndCapture(CUstream stream, CUgraph *graph);
+extern CUresult cuGraphInstantiateWithFlags(CUgraphExec *graph_exec,
+                                            CUgraph graph,
+                                            uint64_t flags);
+extern CUresult cuGraphLaunch(CUgraphExec graph_exec, CUstream stream);
+extern CUresult cuGraphExecDestroy(CUgraphExec graph_exec);
+extern CUresult cuGraphDestroy(CUgraph graph);
 
 extern int cxlCoherentAlloc(uint64_t size, void **host_ptr);
 extern int cxlCoherentFree(void *host_ptr);
@@ -90,8 +104,8 @@ static void usage(const char *argv0) {
 static void hint(void) {
     puts("agent_hint=problem=Measure whether one BAR4 host shadow can be read directly by a real GPU without HtoD staging");
     puts("agent_hint=inputs=Existing CXL Type-2 endpoint, coherent pool, CUDA Driver shim and CXLMemSim server");
-    puts("agent_hint=outputs=Capability, direct-read oracle, three bandwidth samples, zero-HtoD and exact pointer-query markers");
-    puts("agent_hint=proves=The mapped host shadow was consumed through a device alias under the bounded L40 contract");
+    puts("agent_hint=outputs=Capability, graph direct-read oracle, three bandwidth samples, zero-HtoD and exact pointer-query markers");
+    puts("agent_hint=proves=One captured graph consumed the mapped host shadow through a device alias under the bounded GPU contract");
     puts("agent_hint=does_not_prove=Kimi object placement, direct GPU-to-CXLMemSim requests, overlap or TPS");
     puts("agent_hint=next=Reject the placement candidate below the fixed bandwidth floor; otherwise design exact Kimi object identity");
 }
@@ -128,13 +142,16 @@ int main(int argc, char **argv) {
     CUdeviceptr device_buffer = 0;
     CUevent start = NULL;
     CUevent end = NULL;
+    CUstream stream = NULL;
+    CUgraph graph = NULL;
+    CUgraphExec graph_exec = NULL;
     uint64_t htod_delta = UINT64_MAX;
     int stale_query_status = -1;
     float samples_ms[3] = {0.0f, 0.0f, 0.0f};
     double best_gbps = 0.0;
     double median_gbps = 0.0;
 
-    printf("cxl_mem_active_gate=begin bytes=%u mapped_bytes=%u source=bar4-coherent-pool consumer=kernel-direct-read\n",
+    printf("cxl_mem_active_gate=begin bytes=%u mapped_bytes=%u source=bar4-coherent-pool consumer=graph-direct-read\n",
            GATE_BYTES, MAP_BYTES);
     if (cuInit(0) != CUDA_SUCCESS) {
         puts("cxl_mem_active_gate=fail stage=cuInit");
@@ -212,19 +229,46 @@ int main(int argc, char **argv) {
 
     uint64_t words = MAP_BYTES / sizeof(uint32_t);
     void *kernel_params[] = {&device_alias, &device_buffer, &words};
+    result = cuStreamCreate(&stream, 0);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuStreamCreate status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuStreamBeginCapture status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuLaunchKernel(function, 4096, 1, 1, 256, 1, 1, 0, stream,
+                            kernel_params, NULL);
+    if (result != CUDA_SUCCESS) {
+        printf("cxl_mem_active_gate=fail stage=cuLaunchKernel-capture status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuStreamEndCapture(stream, &graph);
+    if (result != CUDA_SUCCESS || !graph) {
+        printf("cxl_mem_active_gate=fail stage=cuStreamEndCapture status=%d\n", result);
+        goto cleanup;
+    }
+    result = cuGraphInstantiateWithFlags(&graph_exec, graph, 0);
+    if (result != CUDA_SUCCESS || !graph_exec) {
+        printf("cxl_mem_active_gate=fail stage=cuGraphInstantiate status=%d\n", result);
+        goto cleanup;
+    }
+    puts("cxl_mem_active_gate=graph status=pass nodes=1 launches=4");
     for (size_t run = 0; run < 4; run++) {
         float elapsed_ms = 0.0f;
-        result = cuEventRecord(start, NULL);
+        result = cuEventRecord(start, stream);
         if (result != CUDA_SUCCESS) {
             printf("cxl_mem_active_gate=fail stage=cuEventRecord-start run=%zu status=%d\n", run, result);
             goto cleanup;
         }
-        result = cuLaunchKernel(function, 4096, 1, 1, 256, 1, 1, 0, NULL, kernel_params, NULL);
+        result = cuGraphLaunch(graph_exec, stream);
         if (result != CUDA_SUCCESS) {
-            printf("cxl_mem_active_gate=fail stage=cuLaunchKernel run=%zu status=%d\n", run, result);
+            printf("cxl_mem_active_gate=fail stage=cuGraphLaunch run=%zu status=%d\n", run, result);
             goto cleanup;
         }
-        result = cuEventRecord(end, NULL);
+        result = cuEventRecord(end, stream);
         if (result != CUDA_SUCCESS) {
             printf("cxl_mem_active_gate=fail stage=cuEventRecord-end run=%zu status=%d\n", run, result);
             goto cleanup;
@@ -328,6 +372,18 @@ cleanup:
     }
     if (start && cuEventDestroy_v2(start) != CUDA_SUCCESS) {
         puts("cxl_mem_active_gate=cleanup_fail stage=event-start");
+        exit_status = 1;
+    }
+    if (graph_exec && cuGraphExecDestroy(graph_exec) != CUDA_SUCCESS) {
+        puts("cxl_mem_active_gate=cleanup_fail stage=graph-exec");
+        exit_status = 1;
+    }
+    if (graph && cuGraphDestroy(graph) != CUDA_SUCCESS) {
+        puts("cxl_mem_active_gate=cleanup_fail stage=graph");
+        exit_status = 1;
+    }
+    if (stream && cuStreamDestroy_v2(stream) != CUDA_SUCCESS) {
+        puts("cxl_mem_active_gate=cleanup_fail stage=stream");
         exit_status = 1;
     }
     if (device_buffer && cuMemFree_v2(device_buffer) != CUDA_SUCCESS) {
