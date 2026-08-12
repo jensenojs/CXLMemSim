@@ -34,7 +34,7 @@ exact CXLMemSim checkout + manifests/build-profile.json
 | `run_integrity_export_oracle.sh TABLE LOG_PREFIX` | L40真实Driver、当前guest shim、指定private export table | Driver identity与oracle输出 | 真实Driver和shim对该table的公开可比形状是否一致 |
 | `run_private_export_table_probe.sh [OUTPUT_DIR]` | L40真实Driver、tiny DSO、固定discovery/capture选择 | discovery/capture transcript与identity comparison | 自然到达的private table调用及slot 1输入是什么 |
 
-`pull_component.sh`要求显式选择Docker或Podman，并要求绝对、父目录已存在、叶子不存在且祖先无symlink的work目录。入口exclusive-create并保留失败现场，不删除或复用旧目录。OCI transport使用所选runtime；静态archive/file manifest验证由`component_artifact.py`拥有，runtime ABI与可执行gate在artifact contract的exact toolchain image中以调用用户UID/GID执行。宿主缺少组件动态库时不构成artifact失败，也不触发fallback、安装或`LD_LIBRARY_PATH`补偿。
+`pull_component.sh`要求显式选择Docker或Podman，并要求绝对、父目录已存在、叶子不存在且祖先无symlink的work目录。入口exclusive-create并保留失败现场，不删除或复用旧目录。OCI transport使用所选runtime；静态archive/file manifest验证由`component_artifact.py`拥有，runtime ABI与可执行gate在artifact contract的exact toolchain image中以调用用户UID/GID执行。payload显式携带`libfmt.so.9`；消费端必须从封存experiment artifact设置它的运行目录，不能搜索宿主、安装兼容包或fallback。
 
 ## 证据与边界
 

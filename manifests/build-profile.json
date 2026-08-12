@@ -80,6 +80,11 @@
       "mode": "0755"
     },
     {
+      "path": "lib/libfmt.so.9",
+      "type": "file",
+      "mode": "0644"
+    },
+    {
       "path": "guest/libcuda.so.1",
       "type": "file",
       "mode": "0755"

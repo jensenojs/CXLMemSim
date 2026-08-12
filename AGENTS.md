@@ -41,7 +41,7 @@ CNB `gevico.online/jensen/cxlmemsim`是项目primary，GitHub `jensenojs/CXLMemS
 
 本次candidate迁移只证明CXLMemSim superproject声明的heads、tags及其可达对象可以在CNB和GitHub之间保持一致，不证明`.gitmodules`中的外部仓库、组件构建、OCI制品、Type-2运行或模型正确性。局部迁移结构和验收见`docs/specs/cloud-source-authority.md`。
 
-组件构建、server/guest payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`，首次真实构建与失败链见`docs/evidence/cloud-component-artifact.md`。该制品只携带CXLMemSim拥有的server、guest shim和case控制CLI；运行时系统动态库由消费该制品的固定镜像提供。
+组件构建、server/guest payload、OCI发布与fresh pull边界见`docs/specs/cloud-component-artifact.md`，首次真实构建与失败链见`docs/evidence/cloud-component-artifact.md`。该制品携带CXLMemSim拥有的server、guest shim、case控制CLI，以及toolchain中server需要但本地开发宿主不保证提供的`libfmt.so.9`。glibc、libstdc++等基础系统运行库仍由消费环境提供。实验声明必须显式绑定runtime library，不能从server相邻目录猜路径。
 
 ## Cloud Build and Artifact
 
