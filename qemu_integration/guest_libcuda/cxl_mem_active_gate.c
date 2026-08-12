@@ -145,7 +145,10 @@ int main(int argc, char **argv) {
     CUgraph graph = NULL;
     CUgraphExec graph_exec = NULL;
     uint64_t htod_delta = UINT64_MAX;
+    float direct_samples_ms[3] = {0.0f, 0.0f, 0.0f};
     float samples_ms[3] = {0.0f, 0.0f, 0.0f};
+    double direct_best_gbps = 0.0;
+    double direct_median_gbps = 0.0;
     double best_gbps = 0.0;
     double median_gbps = 0.0;
 
@@ -231,6 +234,38 @@ int main(int argc, char **argv) {
     if (result != CUDA_SUCCESS) {
         printf("cxl_mem_active_gate=fail stage=cuStreamCreate status=%d\n", result);
         goto cleanup;
+    }
+    for (size_t run = 0; run < 4; run++) {
+        float elapsed_ms = 0.0f;
+        result = cuEventRecord(start, stream);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventRecord-direct-start run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuLaunchKernel(function, 4096, 1, 1, 256, 1, 1, 0, stream,
+                                kernel_params, NULL);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuLaunchKernel-direct run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventRecord(end, stream);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventRecord-direct-end run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventSynchronize(end);
+        if (result != CUDA_SUCCESS) {
+            printf("cxl_mem_active_gate=fail stage=cuEventSynchronize-direct run=%zu status=%d\n", run, result);
+            goto cleanup;
+        }
+        result = cuEventElapsedTime(&elapsed_ms, start, end);
+        if (result != CUDA_SUCCESS || elapsed_ms <= 0.0f) {
+            printf("cxl_mem_active_gate=fail stage=direct-elapsed run=%zu status=%d elapsed_ms=%.6f\n",
+                   run, result, elapsed_ms);
+            goto cleanup;
+        }
+        if (run > 0)
+            direct_samples_ms[run - 1] = elapsed_ms;
     }
     result = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL);
     if (result != CUDA_SUCCESS) {
@@ -325,9 +360,15 @@ int main(int argc, char **argv) {
 
     printf("cxl_mem_active_gate=lifetime status=pass retire_policy=device-exit\n");
 
+    float direct_sorted[3] = {direct_samples_ms[0], direct_samples_ms[1], direct_samples_ms[2]};
     float sorted[3] = {samples_ms[0], samples_ms[1], samples_ms[2]};
     for (size_t left = 0; left < 2; left++) {
         for (size_t right = left + 1; right < 3; right++) {
+            if (direct_sorted[right] < direct_sorted[left]) {
+                float tmp = direct_sorted[left];
+                direct_sorted[left] = direct_sorted[right];
+                direct_sorted[right] = tmp;
+            }
             if (sorted[right] < sorted[left]) {
                 float tmp = sorted[left];
                 sorted[left] = sorted[right];
@@ -335,9 +376,15 @@ int main(int argc, char **argv) {
             }
         }
     }
+    direct_best_gbps = ((double)MAP_BYTES / 1000000000.0) / ((double)direct_sorted[0] / 1000.0);
+    direct_median_gbps = ((double)MAP_BYTES / 1000000000.0) / ((double)direct_sorted[1] / 1000.0);
     best_gbps = ((double)MAP_BYTES / 1000000000.0) / ((double)sorted[0] / 1000.0);
     median_gbps = ((double)MAP_BYTES / 1000000000.0) / ((double)sorted[1] / 1000.0);
-    printf("cxl_mem_active_gate=bandwidth status=measured sample_ms=%.6f,%.6f,%.6f best_gbps=%.6f median_gbps=%.6f "
+    printf("cxl_mem_active_gate=direct_bandwidth status=measured sample_ms=%.6f,%.6f,%.6f best_gbps=%.6f "
+           "median_gbps=%.6f\n",
+           direct_samples_ms[0], direct_samples_ms[1], direct_samples_ms[2], direct_best_gbps,
+           direct_median_gbps);
+    printf("cxl_mem_active_gate=bandwidth status=measured consumer=graph sample_ms=%.6f,%.6f,%.6f best_gbps=%.6f median_gbps=%.6f "
            "required_gbps=22.678274\n",
            samples_ms[0], samples_ms[1], samples_ms[2], best_gbps, median_gbps);
     if (best_gbps < 22.678274) {
